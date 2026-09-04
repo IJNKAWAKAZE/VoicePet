@@ -1,0 +1,1613 @@
+import asyncio
+
+import pytest
+
+from core.asr import AsrTranscriptionError
+from core.audio_types import AudioDeviceError
+from core.cancellation import CancellationToken
+from core.coordinator import Coordinator
+from core.event_bus import EventBus
+from core.events import (
+    ApprovalRequested,
+    ConversationPhase,
+    ErrorSeverity,
+    RuntimeErrorEvent,
+    SpeakRequested,
+    StateChanged,
+    TextDelta,
+    TranscriptReady,
+    WakeCommandPending,
+)
+from core.llm import (
+    LlmCompleted,
+    LlmNetworkError,
+    LlmTextDelta,
+    LlmToolCall,
+)
+from core.session_context import SessionContext
+from core.state_machine import ConversationStateMachine
+from core.tts import SynthesizedAudio, TtsPlaybackError, TtsSynthesisError
+
+
+async def wait_until(predicate, attempts: int = 100):
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition was not reached")
+
+
+class ImmediateAudio:
+    def __init__(self) -> None:
+        self.calls: list[CancellationToken] = []
+
+    async def record_until_silence(self, token: CancellationToken) -> bytes:
+        self.calls.append(token)
+        return f"audio-{len(self.calls)}".encode()
+
+
+class SourceAwareAudio:
+    def __init__(self) -> None:
+        self.include_preroll = []
+
+    async def record_until_silence(self, token, *, include_preroll=True):
+        token.throw_if_cancelled()
+        self.include_preroll.append(include_preroll)
+        return b"audio"
+
+
+class SequenceTranscript:
+    def __init__(self, texts):
+        self.texts = iter(texts)
+        self.calls = 0
+
+    async def transcribe(self, audio, token):
+        del audio
+        token.throw_if_cancelled()
+        self.calls += 1
+        return next(self.texts)
+
+
+class ControlledTranscript:
+    def __init__(self, results: list[str]) -> None:
+        self.results = results
+        self.releases = [asyncio.Event() for _ in results]
+        self.calls: list[tuple[bytes, CancellationToken]] = []
+
+    async def transcribe(
+        self,
+        audio: bytes,
+        token: CancellationToken,
+    ) -> str:
+        index = len(self.calls)
+        self.calls.append((audio, token))
+        await self.releases[index].wait()
+        return self.results[index]
+
+
+class NeverEndingAudio:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.task_cancelled = asyncio.Event()
+
+    async def record_until_silence(self, token: CancellationToken) -> bytes:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.task_cancelled.set()
+            raise
+
+
+class UnexpectedTranscript:
+    async def transcribe(
+        self,
+        audio: bytes,
+        token: CancellationToken,
+    ) -> str:
+        raise AssertionError("transcribe must not be called")
+
+
+class EmptyAudio:
+    async def record_until_silence(self, token: CancellationToken) -> bytes:
+        return b""
+
+
+class FailingAudio:
+    async def record_until_silence(self, token: CancellationToken) -> bytes:
+        raise AudioDeviceError("microphone disconnected")
+
+
+class DelayedFirstAudioFailure:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def record_until_silence(self, token: CancellationToken) -> bytes:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            raise AudioDeviceError("stale microphone failure")
+        self.second_started.set()
+        await token.wait()
+        token.throw_if_cancelled()
+        raise AssertionError("cancelled recording must not continue")
+
+
+class FailingTranscript:
+    async def transcribe(
+        self,
+        audio: bytes,
+        token: CancellationToken,
+    ) -> str:
+        raise AsrTranscriptionError("model inference failed")
+
+
+class BlockingTranscript:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def transcribe(self, audio, token):
+        del audio, token
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+class DelayedFirstTranscriptFailure:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def transcribe(
+        self,
+        audio: bytes,
+        token: CancellationToken,
+    ) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            raise AsrTranscriptionError("stale model failure")
+        self.second_started.set()
+        await token.wait()
+        token.throw_if_cancelled()
+        raise AssertionError("cancelled transcript must not continue")
+
+
+class ScriptedLlm:
+    def __init__(self, events) -> None:
+        self.events = tuple(events)
+        self.calls = []
+
+    async def stream(self, request, token):
+        self.calls.append((request, token))
+        for event in self.events:
+            await asyncio.sleep(0)
+            yield event
+
+
+class FailingLlm:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream(self, request, token):
+        self.calls.append((request, token))
+        raise LlmNetworkError("service unavailable")
+        yield
+
+
+class BlockingLlm:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def stream(self, request, token):
+        del request, token
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if False:
+            yield
+
+
+class DelayedFirstLlm:
+    def __init__(self) -> None:
+        self.calls = []
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def stream(self, request, token):
+        index = len(self.calls)
+        self.calls.append((request, token))
+        if index == 0:
+            self.first_started.set()
+            await self.release_first.wait()
+            yield LlmTextDelta("stale")
+            yield LlmCompleted("old-response", 1, 1)
+            return
+        self.second_started.set()
+        yield LlmTextDelta("fresh")
+        yield LlmCompleted("new-response", 1, 1)
+
+
+class RecordingSynthesizer:
+    def __init__(self, error=None) -> None:
+        self.error = error
+        self.calls = []
+
+    async def synthesize(self, text, token):
+        self.calls.append((text, token))
+        if self.error is not None:
+            raise self.error
+        return SynthesizedAudio(
+            f"audio:{text}".encode(),
+            "audio/wav",
+            ".wav",
+            "test-tts",
+        )
+
+
+class RecordingPlayer:
+    def __init__(self, error=None) -> None:
+        self.error = error
+        self.calls = []
+
+    async def play(self, audio, token):
+        self.calls.append((audio, token))
+        if self.error is not None:
+            raise self.error
+
+
+class BlockingSynthesizer:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def synthesize(self, text, token):
+        del text, token
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+class BlockingPlayer:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def play(self, audio, token):
+        del audio, token
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+class CooperativeBlockingPlayer:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def play(self, audio, token):
+        del audio
+        self.started.set()
+        while True:
+            if token.is_cancelled:
+                self.cancelled.set()
+                token.throw_if_cancelled()
+            await asyncio.sleep(0)
+
+
+class RecordingSessionArchive:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+        self.discarded = []
+
+    def archive_turn(self, turn_id, user_text, assistant_text):
+        self.calls.append((turn_id, user_text, assistant_text))
+        if self.error is not None:
+            raise self.error
+        return type("Record", (), {"turn_id": turn_id})()
+
+    def discard_turn(self, turn_id):
+        self.discarded.append(turn_id)
+        return True
+
+
+class DelayedFirstSynthesizer(RecordingSynthesizer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def synthesize(self, text, token):
+        if not self.calls:
+            self.calls.append((text, token))
+            self.first_started.set()
+            await self.release_first.wait()
+            return SynthesizedAudio(
+                b"stale-audio",
+                "audio/wav",
+                ".wav",
+                "test-tts",
+            )
+        return await super().synthesize(text, token)
+
+
+def test_spoken_notice_bypasses_recording_transcript_and_llm():
+    async def scenario():
+        audio = ImmediateAudio()
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        bus = EventBus()
+        states = []
+        speaks = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(SpeakRequested, speaks.append)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+        )
+
+        turn_id = await coordinator.speak_notice("请先配置 API Key")
+
+        assert [event.current for event in states] == [
+            ConversationPhase.SYNTHESIZING,
+            ConversationPhase.SPEAKING,
+            ConversationPhase.IDLE,
+        ]
+        assert all(event.turn_id == turn_id for event in states)
+        assert [event.text for event in speaks] == ["请先配置 API Key"]
+        assert [text for text, _ in synthesizer.calls] == ["请先配置 API Key"]
+        assert len(player.calls) == 1
+        assert audio.calls == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_spoken_notice_rejects_a_second_active_notice():
+    async def scenario():
+        synthesizer = BlockingSynthesizer()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            UnexpectedTranscript(),
+            EventBus(),
+            speech_synthesizer=synthesizer,
+            audio_player=RecordingPlayer(),
+            shutdown_timeout=0.01,
+        )
+
+        assert hasattr(coordinator, "speak_notice")
+        first = asyncio.create_task(coordinator.speak_notice("第一条提示"))
+        await synthesizer.started.wait()
+        with pytest.raises(RuntimeError, match="正在"):
+            await coordinator.speak_notice("第二条提示")
+        await coordinator.stop()
+        await first
+
+    asyncio.run(scenario())
+
+
+def test_normal_turn_uses_distinct_operation_ids_and_reaches_thinking():
+    async def scenario():
+        audio = ImmediateAudio()
+        transcript = ControlledTranscript(["  hello  "])
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        transcripts = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TranscriptReady, transcripts.append)
+        coordinator = Coordinator(audio, transcript, bus, machine)
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.THINKING)
+
+        assert [event.current for event in states] == [
+            ConversationPhase.LISTENING,
+            ConversationPhase.TRANSCRIBING,
+            ConversationPhase.THINKING,
+        ]
+        assert sum(
+            event.current is ConversationPhase.LISTENING for event in states
+        ) == 1
+        assert all(event.turn_id == turn_id for event in states)
+        assert transcripts[0].turn_id == turn_id
+        assert transcripts[0].text == "hello"
+        assert states[0].correlation_id != states[1].correlation_id
+        assert transcripts[0].correlation_id == states[1].correlation_id
+        assert states[2].correlation_id == states[1].correlation_id
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_starts_replacement_before_old_transcript_finishes():
+    async def scenario():
+        audio = ImmediateAudio()
+        transcript = ControlledTranscript(["stale", "fresh"])
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        transcripts = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TranscriptReady, transcripts.append)
+        coordinator = Coordinator(audio, transcript, bus, machine)
+
+        old_turn = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        old_token = transcript.calls[0][1]
+
+        new_turn = await coordinator.interrupt()
+        await wait_until(lambda: len(transcript.calls) == 2)
+
+        assert new_turn != old_turn
+        assert old_token.is_cancelled
+        assert not transcript.calls[1][1].is_cancelled
+        listening = [
+            event for event in states
+            if event.current is ConversationPhase.LISTENING
+        ]
+        assert [event.turn_id for event in listening] == [old_turn, new_turn]
+        assert listening[0].correlation_id != listening[1].correlation_id
+
+        transcript.releases[0].set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert all(event.turn_id != old_turn for event in transcripts)
+        assert machine.turn_id == new_turn
+
+        transcript.releases[1].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.THINKING)
+        assert [(event.turn_id, event.text) for event in transcripts] == [
+            (new_turn, "fresh")
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_blank_transcript_returns_to_idle_without_transcript_event():
+    async def scenario():
+        audio = ImmediateAudio()
+        transcript = ControlledTranscript(["   "])
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        transcripts = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TranscriptReady, transcripts.append)
+        coordinator = Coordinator(audio, transcript, bus, machine)
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert transcripts == []
+        assert states[-1].current is ConversationPhase.IDLE
+        assert machine.turn_id is None
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_wake_source_acknowledges_then_records_without_preroll():
+    async def scenario():
+        bus = EventBus()
+        transcripts = []
+        pending = []
+        speaks = []
+        bus.subscribe(TranscriptReady, transcripts.append)
+        bus.subscribe(WakeCommandPending, pending.append)
+        bus.subscribe(SpeakRequested, speaks.append)
+        audio = SourceAwareAudio()
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        coordinator = Coordinator(
+            audio,
+            SequenceTranscript(["打开设置"]),
+            bus,
+            wake_keyword="你好，小蓝",
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+        )
+
+        turn_id = await coordinator.start_listening("wake_word")
+        await wait_until(lambda: len(transcripts) == 1)
+
+        assert transcripts[0].turn_id == turn_id
+        assert transcripts[0].text == "打开设置"
+        assert len(pending) == 1
+        assert [event.text for event in speaks] == ["我在，请说"]
+        assert [text for text, _ in synthesizer.calls] == ["我在，请说"]
+        assert len(player.calls) == 1
+        assert audio.include_preroll == [False]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_click_source_preserves_matching_keyword_in_transcript():
+    async def scenario():
+        bus = EventBus()
+        transcripts = []
+        bus.subscribe(TranscriptReady, transcripts.append)
+        coordinator = Coordinator(
+            SourceAwareAudio(),
+            SequenceTranscript(["你好小蓝，打开设置"]),
+            bus,
+            wake_keyword="你好，小蓝",
+        )
+
+        await coordinator.start_listening("click")
+        await wait_until(lambda: len(transcripts) == 1)
+
+        assert transcripts[0].text == "你好小蓝，打开设置"
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_empty_wake_command_returns_to_idle_without_starting_another_recording():
+    async def scenario():
+        bus = EventBus()
+        pending = []
+        bus.subscribe(WakeCommandPending, pending.append)
+        audio = SourceAwareAudio()
+        transcript = SequenceTranscript([""])
+        coordinator = Coordinator(
+            audio,
+            transcript,
+            bus,
+            wake_keyword="你好，小蓝",
+        )
+
+        first_turn = await coordinator.start_listening("wake_word")
+        await wait_until(lambda: transcript.calls == 1)
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert len(pending) == 1
+        assert pending[0].turn_id == first_turn
+        assert audio.include_preroll == [False]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_stop_forces_uncooperative_task_and_rejects_future_work():
+    async def scenario():
+        audio = NeverEndingAudio()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            machine,
+            shutdown_timeout=0.01,
+        )
+
+        await coordinator.start_listening()
+        await audio.started.wait()
+        event_count = len(states)
+        await coordinator.stop()
+        await coordinator.stop()
+
+        assert audio.task_cancelled.is_set()
+        assert machine.phase is ConversationPhase.IDLE
+        assert machine.turn_id is None
+        assert len(states) == event_count
+        with pytest.raises(RuntimeError, match="coordinator is stopped"):
+            await coordinator.start_listening()
+        with pytest.raises(RuntimeError, match="coordinator is stopped"):
+            await coordinator.interrupt()
+
+    asyncio.run(scenario())
+
+
+def test_state_subscriber_failure_does_not_leave_listening_without_task():
+    async def scenario():
+        audio = ImmediateAudio()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+
+        def failing_subscriber(event):
+            raise ValueError(event.current.value)
+
+        bus.subscribe(StateChanged, failing_subscriber)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            machine,
+        )
+
+        with pytest.raises(ExceptionGroup):
+            await coordinator.start_listening()
+        await wait_until(lambda: len(audio.calls) == 1)
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_empty_audio_returns_to_idle_without_calling_transcript_adapter():
+    async def scenario():
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        transcripts = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TranscriptReady, transcripts.append)
+        coordinator = Coordinator(
+            EmptyAudio(),
+            UnexpectedTranscript(),
+            bus,
+            machine,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert [event.current for event in states] == [
+            ConversationPhase.LISTENING,
+            ConversationPhase.IDLE,
+        ]
+        assert transcripts == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_current_audio_error_is_published_and_returns_to_idle():
+    async def scenario():
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        errors = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        coordinator = Coordinator(
+            FailingAudio(),
+            UnexpectedTranscript(),
+            bus,
+            machine,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(errors) == 1)
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert len(errors) == 1
+        assert errors[0].turn_id == turn_id
+        assert errors[0].correlation_id == states[0].correlation_id
+        assert errors[0].code == "audio.device"
+        assert errors[0].component == "audio"
+        assert errors[0].severity is ErrorSeverity.WARNING
+        assert errors[0].retryable is True
+        assert errors[0].user_action_required is True
+        assert errors[0].safe_message == (
+            "麦克风设备不可用，请检查系统权限和设备连接"
+        )
+        assert errors[0].diagnostic_context == {
+            "exception_type": "AudioDeviceError"
+        }
+        assert "microphone disconnected" not in repr(errors[0])
+        assert [event.current for event in states[-2:]] == [
+            ConversationPhase.RECOVERING,
+            ConversationPhase.IDLE,
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_stale_audio_error_after_interrupt_is_discarded():
+    async def scenario():
+        audio = DelayedFirstAudioFailure()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        errors = []
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            machine,
+        )
+
+        old_turn = await coordinator.start_listening()
+        await audio.first_started.wait()
+        new_turn = await coordinator.interrupt()
+        await audio.second_started.wait()
+        audio.release_first.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert old_turn != new_turn
+        assert machine.turn_id == new_turn
+        assert machine.phase is ConversationPhase.LISTENING
+        assert errors == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_current_asr_error_uses_transcription_id_and_returns_to_idle():
+    async def scenario():
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        errors = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            FailingTranscript(),
+            bus,
+            machine,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(errors) == 1)
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        transcribing = next(
+            event
+            for event in states
+            if event.current is ConversationPhase.TRANSCRIBING
+        )
+        assert len(errors) == 1
+        assert errors[0].turn_id == turn_id
+        assert errors[0].correlation_id == transcribing.correlation_id
+        assert errors[0].code == "asr.transcription"
+        assert errors[0].component == "asr"
+        assert errors[0].severity is ErrorSeverity.WARNING
+        assert errors[0].retryable is True
+        assert errors[0].user_action_required is False
+        assert errors[0].safe_message == "语音识别暂时失败，请重试"
+        assert errors[0].diagnostic_context == {
+            "exception_type": "AsrTranscriptionError"
+        }
+        assert "model inference failed" not in repr(errors[0])
+        assert [event.current for event in states[-2:]] == [
+            ConversationPhase.RECOVERING,
+            ConversationPhase.IDLE,
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_stale_asr_error_after_interrupt_is_discarded():
+    async def scenario():
+        transcript = DelayedFirstTranscriptFailure()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        errors = []
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+        )
+
+        old_turn = await coordinator.start_listening()
+        await transcript.first_started.wait()
+        new_turn = await coordinator.interrupt()
+        await transcript.second_started.wait()
+        transcript.release_first.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert old_turn != new_turn
+        assert machine.turn_id == new_turn
+        assert machine.phase is ConversationPhase.TRANSCRIBING
+        assert errors == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_llm_uses_distinct_operation_id_and_publishes_ordered_deltas():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        llm = ScriptedLlm(
+            [
+                LlmTextDelta("你"),
+                LlmTextDelta("好"),
+                LlmCompleted("response-1", 2, 2),
+            ]
+        )
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        transcripts = []
+        deltas = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TranscriptReady, transcripts.append)
+        bus.subscribe(TextDelta, deltas.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.response_text == "你好")
+
+        assert [event.text for event in deltas] == ["你", "好"]
+        assert all(event.turn_id == turn_id for event in deltas)
+        assert len({event.correlation_id for event in deltas}) == 1
+        assert deltas[0].correlation_id != transcripts[0].correlation_id
+        assert llm.calls[0][0].input_text == "hello"
+        assert machine.phase is ConversationPhase.IDLE
+        assert machine.turn_id is None
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_second_turn_includes_first_complete_turn_without_current_input():
+    async def scenario():
+        transcript = ControlledTranscript(["第一问", "第二问"])
+        llm = ScriptedLlm(
+            [LlmTextDelta("第一答"), LlmCompleted("response", 1, 1)]
+        )
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            llm_provider=llm,
+            session_context=SessionContext(),
+            speech_synthesizer=RecordingSynthesizer(),
+            audio_player=RecordingPlayer(),
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 2)
+        transcript.releases[1].set()
+        await wait_until(lambda: len(llm.calls) == 2)
+
+        second_request = llm.calls[1][0]
+        assert second_request.input_text == "第二问"
+        assert second_request.history == (
+            {"role": "user", "content": "第一问"},
+            {"role": "assistant", "content": "第一答"},
+        )
+        assert all(
+            item.get("content") != "第二问" for item in second_request.history
+        )
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_final_llm_reply_is_archived_once_without_blocking_tts():
+    async def scenario():
+        transcript = ControlledTranscript(["第一问"])
+        archive = RecordingSessionArchive()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("第一答"), LlmCompleted("response", 1, 1)]
+            ),
+            session_archive=archive,
+            speech_synthesizer=RecordingSynthesizer(),
+            audio_player=RecordingPlayer(),
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert archive.calls == [(str(turn_id), "第一问", "第一答")]
+        assert archive.discarded == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_session_archive_failure_does_not_suppress_final_reply():
+    async def scenario():
+        transcript = ControlledTranscript(["问题"])
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
+            ),
+            session_archive=RecordingSessionArchive(RuntimeError("disk")),
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.response_text == "回复")
+        await asyncio.sleep(0.01)
+
+        assert coordinator.phase is ConversationPhase.IDLE
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_llm_tool_call_requests_approval_and_enters_awaiting_approval():
+    async def scenario():
+        transcript = ControlledTranscript(["open calculator"])
+        llm = ScriptedLlm(
+            [
+                LlmToolCall("call-1", "open_app", {"name": "calc"}),
+                LlmCompleted("response-1", 5, 2),
+            ]
+        )
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        approvals = []
+        states = []
+        bus.subscribe(ApprovalRequested, approvals.append)
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(
+            lambda: machine.phase is ConversationPhase.AWAITING_APPROVAL
+        )
+
+        assert len(approvals) == 1
+        assert approvals[0].turn_id == turn_id
+        assert approvals[0].tool_call_id == "call-1"
+        assert "open_app" in approvals[0].summary
+        assert states[-1].correlation_id == approvals[0].correlation_id
+        assert states[-1].current is ConversationPhase.AWAITING_APPROVAL
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_llm_error_is_published_and_returns_to_idle():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        llm = FailingLlm()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        errors = []
+        states = []
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: len(errors) == 1)
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert len(errors) == 1
+        assert errors[0].code == "llm.network"
+        assert errors[0].component == "llm"
+        assert errors[0].severity is ErrorSeverity.WARNING
+        assert errors[0].retryable is True
+        assert errors[0].user_action_required is False
+        assert errors[0].safe_message == "LLM 网络暂时不可用，请稍后重试"
+        assert errors[0].diagnostic_context == {
+            "exception_type": "LlmNetworkError"
+        }
+        assert "service unavailable" not in repr(errors[0])
+        thinking = next(
+            event
+            for event in states
+            if event.current is ConversationPhase.THINKING
+        )
+        assert errors[0].correlation_id != thinking.correlation_id
+        assert states[-1].correlation_id == errors[0].correlation_id
+        assert [event.current for event in states[-2:]] == [
+            ConversationPhase.RECOVERING,
+            ConversationPhase.IDLE,
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_discards_stale_llm_stream_events():
+    async def scenario():
+        transcript = ControlledTranscript(["old", "new"])
+        llm = DelayedFirstLlm()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        deltas = []
+        bus.subscribe(TextDelta, deltas.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+        )
+
+        old_turn = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await llm.first_started.wait()
+
+        new_turn = await coordinator.interrupt()
+        await wait_until(lambda: len(transcript.calls) == 2)
+        transcript.releases[1].set()
+        await llm.second_started.wait()
+        llm.release_first.set()
+        await wait_until(lambda: coordinator.response_text == "fresh")
+
+        assert old_turn != new_turn
+        assert [(event.turn_id, event.text) for event in deltas] == [
+            (new_turn, "fresh")
+        ]
+        assert machine.turn_id is None
+        assert machine.phase is ConversationPhase.IDLE
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_never_archives_stale_llm_completion():
+    async def scenario():
+        transcript = ControlledTranscript(["旧问题", "新问题"])
+        llm = DelayedFirstLlm()
+        session = SessionContext()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            llm_provider=llm,
+            session_context=session,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await llm.first_started.wait()
+
+        await coordinator.interrupt()
+        await wait_until(lambda: len(transcript.calls) == 2)
+        transcript.releases[1].set()
+        await wait_until(lambda: coordinator.response_text == "fresh")
+        llm.release_first.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert session.build_history() == (
+            {"role": "user", "content": "新问题"},
+            {"role": "assistant", "content": "fresh"},
+        )
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_tts_synthesizes_sentences_and_completes_turn_in_order():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        llm = ScriptedLlm(
+            [
+                LlmTextDelta("第一句。第二"),
+                LlmTextDelta("句！尾巴"),
+                LlmCompleted("response-1", 2, 3),
+            ]
+        )
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        deltas = []
+        speaks = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TextDelta, deltas.append)
+        bus.subscribe(SpeakRequested, speaks.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert [call[0] for call in synthesizer.calls] == [
+            "第一句。第二句！尾巴"
+        ]
+        assert [call[0].data for call in player.calls] == [
+            "audio:第一句。第二句！尾巴".encode()
+        ]
+        assert [event.text for event in speaks] == [
+            "第一句。第二句！尾巴"
+        ]
+        assert all(event.turn_id == turn_id for event in speaks)
+        synthesis = next(
+            event
+            for event in states
+            if event.current is ConversationPhase.SYNTHESIZING
+        )
+        speaking = next(
+            event
+            for event in states
+            if event.current is ConversationPhase.SPEAKING
+        )
+        assert synthesis.correlation_id == speaking.correlation_id
+        assert synthesis.correlation_id == speaks[0].correlation_id
+        assert synthesis.correlation_id != deltas[0].correlation_id
+        assert [event.current for event in states[-3:]] == [
+            ConversationPhase.SYNTHESIZING,
+            ConversationPhase.SPEAKING,
+            ConversationPhase.IDLE,
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_disabled_speech_skips_tts_and_completes_reply():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        bus = EventBus()
+        states = []
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("静音回复"), LlmCompleted("response-1", 1, 1)]
+            ),
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+            speech_enabled=False,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert coordinator.response_text == "静音回复"
+        assert synthesizer.calls == []
+        assert player.calls == []
+        assert states[-1].current is ConversationPhase.IDLE
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_disabling_speech_cancels_playback_and_allows_later_reenable():
+    async def scenario():
+        transcript = ControlledTranscript(["第一轮", "第二轮"])
+        player = CooperativeBlockingPlayer()
+        bus = EventBus()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("保留文字"), LlmCompleted("response-1", 1, 1)]
+            ),
+            speech_synthesizer=RecordingSynthesizer(),
+            audio_player=player,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await player.started.wait()
+        await coordinator.set_speech_enabled(False)
+        await player.cancelled.wait()
+
+        assert coordinator.phase is ConversationPhase.IDLE
+        assert coordinator.response_text == "保留文字"
+
+        await coordinator.set_speech_enabled(True)
+        assert coordinator.speech_enabled is True
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_tts_converts_completed_markdown_without_changing_text_events():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        llm = ScriptedLlm(
+            [
+                LlmTextDelta("**重要"),
+                LlmTextDelta(
+                    "**：[说明](https://example.com)。版本是 3.12.14。"
+                ),
+                LlmCompleted("response-1", 2, 3),
+            ]
+        )
+        synthesizer = RecordingSynthesizer()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        deltas = []
+        speaks = []
+        bus.subscribe(TextDelta, deltas.append)
+        bus.subscribe(SpeakRequested, speaks.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=llm,
+            speech_synthesizer=synthesizer,
+            audio_player=RecordingPlayer(),
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert "".join(event.text for event in deltas) == (
+            "**重要**：[说明](https://example.com)。版本是 3.12.14。"
+        )
+        assert coordinator.response_text == (
+            "**重要**：[说明](https://example.com)。版本是 3.12.14。"
+        )
+        assert [call[0] for call in synthesizer.calls] == [
+            "重要：说明。版本是 3.12.14。"
+        ]
+        assert [event.text for event in speaks] == [
+            "重要：说明。版本是 3.12.14。"
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("synth_error", "play_error", "expected_code"),
+    [
+        (TtsSynthesisError("failed"), None, "tts.synthesis"),
+        (None, TtsPlaybackError("failed"), "tts.playback"),
+    ],
+)
+def test_tts_errors_are_published_and_return_completed_reply_to_idle(
+    synth_error,
+    play_error,
+    expected_code,
+):
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        errors = []
+        error_ready = asyncio.Event()
+        bus.subscribe(StateChanged, states.append)
+
+        def record_error(event):
+            errors.append(event)
+            error_ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("回复"), LlmCompleted("response-1", 1, 1)]
+            ),
+            speech_synthesizer=RecordingSynthesizer(synth_error),
+            audio_player=RecordingPlayer(play_error),
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await asyncio.wait_for(error_ready.wait(), timeout=1)
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+
+        assert len(errors) == 1
+        assert errors[0].code == expected_code
+        assert errors[0].component == "tts"
+        assert errors[0].severity is ErrorSeverity.ERROR
+        assert errors[0].retryable is False
+        assert errors[0].user_action_required is False
+        assert errors[0].diagnostic_context == {
+            "exception_type": type(synth_error or play_error).__name__
+        }
+        assert "failed" not in repr(errors[0])
+        tts_state = next(
+            event
+            for event in states
+            if event.current
+            in {ConversationPhase.SYNTHESIZING, ConversationPhase.SPEAKING}
+            and event.correlation_id == errors[0].correlation_id
+        )
+        assert tts_state.turn_id == errors[0].turn_id
+        assert states[-1].current is ConversationPhase.IDLE
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_discards_stale_synthesis_before_playback():
+    async def scenario():
+        transcript = ControlledTranscript(["old", "new"])
+        synthesizer = DelayedFirstSynthesizer()
+        player = RecordingPlayer()
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        speaks = []
+        bus.subscribe(SpeakRequested, speaks.append)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            machine,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("回复。"), LlmCompleted("response", 1, 1)]
+            ),
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+        )
+
+        old_turn = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await synthesizer.first_started.wait()
+
+        new_turn = await coordinator.interrupt()
+        await wait_until(lambda: len(transcript.calls) == 2)
+        transcript.releases[1].set()
+        await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
+        synthesizer.release_first.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert old_turn != new_turn
+        assert len(player.calls) == 1
+        assert [(event.turn_id, event.text) for event in speaks] == [
+            (new_turn, "回复。")
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_turn_duration_expires_blocked_recording():
+    async def scenario():
+        audio = NeverEndingAudio()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+
+        def record_error(event):
+            errors.append(event)
+            ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            max_turn_duration=0.02,
+        )
+        await coordinator.start_listening()
+        await audio.started.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.5)
+        finally:
+            await coordinator.stop()
+
+        assert errors[-1].error_code == "runtime.budget"
+        assert audio.task_cancelled.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_turn_duration_expires_blocked_transcription():
+    async def scenario():
+        transcript = BlockingTranscript()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+
+        def record_error(event):
+            errors.append(event)
+            ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            max_turn_duration=0.02,
+        )
+        await coordinator.start_listening()
+        await transcript.started.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.5)
+        finally:
+            await coordinator.stop()
+
+        assert errors[-1].error_code == "runtime.budget"
+        assert transcript.cancelled.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_turn_duration_expires_blocked_llm_stream():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        llm = BlockingLlm()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+
+        def record_error(event):
+            errors.append(event)
+            ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            llm_provider=llm,
+            max_turn_duration=0.02,
+        )
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await llm.started.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.5)
+        finally:
+            await coordinator.stop()
+
+        assert errors[-1].error_code == "runtime.budget"
+        assert llm.cancelled.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_turn_duration_expires_blocked_synthesis():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        synthesizer = BlockingSynthesizer()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+
+        def record_error(event):
+            errors.append(event)
+            ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
+            ),
+            speech_synthesizer=synthesizer,
+            audio_player=RecordingPlayer(),
+            max_turn_duration=0.02,
+        )
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await synthesizer.started.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.5)
+        finally:
+            await coordinator.stop()
+
+        assert errors[-1].error_code == "runtime.budget"
+        assert synthesizer.cancelled.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_turn_duration_expires_blocked_playback():
+    async def scenario():
+        transcript = ControlledTranscript(["hello"])
+        player = BlockingPlayer()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+
+        def record_error(event):
+            errors.append(event)
+            ready.set()
+
+        bus.subscribe(RuntimeErrorEvent, record_error)
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
+            ),
+            speech_synthesizer=RecordingSynthesizer(),
+            audio_player=player,
+            max_turn_duration=0.02,
+        )
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await player.started.wait()
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=0.5)
+        finally:
+            await coordinator.stop()
+
+        assert errors[-1].error_code == "runtime.budget"
+        assert player.cancelled.is_set()
+
+    asyncio.run(scenario())

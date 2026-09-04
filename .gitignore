@@ -1,0 +1,14 @@
+.idea/
+.superpowers/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+/docs/
