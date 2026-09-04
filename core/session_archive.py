@@ -24,11 +24,26 @@ class SessionTurnRecord:
 
     id: str
     turn_id: str
+    session_id: str
     user_text: str
     assistant_text: str
     session_date: date
     created_at: datetime
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecord:
+    """包含多轮问答的会话列表摘要"""
+
+    id: str
+    title: str
+    turn_count: int
+    created_at: datetime
+    updated_at: datetime
+    last_user_text: str
+    last_assistant_text: str
+    is_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,11 +100,14 @@ class SessionArchiveStore:
         turn_id: str,
         user_text: str,
         assistant_text: str,
+        session_id: str | None = None,
     ) -> SessionTurnRecord:
         """按来源轮次幂等归档一个完整问答"""
 
         self._ensure_writes_enabled()
         self._validate_uuid(turn_id, "轮次 ID")
+        normalized_session_id = session_id or turn_id
+        self._validate_uuid(normalized_session_id, "会话 ID")
         user = self._validate_text(user_text, "用户文本", 4096)
         assistant = self._validate_text(assistant_text, "助手文本", 16_000)
         now = self._now()
@@ -103,10 +121,14 @@ class SessionArchiveStore:
                 return self._turn_record(existing)
             try:
                 self._connection.execute(
-                    "INSERT INTO session_turns VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO session_turns "
+                    "(id, turn_id, session_id, user_text, assistant_text, "
+                    "session_date, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid4()),
                         turn_id,
+                        normalized_session_id,
                         user,
                         assistant,
                         now.date().isoformat(),
@@ -190,6 +212,58 @@ class SessionArchiveStore:
             ).fetchall()
             return tuple(self._turn_record(row) for row in rows)
 
+    def list_session_turns(
+        self,
+        session_id: str,
+    ) -> tuple[SessionTurnRecord, ...]:
+        """按时间顺序返回一个会话内的全部轮次"""
+
+        self._validate_uuid(session_id, "会话 ID")
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                "SELECT * FROM session_turns WHERE session_id = ? "
+                "ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
+            return tuple(self._turn_record(row) for row in rows)
+
+    def list_sessions(self) -> tuple[SessionRecord, ...]:
+        """按更新时间返回包含多轮问答的会话摘要"""
+
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                "SELECT session_id, count(*) AS turn_count, "
+                "min(created_at) AS created_at, max(created_at) AS updated_at "
+                "FROM session_turns GROUP BY session_id ORDER BY updated_at"
+            ).fetchall()
+            records: list[SessionRecord] = []
+            for row in rows:
+                first = self._connection.execute(
+                    "SELECT user_text FROM session_turns "
+                    "WHERE session_id = ? ORDER BY created_at LIMIT 1",
+                    (row["session_id"],),
+                ).fetchone()
+                latest = self._connection.execute(
+                    "SELECT user_text, assistant_text FROM session_turns "
+                    "WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (row["session_id"],),
+                ).fetchone()
+                assert first is not None and latest is not None
+                records.append(
+                    SessionRecord(
+                        row["session_id"],
+                        first["user_text"],
+                        int(row["turn_count"]),
+                        datetime.fromisoformat(row["created_at"]),
+                        datetime.fromisoformat(row["updated_at"]),
+                        latest["user_text"],
+                        latest["assistant_text"],
+                    )
+                )
+            return tuple(records)
+
     def list_summaries(self) -> tuple[ShortTermSummaryRecord, ...]:
         with self._lock:
             self._ensure_open()
@@ -261,6 +335,38 @@ class SessionArchiveStore:
             )
             return cursor.rowcount == 1
 
+    def discard_session(self, session_id: str) -> bool:
+        """硬删除一个会话内的全部轮次和关联摘要"""
+
+        self._validate_uuid(session_id, "会话 ID")
+        with self._lock:
+            self._ensure_open()
+            self._connection.execute(
+                "DELETE FROM short_term_summaries WHERE source_turn_id IN "
+                "(SELECT turn_id FROM session_turns WHERE session_id = ?)",
+                (session_id,),
+            )
+            cursor = self._connection.execute(
+                "DELETE FROM session_turns WHERE session_id = ?",
+                (session_id,),
+            )
+            return cursor.rowcount > 0
+
+    def clear_all(self) -> int:
+        """硬删除全部会话正文和短期摘要"""
+
+        with self._lock:
+            self._ensure_open()
+            summary_count = self._connection.execute(
+                "SELECT count(*) FROM short_term_summaries"
+            ).fetchone()[0]
+            turn_count = self._connection.execute(
+                "SELECT count(*) FROM session_turns"
+            ).fetchone()[0]
+            self._connection.execute("DELETE FROM short_term_summaries")
+            self._connection.execute("DELETE FROM session_turns")
+            return int(summary_count + turn_count)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -274,6 +380,7 @@ class SessionArchiveStore:
                 self._connection.execute(
                     "CREATE TABLE IF NOT EXISTS session_turns ("
                     "id TEXT PRIMARY KEY, turn_id TEXT NOT NULL UNIQUE, "
+                    "session_id TEXT NOT NULL, "
                     "user_text TEXT NOT NULL, assistant_text TEXT NOT NULL, "
                     "session_date TEXT NOT NULL, created_at TEXT NOT NULL, "
                     "expires_at TEXT NOT NULL)"
@@ -284,6 +391,34 @@ class SessionArchiveStore:
                     "topic TEXT NOT NULL, unfinished_json TEXT NOT NULL, "
                     "session_date TEXT NOT NULL, created_at TEXT NOT NULL, "
                     "updated_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
+                )
+                columns = {
+                    row["name"]
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(session_turns)"
+                    ).fetchall()
+                }
+                if "session_id" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE session_turns ADD COLUMN session_id TEXT"
+                    )
+                legacy_rows = self._connection.execute(
+                    "SELECT turn_id, session_date FROM session_turns "
+                    "WHERE session_id IS NULL OR session_id = ''"
+                ).fetchall()
+                legacy_sessions: dict[str, str] = {}
+                for row in legacy_rows:
+                    session_id = legacy_sessions.setdefault(
+                        row["session_date"],
+                        str(uuid4()),
+                    )
+                    self._connection.execute(
+                        "UPDATE session_turns SET session_id = ? WHERE turn_id = ?",
+                        (session_id, row["turn_id"]),
+                    )
+                self._connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_turns_session "
+                    "ON session_turns(session_id, created_at)"
                 )
             except sqlite3.Error as error:
                 raise SessionArchiveError("会话数据库迁移失败") from error
@@ -320,6 +455,7 @@ class SessionArchiveStore:
         return SessionTurnRecord(
             row["id"],
             row["turn_id"],
+            row["session_id"],
             row["user_text"],
             row["assistant_text"],
             date.fromisoformat(row["session_date"]),

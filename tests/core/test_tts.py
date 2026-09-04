@@ -9,6 +9,7 @@ from core.cancellation import CancellationSource, CancelledError
 from core.network_resilience import NetworkResilience, NetworkResilienceSettings
 from core.tts import (
     EdgeTtsSynthesizer,
+    EdgeTtsVoiceService,
     FallbackSpeechSynthesizer,
     ResilientSpeechSynthesizer,
     SentenceChunker,
@@ -17,6 +18,7 @@ from core.tts import (
     TtsNetworkError,
     TtsPlaybackError,
     TtsSynthesisError,
+    TtsVoiceOption,
     WindowsMciAudioPlayer,
     WindowsSapiSynthesizer,
     markdown_to_speech_text,
@@ -378,6 +380,69 @@ class ScriptedSynthesizer:
         if isinstance(result, BaseException):
             raise result
         return result
+
+
+def test_voice_option_formats_chinese_label():
+    voice = TtsVoiceOption("zh-CN-XiaoxiaoNeural", "zh-CN", "Female")
+
+    assert voice.label == "中国大陆 · Xiaoxiao · 女声"
+
+
+def test_edge_voice_service_lists_chinese_voices_and_plays_preview():
+    async def scenario():
+        async def load_catalog():
+            return [
+                {
+                    "ShortName": "en-US-JennyNeural",
+                    "Locale": "en-US",
+                    "Gender": "Female",
+                },
+                {
+                    "ShortName": "zh-TW-YunJheNeural",
+                    "Locale": "zh-TW",
+                    "Gender": "Male",
+                },
+                {
+                    "ShortName": "zh-CN-XiaoxiaoNeural",
+                    "Locale": "zh-CN",
+                    "Gender": "Female",
+                },
+            ]
+
+        synthesized = []
+        played = []
+
+        def create_synthesizer(voice_name):
+            synthesizer = FakeSynthesizer(
+                SynthesizedAudio(b"preview", "audio/mpeg", ".mp3", "edge-tts")
+            )
+            synthesized.append((voice_name, synthesizer))
+            return synthesizer
+
+        class Player:
+            async def play(self, audio, token):
+                played.append((audio, token))
+
+        service = EdgeTtsVoiceService(
+            Player(),
+            catalog_loader=load_catalog,
+            synthesizer_factory=create_synthesizer,
+        )
+
+        voices = await service.list_chinese_voices()
+        await service.preview("zh-CN-XiaoxiaoNeural")
+
+        assert [voice.short_name for voice in voices] == [
+            "zh-CN-XiaoxiaoNeural",
+            "zh-TW-YunJheNeural",
+        ]
+        assert synthesized[0][0] == "zh-CN-XiaoxiaoNeural"
+        assert synthesized[0][1].calls[0][0] == (
+            "你好，我是 VoicePet，很高兴认识你"
+        )
+        assert played[0][0].data == b"preview"
+
+    asyncio.run(scenario())
 
 
 def test_resilient_tts_retries_transient_network_failure():

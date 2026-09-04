@@ -8,9 +8,10 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 
 class TrayController(QObject):
-    """提供开始聆听、设置和显式退出动作"""
+    """提供聆听、手动输入、设置和显式退出动作"""
 
     wake_requested = Signal()
+    manual_input_requested = Signal()
     settings_requested = Signal()
     quit_requested = Signal()
 
@@ -19,13 +20,18 @@ class TrayController(QObject):
         self._tray = QSystemTrayIcon(self._icon(), self)
         menu = QMenu()
         self.wake_action = QAction("开始聆听", menu)
+        self.manual_input_action = QAction("手动输入", menu)
         self.settings_action = QAction("打开设置", menu)
         self.quit_action = QAction("退出 VoicePet", menu)
         menu.addAction(self.wake_action)
+        menu.addAction(self.manual_input_action)
         menu.addAction(self.settings_action)
         menu.addSeparator()
         menu.addAction(self.quit_action)
         self.wake_action.triggered.connect(self.wake_requested.emit)
+        self.manual_input_action.triggered.connect(
+            self.manual_input_requested.emit
+        )
         self.settings_action.triggered.connect(self.settings_requested.emit)
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self._tray.setContextMenu(menu)

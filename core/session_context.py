@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
+from threading import RLock
+from uuid import UUID, uuid4
 
 
 class SessionContext:
@@ -14,6 +16,15 @@ class SessionContext:
             raise ValueError("会话上下文限制必须为正数")
         self._turns: deque[tuple[str, str]] = deque(maxlen=max_turns)
         self._max_chars = max_chars
+        self._lock = RLock()
+        self._session_id = str(uuid4())
+
+    @property
+    def session_id(self) -> str:
+        """返回语音和文字入口共同使用的当前会话标识"""
+
+        with self._lock:
+            return self._session_id
 
     def add_turn(self, user_text: str, assistant_text: str) -> None:
         """忽略不完整内容并记录一个完整问答轮次"""
@@ -22,19 +33,21 @@ class SessionContext:
         assistant = assistant_text.strip()
         if not user or not assistant:
             return
-        self._turns.append((user, assistant))
+        with self._lock:
+            self._turns.append((user, assistant))
 
     def build_history(self) -> tuple[Mapping[str, object], ...]:
         """优先返回最近且未超出字符预算的完整轮次"""
 
         selected: list[tuple[str, str]] = []
         used_chars = 0
-        for user, assistant in reversed(self._turns):
-            turn_chars = len(user) + len(assistant)
-            if used_chars + turn_chars > self._max_chars:
-                break
-            selected.append((user, assistant))
-            used_chars += turn_chars
+        with self._lock:
+            for user, assistant in reversed(self._turns):
+                turn_chars = len(user) + len(assistant)
+                if used_chars + turn_chars > self._max_chars:
+                    break
+                selected.append((user, assistant))
+                used_chars += turn_chars
 
         history: list[Mapping[str, object]] = []
         for user, assistant in reversed(selected):
@@ -47,6 +60,30 @@ class SessionContext:
         return tuple(history)
 
     def clear(self) -> None:
-        """清空当前进程中的短期会话历史"""
+        """创建新会话并清空当前进程中的短期历史"""
 
-        self._turns.clear()
+        with self._lock:
+            self._turns.clear()
+            self._session_id = str(uuid4())
+
+    def activate(
+        self,
+        session_id: str,
+        turns: tuple[tuple[str, str], ...],
+    ) -> None:
+        """切换到已有会话并恢复其最近上下文"""
+
+        try:
+            UUID(session_id)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("会话 ID 必须是 UUID") from error
+        normalized: list[tuple[str, str]] = []
+        for user_text, assistant_text in turns:
+            user = user_text.strip()
+            assistant = assistant_text.strip()
+            if user and assistant:
+                normalized.append((user, assistant))
+        with self._lock:
+            self._session_id = session_id
+            self._turns.clear()
+            self._turns.extend(normalized[-self._turns.maxlen :])

@@ -22,6 +22,7 @@ from .events import (
     MemoryResultReady,
     SpeakRequested,
     TextDelta,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     TurnId,
@@ -118,6 +119,9 @@ class MemoryContextProvider(Protocol):
 class SessionContextProvider(Protocol):
     """Coordinator 使用的进程内会话上下文边界"""
 
+    @property
+    def session_id(self) -> str: ...
+
     def build_history(self) -> tuple[Mapping[str, object], ...]: ...
 
     def add_turn(self, user_text: str, assistant_text: str) -> None: ...
@@ -131,6 +135,7 @@ class SessionArchiveProvider(Protocol):
         turn_id: str,
         user_text: str,
         assistant_text: str,
+        session_id: str | None = None,
     ) -> object: ...
 
     def discard_turn(self, turn_id: str) -> bool: ...
@@ -233,6 +238,7 @@ class Coordinator:
         self._active_source: CancellationSource | None = None
         self._response_text = ""
         self._active_input_text = ""
+        self._active_session_id: str | None = None
         self._session_turn_archived = False
         self._persistent_turn_archived = False
         self._pending_tool_call: LlmToolCall | None = None
@@ -270,6 +276,11 @@ class Coordinator:
         activation_source = self._validate_activation_source(source)
         self._response_text = ""
         self._active_input_text = ""
+        self._active_session_id = (
+            self._session_context.session_id
+            if self._session_context is not None
+            else None
+        )
         self._session_turn_archived = False
         self._persistent_turn_archived = False
         self._pending_tool_call = None
@@ -296,6 +307,51 @@ class Coordinator:
                 )
         return state_event.turn_id
 
+    async def submit_text(self, text: str) -> TurnId:
+        """提交手动文本并跳过录音与语音转写"""
+
+        self._ensure_running()
+        normalized = text.strip() if isinstance(text, str) else ""
+        if not normalized or len(normalized) > 4096:
+            raise ValueError("手动输入必须是一至四千零九十六个字符")
+        correlation_id = CorrelationId.new()
+        state_event = self._state_machine.start_text_turn(correlation_id)
+        self._response_text = ""
+        self._active_input_text = normalized
+        self._active_session_id = (
+            self._session_context.session_id
+            if self._session_context is not None
+            else None
+        )
+        self._session_turn_archived = False
+        self._persistent_turn_archived = False
+        self._pending_tool_call = None
+        self._pending_approval = None
+        self._pending_memory = None
+        self._pending_summary = None
+        self._turn_budget = TurnBudget(self._budget_limits, clock=self._clock)
+        source = CancellationSource()
+        self._active_source = source
+
+        try:
+            await self._event_bus.publish(state_event)
+            await self._event_bus.publish(
+                TextInputSubmitted(
+                    state_event.turn_id,
+                    correlation_id,
+                    normalized,
+                )
+            )
+        finally:
+            # 手动输入被接受后始终创建对应的后台处理任务
+            if self.is_current(state_event.turn_id):
+                self._launch_text_pipeline(
+                    state_event.turn_id,
+                    normalized,
+                    source,
+                )
+        return state_event.turn_id
+
     async def speak_notice(self, text: str) -> TurnId:
         """不经过录音和模型地播放固定提示"""
 
@@ -310,6 +366,7 @@ class Coordinator:
 
         self._response_text = normalized
         self._active_input_text = ""
+        self._active_session_id = None
         self._session_turn_archived = False
         self._persistent_turn_archived = False
         self._pending_tool_call = None
@@ -344,6 +401,11 @@ class Coordinator:
 
         self._response_text = ""
         self._active_input_text = ""
+        self._active_session_id = (
+            self._session_context.session_id
+            if self._session_context is not None
+            else None
+        )
         self._session_turn_archived = False
         self._persistent_turn_archived = False
         self._pending_tool_call = None
@@ -536,6 +598,19 @@ class Coordinator:
         self._tasks[task] = source
         task.add_done_callback(self._task_finished)
 
+    def _launch_text_pipeline(
+        self,
+        turn_id: TurnId,
+        text: str,
+        source: CancellationSource,
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_text_pipeline(turn_id, text, source.token),
+            name=f"voicepet-text-{turn_id}",
+        )
+        self._tasks[task] = source
+        task.add_done_callback(self._task_finished)
+
     def _task_finished(self, task: asyncio.Task[None]) -> None:
         self._tasks.pop(task, None)
         # 主动读取异常以避免后台任务产生未检索异常警告
@@ -654,29 +729,7 @@ class Coordinator:
             await self._event_bus.publish(thinking)
             if not self._accept_result(turn_id, token):
                 return
-            if self._memory_operations is not None:
-                operation = await asyncio.to_thread(
-                    self._memory_operations.plan,
-                    normalized_text,
-                    str(turn_id),
-                )
-                if operation is not None:
-                    await self._handle_memory_operation(turn_id, operation, token)
-                    return
-            if self._llm_provider is not None:
-                history: tuple[Mapping[str, object], ...] = ()
-                if self._session_context is not None:
-                    history = self._session_context.build_history()
-                if self._memory_context is not None:
-                    history += await asyncio.to_thread(
-                        self._memory_context.build_history, normalized_text
-                    )
-                await self._run_llm(
-                    turn_id,
-                    normalized_text,
-                    token,
-                    history=history,
-                )
+            await self._process_input_text(turn_id, normalized_text, token)
         except AudioError as error:
             await self._handle_runtime_error(
                 turn_id,
@@ -687,6 +740,46 @@ class Coordinator:
         except (CancelledError, asyncio.CancelledError):
             # 协作取消和任务级取消都属于正常控制流
             return
+
+    async def _run_text_pipeline(
+        self,
+        turn_id: TurnId,
+        text: str,
+        token: CancellationToken,
+    ) -> None:
+        try:
+            await self._process_input_text(turn_id, text, token)
+        except (CancelledError, asyncio.CancelledError):
+            return
+
+    async def _process_input_text(
+        self,
+        turn_id: TurnId,
+        text: str,
+        token: CancellationToken,
+    ) -> None:
+        """复用语音和手动文本共有的记忆与模型处理链路"""
+
+        if not self._accept_result(turn_id, token):
+            return
+        if self._memory_operations is not None:
+            operation = await asyncio.to_thread(
+                self._memory_operations.plan,
+                text,
+                str(turn_id),
+            )
+            if operation is not None:
+                await self._handle_memory_operation(turn_id, operation, token)
+                return
+        if self._llm_provider is not None:
+            history: tuple[Mapping[str, object], ...] = ()
+            if self._session_context is not None:
+                history = self._session_context.build_history()
+            if self._memory_context is not None:
+                history += await asyncio.to_thread(
+                    self._memory_context.build_history, text
+                )
+            await self._run_llm(turn_id, text, token, history=history)
 
     async def _play_wake_acknowledgement(
         self,
@@ -978,6 +1071,7 @@ class Coordinator:
                 completed
                 and self._response_text.strip()
                 and self._session_context is not None
+                and self._active_session_id == self._session_context.session_id
                 and not self._session_turn_archived
                 and self._accept_result(turn_id, token)
             ):
@@ -996,6 +1090,7 @@ class Coordinator:
                     turn_id,
                     self._active_input_text,
                     self._response_text,
+                    self._active_session_id,
                     token,
                 )
             if completed and self._response_text.strip():
@@ -1062,6 +1157,7 @@ class Coordinator:
         turn_id: TurnId,
         user_text: str,
         assistant_text: str,
+        session_id: str | None,
         token: CancellationToken,
     ) -> None:
         assert self._session_archive is not None
@@ -1070,11 +1166,14 @@ class Coordinator:
         budget = self._require_turn_budget()
         budget.ensure_available()
         try:
+            archive_arguments = (
+                (str(turn_id), user_text, assistant_text)
+                if session_id is None
+                else (str(turn_id), user_text, assistant_text, session_id)
+            )
             await asyncio.to_thread(
                 self._session_archive.archive_turn,
-                str(turn_id),
-                user_text,
-                assistant_text,
+                *archive_arguments,
             )
         except Exception as error:  # noqa: BLE001 会话归档失败不能阻断最终回复
             _ = error

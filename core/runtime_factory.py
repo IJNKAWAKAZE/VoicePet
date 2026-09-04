@@ -41,6 +41,7 @@ from .policy import AuthorizationIssuer, PolicyEngine, PolicySettings
 from .runtime import RuntimeServices
 from .session_archive import SessionArchiveStore
 from .session_context import SessionContext
+from .session_data import SessionDataManager
 from .short_term_summary import (
     ShortTermSummaryService,
     short_term_summary_tool_definition,
@@ -52,6 +53,7 @@ from .structured_logging import (
 )
 from .tts import (
     EdgeTtsSynthesizer,
+    EdgeTtsVoiceService,
     FallbackSpeechSynthesizer,
     ResilientSpeechSynthesizer,
     WindowsMciAudioPlayer,
@@ -210,6 +212,10 @@ def build_default_runtime(
     audio_player = WindowsMciAudioPlayer(
         temp_directory=cache_directory,
     )
+    tts_voice_service = EdgeTtsVoiceService(audio_player)
+    session_context = SessionContext()
+    session_manager = SessionDataManager(session_archive, session_context)
+    session_manager.resume_latest()
     coordinator = Coordinator(
         audio_session,
         transcript,
@@ -217,7 +223,7 @@ def build_default_runtime(
         llm_provider=llm,
         llm_tools=tool_definitions,
         memory_context=MemoryContextAssembler(memory_store),
-        session_context=SessionContext(),
+        session_context=session_context,
         session_archive=session_archive,
         memory_candidates=memory_candidates,
         short_term_summaries=short_term_summaries,
@@ -342,8 +348,10 @@ def build_default_runtime(
             audit_store.close,
         ),
         memory=MemoryDataManager(memory_store),
+        sessions=session_manager,
         pet_installer=pet_installer,
         diagnostics=diagnostics,
         asr_preparer=transcript,
+        tts_voice_service=tts_voice_service,
         llm_configured=llm_configured,
     )

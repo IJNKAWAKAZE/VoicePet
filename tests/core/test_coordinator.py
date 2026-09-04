@@ -15,6 +15,7 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TextInputSubmitted,
     TranscriptReady,
     WakeCommandPending,
 )
@@ -323,8 +324,15 @@ class RecordingSessionArchive:
         self.calls = []
         self.discarded = []
 
-    def archive_turn(self, turn_id, user_text, assistant_text):
-        self.calls.append((turn_id, user_text, assistant_text))
+    def archive_turn(
+        self,
+        turn_id,
+        user_text,
+        assistant_text,
+        session_id=None,
+    ):
+        values = (turn_id, user_text, assistant_text)
+        self.calls.append(values if session_id is None else (*values, session_id))
         if self.error is not None:
             raise self.error
         return type("Record", (), {"turn_id": turn_id})()
@@ -408,6 +416,111 @@ def test_spoken_notice_rejects_a_second_active_notice():
             await coordinator.speak_notice("第二条提示")
         await coordinator.stop()
         await first
+
+    asyncio.run(scenario())
+
+
+def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
+    async def scenario():
+        audio = ImmediateAudio()
+        llm = ScriptedLlm(
+            [LlmTextDelta("手动回复"), LlmCompleted("response", 2, 2)]
+        )
+        archive = RecordingSessionArchive()
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        bus = EventBus()
+        states = []
+        inputs = []
+        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(TextInputSubmitted, inputs.append)
+        coordinator = Coordinator(
+            audio,
+            UnexpectedTranscript(),
+            bus,
+            llm_provider=llm,
+            session_archive=archive,
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+        )
+
+        turn_id = await coordinator.submit_text("  手动问题  ")
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert audio.calls == []
+        assert [event.current for event in states] == [
+            ConversationPhase.THINKING,
+            ConversationPhase.SYNTHESIZING,
+            ConversationPhase.SPEAKING,
+            ConversationPhase.IDLE,
+        ]
+        assert [(event.turn_id, event.text) for event in inputs] == [
+            (turn_id, "手动问题")
+        ]
+        assert llm.calls[0][0].input_text == "手动问题"
+        assert archive.calls == [(str(turn_id), "手动问题", "手动回复")]
+        assert [text for text, _ in synthesizer.calls] == ["手动回复"]
+        assert len(player.calls) == 1
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_manual_text_rejects_invalid_or_busy_submission():
+    async def scenario():
+        llm = BlockingLlm()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            UnexpectedTranscript(),
+            EventBus(),
+            llm_provider=llm,
+            shutdown_timeout=0.01,
+        )
+
+        for text in ("", "   ", "x" * 4097):
+            with pytest.raises(ValueError):
+                await coordinator.submit_text(text)
+        await coordinator.submit_text("第一条")
+        await llm.started.wait()
+        with pytest.raises(RuntimeError, match="cannot start text turn"):
+            await coordinator.submit_text("第二条")
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_voice_and_manual_text_share_one_current_session_context():
+    async def scenario():
+        session = SessionContext()
+        archive = RecordingSessionArchive()
+        llm = ScriptedLlm(
+            [LlmTextDelta("共同回复"), LlmCompleted("response", 1, 1)]
+        )
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            SequenceTranscript(["语音问题"]),
+            EventBus(),
+            llm_provider=llm,
+            session_context=session,
+            session_archive=archive,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        await coordinator.submit_text("文字问题")
+        await wait_until(
+            lambda: coordinator.phase is ConversationPhase.IDLE
+            and len(llm.calls) == 2
+        )
+
+        assert llm.calls[1][0].history == (
+            {"role": "user", "content": "语音问题"},
+            {"role": "assistant", "content": "共同回复"},
+        )
+        assert len(archive.calls) == 2
+        assert archive.calls[0][3] == session.session_id
+        assert archive.calls[1][3] == session.session_id
+        await coordinator.stop()
 
     asyncio.run(scenario())
 

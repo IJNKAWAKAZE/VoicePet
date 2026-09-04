@@ -89,6 +89,23 @@ class ConversationStateMachine:
             ConversationPhase.SYNTHESIZING,
         )
 
+    def start_text_turn(self, correlation_id: CorrelationId) -> StateChanged:
+        """从空闲状态创建直接进入思考阶段的文本轮次"""
+
+        if self._phase is not ConversationPhase.IDLE:
+            raise InvalidTransition(
+                f"cannot start text turn from {self._phase.value}"
+            )
+        turn_id = TurnId.new()
+        self._turn_id = turn_id
+        self._phase = ConversationPhase.THINKING
+        return StateChanged(
+            turn_id,
+            correlation_id,
+            ConversationPhase.IDLE,
+            ConversationPhase.THINKING,
+        )
+
     def transition(
         self,
         target: ConversationPhase,

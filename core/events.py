@@ -139,6 +139,15 @@ class TranscriptReady:
 
 
 @dataclass(frozen=True, slots=True)
+class TextInputSubmitted:
+    """用户从手动输入窗口提交的文本"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class WakeCommandPending:
     """只说唤醒词后等待下一段命令"""
 

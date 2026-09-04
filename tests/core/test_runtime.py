@@ -9,6 +9,7 @@ from core.config import WakeWordConfig
 from core.event_bus import EventBus
 from core.events import TurnId
 from core.runtime import RuntimeHost, RuntimeHostError, RuntimeServices
+from core.tts import TtsVoiceOption
 from core.wake import WakeRuntimeStatus
 from core.wake_models import WakeDownloadProgress, WakeModelState
 
@@ -54,6 +55,10 @@ class FakeCoordinator:
         self.events.append((f"notice:{text}", threading.get_ident()))
         return TurnId.new()
 
+    async def submit_text(self, text):
+        self.events.append((f"text:{text}", threading.get_ident()))
+        return TurnId.new()
+
     async def set_speech_enabled(self, enabled):
         self.events.append((f"speech:{enabled}", threading.get_ident()))
 
@@ -92,6 +97,38 @@ class FakeMemory:
         return 1
 
 
+class FakeSessions:
+    def __init__(self, events):
+        self.events = events
+        self.current_session_id = "session-current"
+
+    def list_records(self):
+        self.events.append(("session:list", threading.get_ident()))
+        return ("session",)
+
+    def delete(self, turn_id):
+        self.events.append((f"session:delete:{turn_id}", threading.get_ident()))
+        return True
+
+    def list_turns(self, session_id):
+        self.events.append((f"session:turns:{session_id}", threading.get_ident()))
+        return ("turn",)
+
+    def activate(self, session_id):
+        self.current_session_id = session_id
+        self.events.append((f"session:activate:{session_id}", threading.get_ident()))
+        return ("turn",)
+
+    def new(self):
+        self.current_session_id = "session-new"
+        self.events.append(("session:new", threading.get_ident()))
+        return self.current_session_id
+
+    def clear(self):
+        self.events.append(("session:clear", threading.get_ident()))
+        return 3
+
+
 class FakePetInstaller:
     def __init__(self, events):
         self.events = events
@@ -114,6 +151,18 @@ class FakeAsrPreparer:
 
     async def preload(self):
         self.events.append(("asr:load", threading.get_ident()))
+
+
+class FakeTtsVoiceService:
+    def __init__(self, events):
+        self.events = events
+
+    async def list_chinese_voices(self):
+        self.events.append(("tts:voices", threading.get_ident()))
+        return (TtsVoiceOption("zh-CN-XiaoxiaoNeural", "zh-CN", "Female"),)
+
+    async def preview(self, voice_name):
+        self.events.append((f"tts:preview:{voice_name}", threading.get_ident()))
 
 
 class FakeWakeService(FakeLifecycle):
@@ -195,6 +244,34 @@ def test_runtime_host_dispatches_speech_toggle_off_ui_thread():
     speech_event = next(item for item in events if item[0].startswith("speech:"))
     assert speech_event[0] == "speech:False"
     assert speech_event[1] != caller_thread
+
+
+def test_runtime_host_dispatches_voice_catalog_and_preview_off_ui_thread():
+    events = []
+    voice_service = FakeTtsVoiceService(events)
+    services = RuntimeServices(
+        EventBus(),
+        FakeCoordinator(events),
+        FakeActivation(events),
+        FakeLifecycle("capture", events),
+        tts_voice_service=voice_service,
+    )
+    host = RuntimeHost(services)
+    caller_thread = threading.get_ident()
+
+    host.start()
+    try:
+        voices = host.list_tts_voices().result(timeout=1)
+        host.preview_tts_voice(voices[0].short_name).result(timeout=1)
+    finally:
+        host.close()
+
+    voice_events = [item for item in events if item[0].startswith("tts:")]
+    assert [item[0] for item in voice_events] == [
+        "tts:voices",
+        "tts:preview:zh-CN-XiaoxiaoNeural",
+    ]
+    assert all(thread_id != caller_thread for _, thread_id in voice_events)
 
 
 def test_runtime_host_dispatches_spoken_notice_off_ui_thread():
@@ -347,6 +424,38 @@ def test_runtime_host_dispatches_memory_data_operations_off_ui_thread():
     memory_events = [item for item in events if item[0].startswith("memory:")]
     assert len(memory_events) == 5
     assert all(thread_id != caller_thread for _, thread_id in memory_events)
+
+
+def test_runtime_host_dispatches_text_and_session_operations_off_ui_thread():
+    events = []
+    services = RuntimeServices(
+        EventBus(),
+        FakeCoordinator(events),
+        FakeActivation(events),
+        FakeLifecycle("capture", events),
+        sessions=FakeSessions(events),
+    )
+    host = RuntimeHost(services)
+    caller_thread = threading.get_ident()
+
+    host.start()
+    assert isinstance(host.submit_text("你好").result(timeout=1), TurnId)
+    assert host.list_sessions().result(timeout=1) == ("session",)
+    assert host.current_session_id().result(timeout=1) == "session-current"
+    assert host.list_session_turns("session-1").result(timeout=1) == ("turn",)
+    assert host.activate_session("session-1").result(timeout=1) == ("turn",)
+    assert host.new_session().result(timeout=1) == "session-new"
+    assert host.delete_session("turn-1").result(timeout=1) is True
+    assert host.clear_sessions().result(timeout=1) == 3
+    host.close()
+
+    operation_events = [
+        item
+        for item in events
+        if item[0].startswith(("text:", "session:"))
+    ]
+    assert len(operation_events) == 7
+    assert all(thread_id != caller_thread for _, thread_id in operation_events)
 
 
 def test_runtime_host_dispatches_pet_install_off_ui_thread():

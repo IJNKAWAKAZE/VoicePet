@@ -24,6 +24,7 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     WakeCommandPending,
@@ -31,12 +32,14 @@ from core.events import (
 from core.policy import ConfirmationMode
 from core.runtime import RuntimeHost, RuntimeServices
 from core.runtime_factory import build_default_runtime
+from core.state_machine import InvalidTransition
 from core.wake import WakeRuntimeStatus
 from core.wake_models import WakeDownloadProgress, WakeModelState
 
 from .confirm_dialog import ConfirmationDialog
 from .event_bridge import QtEventBridge
 from .global_hotkey import create_global_hotkey
+from .manual_input import ManualInputDialog
 from .pet_shell import (
     PetChoice,
     PetShellWindow,
@@ -46,12 +49,17 @@ from .pet_shell import (
 from .settings_window import SettingsWindow
 from .tray import TrayController
 
-_MODEL_DOWNLOAD_DIALOG_STYLE = """
+_CONFIRMATION_DIALOG_STYLE = """
 QMessageBox { background: #081827; color: #EAF6F5; font-family: "Microsoft YaHei UI"; }
-QMessageBox QLabel { color: #EAF6F5; min-width: 360px; padding: 6px 4px; }
+QMessageBox QLabel { color: #EAF6F5; padding: 6px 4px; }
+QMessageBox QLabel#qt_msgbox_label { min-width: 360px; max-width: 460px; }
+QMessageBox QLabel#qt_msgboxex_icon_label { min-width: 48px; max-width: 48px; padding: 6px 0; }
 QMessageBox QPushButton { min-width: 96px; min-height: 32px; border-radius: 6px; padding: 4px 14px; }
 QMessageBox QPushButton#download_model_action { background: #65D6D0; color: #071521; border: 1px solid #65D6D0; font-weight: 700; }
 QMessageBox QPushButton#download_model_action:hover { background: #86E5DF; }
+QMessageBox QPushButton#danger_action { background: #D65D66; color: #FFFFFF; border: 1px solid #D65D66; font-weight: 700; }
+QMessageBox QPushButton#danger_action:hover { background: #E97880; border-color: #E97880; }
+QMessageBox QPushButton#danger_action:pressed { background: #B94B54; border-color: #B94B54; }
 QMessageBox QPushButton#cancel_action { background: #102B3F; color: #EAF6F5; border: 1px solid #52758A; }
 QMessageBox QPushButton#cancel_action:hover { border-color: #65D6D0; }
 """
@@ -80,7 +88,7 @@ def _build_model_download_dialog(
     cancel_button.setText("取消")
     dialog.setDefaultButton(QMessageBox.StandardButton.No)
     dialog.setEscapeButton(cancel_button)
-    dialog.setStyleSheet(_MODEL_DOWNLOAD_DIALOG_STYLE)
+    dialog.setStyleSheet(_CONFIRMATION_DIALOG_STYLE)
     return dialog
 
 
@@ -101,6 +109,66 @@ def _confirm_model_download(
     return result == QMessageBox.StandardButton.Yes
 
 
+def _build_session_clear_dialog(parent: QWidget) -> QMessageBox:
+    """构建深色且使用中文按钮的会话清空确认框"""
+
+    dialog = QMessageBox(parent)
+    dialog.setIcon(QMessageBox.Icon.Warning)
+    dialog.setWindowTitle("清空全部会话")
+    dialog.setText("这会永久删除全部近期会话和短期摘要，是否继续？")
+    dialog.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    clear_button = dialog.button(QMessageBox.StandardButton.Yes)
+    cancel_button = dialog.button(QMessageBox.StandardButton.No)
+    clear_button.setObjectName("danger_action")
+    clear_button.setText("清空全部")
+    cancel_button.setObjectName("cancel_action")
+    cancel_button.setText("取消")
+    dialog.setDefaultButton(QMessageBox.StandardButton.No)
+    dialog.setEscapeButton(cancel_button)
+    dialog.setStyleSheet(_CONFIRMATION_DIALOG_STYLE)
+    return dialog
+
+
+def _confirm_session_clear(parent: QWidget) -> bool:
+    """显示会话清空确认框并返回明确选择"""
+
+    dialog = _build_session_clear_dialog(parent)
+    result = QMessageBox.StandardButton(dialog.exec())
+    return result == QMessageBox.StandardButton.Yes
+
+
+def _build_session_delete_dialog(parent: QWidget) -> QMessageBox:
+    """构建单个会话删除确认框"""
+
+    dialog = QMessageBox(parent)
+    dialog.setIcon(QMessageBox.Icon.Warning)
+    dialog.setWindowTitle("删除会话")
+    dialog.setText("这会永久删除此会话中的全部消息，是否继续？")
+    dialog.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    delete_button = dialog.button(QMessageBox.StandardButton.Yes)
+    cancel_button = dialog.button(QMessageBox.StandardButton.No)
+    delete_button.setObjectName("danger_action")
+    delete_button.setText("删除会话")
+    cancel_button.setObjectName("cancel_action")
+    cancel_button.setText("取消")
+    dialog.setDefaultButton(QMessageBox.StandardButton.No)
+    dialog.setEscapeButton(cancel_button)
+    dialog.setStyleSheet(_CONFIRMATION_DIALOG_STYLE)
+    return dialog
+
+
+def _confirm_session_delete(parent: QWidget) -> bool:
+    """显示单个会话删除确认框并返回明确选择"""
+
+    dialog = _build_session_delete_dialog(parent)
+    result = QMessageBox.StandardButton(dialog.exec())
+    return result == QMessageBox.StandardButton.Yes
+
+
 class RuntimeHostProtocol(Protocol):
     """Qt 控制器使用的 Runtime 工作线程边界"""
 
@@ -113,7 +181,13 @@ class RuntimeHostProtocol(Protocol):
 
     def speak_notice(self, text: str) -> Future[Any]: ...
 
+    def submit_text(self, text: str) -> Future[Any]: ...
+
     def set_speech_enabled(self, enabled: bool) -> Future[None]: ...
+
+    def list_tts_voices(self) -> Future[Any]: ...
+
+    def preview_tts_voice(self, voice_name: str) -> Future[None]: ...
 
     def asr_model_state(self) -> Future[AsrModelState]: ...
 
@@ -134,6 +208,20 @@ class RuntimeHostProtocol(Protocol):
     def resolve_memory_conflict(self, memory_id: str) -> Future[Any]: ...
 
     def export_memories(self, destination: str) -> Future[Any]: ...
+
+    def list_sessions(self) -> Future[Any]: ...
+
+    def current_session_id(self) -> Future[str]: ...
+
+    def list_session_turns(self, session_id: str) -> Future[Any]: ...
+
+    def activate_session(self, session_id: str) -> Future[Any]: ...
+
+    def new_session(self) -> Future[str]: ...
+
+    def delete_session(self, turn_id: str) -> Future[Any]: ...
+
+    def clear_sessions(self) -> Future[Any]: ...
 
     def install_pet(self, source: str) -> Future[Any]: ...
 
@@ -168,6 +256,7 @@ class CredentialStoreProtocol(Protocol):
 _RUNTIME_EVENT_TYPES = (
     StateChanged,
     TranscriptReady,
+    TextInputSubmitted,
     TextDelta,
     ApprovalRequested,
     ToolResultReady,
@@ -185,6 +274,14 @@ class ApplicationController(QObject):
     runtime_failed = Signal(str)
     memory_records_ready = Signal(object)
     memory_status_ready = Signal(str)
+    session_records_ready = Signal(object)
+    session_detail_ready = Signal(object)
+    chat_session_ready = Signal(object)
+    session_activated_ready = Signal(object)
+    new_session_ready = Signal(str)
+    session_status_ready = Signal(str)
+    manual_input_succeeded = Signal()
+    manual_input_failed = Signal(str)
     pet_installed = Signal(object)
     diagnostic_report_ready = Signal(object)
     notice_finished = Signal()
@@ -198,6 +295,10 @@ class ApplicationController(QObject):
     wake_download_ready = Signal()
     wake_download_failed = Signal()
     wake_configuration_failed = Signal()
+    voice_catalog_ready = Signal(object)
+    voice_catalog_failed = Signal()
+    voice_preview_ready = Signal()
+    voice_preview_failed = Signal()
 
     def __init__(
         self,
@@ -224,15 +325,20 @@ class ApplicationController(QObject):
         self._last_preview_pet_id = config.ui.active_skin
         self._global_hotkey = global_hotkey
         self._response_text = ""
+        self._conversation_phase = ConversationPhase.IDLE
         self._runtime_error_visible = False
         self._notice_pending = False
         self._pending_activation_source: str | None = None
         self._asr_preparation: str | None = None
         self._startup_checks_started = False
+        self._voice_catalog_loading = False
+        self._voice_catalog_loaded = False
+        self._voice_preview_active = False
         self._wake_prompted = False
         self._wake_download_active = False
         self._closed = False
         self.settings = SettingsWindow(config)
+        self.manual_input = ManualInputDialog()
         self.pet = PetShellWindow(
             always_on_top=config.ui.always_on_top,
             pet_directory=pet_directory,
@@ -240,6 +346,7 @@ class ApplicationController(QObject):
         self.confirmation = ConfirmationDialog(parent=self.pet)
         self.tray = TrayController(self)
         self.tray.wake_requested.connect(self._activate_runtime)
+        self.tray.manual_input_requested.connect(self.show_manual_input)
         self.pet.activation_requested.connect(self._activate_runtime)
         if self._global_hotkey is not None:
             self._global_hotkey.activated.connect(
@@ -255,6 +362,16 @@ class ApplicationController(QObject):
             self._resolve_memory_conflict
         )
         self.settings.memory_export_requested.connect(self._export_memories)
+        self.settings.session_refresh_requested.connect(self._refresh_sessions)
+        self.settings.session_delete_requested.connect(self._delete_session)
+        self.settings.session_clear_requested.connect(self._clear_sessions)
+        self.settings.session_selection_changed.connect(
+            self._load_session_detail
+        )
+        self.settings.session_activate_requested.connect(
+            self._activate_session
+        )
+        self.settings.session_new_requested.connect(self._new_session)
         self.settings.credential_save_requested.connect(self._save_api_key)
         self.settings.credential_delete_requested.connect(self._delete_api_key)
         self.settings.pet_file_import_requested.connect(self._import_pet_file)
@@ -268,6 +385,7 @@ class ApplicationController(QObject):
         self.settings.wake_model_download_cancel_requested.connect(
             self._cancel_wake_model_download
         )
+        self.settings.voice_preview_requested.connect(self._preview_tts_voice)
         self.settings.diagnostics_run_requested.connect(self._run_diagnostics)
         self.settings.diagnostics_export_requested.connect(
             self._export_diagnostics
@@ -275,8 +393,31 @@ class ApplicationController(QObject):
         self.confirmation.accepted.connect(self._approve_tool)
         self.confirmation.rejected.connect(self._reject_tool)
         self.runtime_failed.connect(self._show_runtime_error)
+        self.manual_input.submitted.connect(self._submit_manual_text)
+        self.manual_input.new_session_requested.connect(self._new_session)
+        self.manual_input.session_activate_requested.connect(
+            self._activate_session
+        )
+        self.manual_input.session_delete_requested.connect(
+            self._delete_session
+        )
+        self.manual_input_succeeded.connect(
+            self.manual_input.submission_succeeded
+        )
+        self.manual_input_failed.connect(self.manual_input.show_error)
         self.memory_records_ready.connect(self.settings.set_memory_records)
         self.memory_status_ready.connect(self.settings.validation_message.setText)
+        self.session_records_ready.connect(self.settings.set_session_records)
+        self.session_records_ready.connect(
+            self.manual_input.set_session_records
+        )
+        self.session_detail_ready.connect(self.settings.set_session_detail)
+        self.chat_session_ready.connect(self._apply_chat_session)
+        self.session_activated_ready.connect(self._apply_session_activated)
+        self.new_session_ready.connect(self._apply_new_session)
+        self.session_status_ready.connect(
+            self.settings.validation_message.setText
+        )
         self.pet_installed.connect(self._apply_installed_pet)
         self.diagnostic_report_ready.connect(
             self.settings.set_diagnostic_report
@@ -294,6 +435,10 @@ class ApplicationController(QObject):
         self.wake_configuration_failed.connect(
             self._apply_wake_configuration_failed
         )
+        self.voice_catalog_ready.connect(self._apply_tts_voice_catalog)
+        self.voice_catalog_failed.connect(self._apply_tts_voice_catalog_failed)
+        self.voice_preview_ready.connect(self._apply_tts_voice_preview_ready)
+        self.voice_preview_failed.connect(self._apply_tts_voice_preview_failed)
         if self._event_bridge is not None:
             self._event_bridge.event_received.connect(self._handle_runtime_event)
         self._refresh_pet_choices(config.ui.active_skin)
@@ -321,7 +466,18 @@ class ApplicationController(QObject):
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
+        self._load_tts_voice_catalog()
         self._refresh_memories()
+        self._refresh_sessions()
+
+    def show_manual_input(self) -> None:
+        """从托盘非阻塞打开手动输入窗口"""
+
+        if self._closed:
+            return
+        self.manual_input.open_for_input()
+        self._refresh_chat_session()
+        self._refresh_sessions()
 
     def close(self) -> None:
         if self._closed:
@@ -346,6 +502,7 @@ class ApplicationController(QObject):
         if self._global_hotkey is not None:
             self._global_hotkey.close()
         self.confirmation.hide()
+        self.manual_input.hide()
         self.tray.close()
         self.settings.hide()
         self.pet.hide()
@@ -403,6 +560,80 @@ class ApplicationController(QObject):
             self.memory_status_ready.emit(
                 "设置已保存，但语音播报切换失败，重启后生效"
             )
+
+    def _load_tts_voice_catalog(self) -> None:
+        if self._voice_catalog_loaded or self._voice_catalog_loading:
+            return
+        if self._runtime_host is None:
+            self.settings.set_voice_catalog_status("中文声音目录当前不可用")
+            return
+        self._voice_catalog_loading = True
+        self.settings.set_voice_catalog_status("正在获取全部在线中文声音…")
+        try:
+            future = self._runtime_host.list_tts_voices()
+        except Exception as error:  # noqa: BLE001 Runtime 边界只显示安全状态
+            _ = error
+            self._voice_catalog_loading = False
+            self.settings.set_voice_catalog_status(
+                "中文声音获取失败，可继续使用当前声音"
+            )
+            return
+        future.add_done_callback(self._tts_voice_catalog_finished)
+
+    def _tts_voice_catalog_finished(self, future: Future[Any]) -> None:
+        try:
+            voices = tuple(future.result())
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.voice_catalog_failed.emit()
+            return
+        self.voice_catalog_ready.emit(voices)
+
+    def _apply_tts_voice_catalog(self, voices: object) -> None:
+        self._voice_catalog_loading = False
+        self._voice_catalog_loaded = True
+        if isinstance(voices, tuple):
+            self.settings.set_voice_options(voices)
+
+    def _apply_tts_voice_catalog_failed(self) -> None:
+        self._voice_catalog_loading = False
+        self.settings.set_voice_catalog_status(
+            "中文声音获取失败，可继续使用当前声音"
+        )
+
+    def _preview_tts_voice(self, voice_name: str) -> None:
+        if self._voice_preview_active:
+            return
+        if self._runtime_host is None:
+            self.settings.set_voice_catalog_status("声音试听当前不可用")
+            return
+        self._voice_preview_active = True
+        self.settings.set_voice_preview_active(True, "正在生成试听语音…")
+        try:
+            future = self._runtime_host.preview_tts_voice(voice_name)
+        except Exception as error:  # noqa: BLE001 Runtime 边界只显示安全状态
+            _ = error
+            self._voice_preview_active = False
+            self.settings.set_voice_preview_active(False, "试听启动失败")
+            return
+        future.add_done_callback(self._tts_voice_preview_finished)
+
+    def _tts_voice_preview_finished(self, future: Future[None]) -> None:
+        try:
+            future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.voice_preview_failed.emit()
+            return
+        self.voice_preview_ready.emit()
+
+    def _apply_tts_voice_preview_ready(self) -> None:
+        self._voice_preview_active = False
+        self.settings.set_voice_preview_active(False, "试听完成")
+
+    def _apply_tts_voice_preview_failed(self) -> None:
+        self._voice_preview_active = False
+        self.settings.set_voice_preview_active(False, "试听失败，请检查网络")
 
     def _wake_configuration_finished(self, future: Future[None]) -> None:
         try:
@@ -614,7 +845,18 @@ class ApplicationController(QObject):
     def _handle_runtime_event(self, event: object) -> None:
         message: str | None = None
         if isinstance(event, StateChanged):
+            self._conversation_phase = event.current
             self.pet.set_phase(event.current)
+            self.manual_input.set_processing(
+                event.current is not ConversationPhase.IDLE
+            )
+            self.manual_input.set_assistant_typing(
+                event.current is ConversationPhase.THINKING
+            )
+            if event.current is ConversationPhase.IDLE:
+                self.manual_input.finish_assistant_message()
+                if self.settings.isVisible() or self.manual_input.isVisible():
+                    self._refresh_sessions()
             if event.current in {
                 ConversationPhase.IDLE,
                 ConversationPhase.LISTENING,
@@ -663,11 +905,18 @@ class ApplicationController(QObject):
                 message = None
         elif isinstance(event, TranscriptReady):
             message = f"你：{event.text}"
+            self.manual_input.append_user_message(event.text)
+        elif isinstance(event, TextInputSubmitted):
+            self._response_text = ""
+            self._runtime_error_visible = False
+            message = f"你：{event.text}"
+            self.manual_input.append_user_message(event.text)
         elif isinstance(event, WakeCommandPending):
             message = "我在听…"
         elif isinstance(event, TextDelta):
             self._response_text += event.text
             message = self._response_text
+            self.manual_input.append_assistant_delta(event.text)
         elif isinstance(event, ApprovalRequested):
             message = f"需要确认 {event.risk}：{event.summary}"
             self.confirmation.show_request(event.summary, event.risk)
@@ -739,6 +988,255 @@ class ApplicationController(QObject):
             self.runtime_failed.emit("工具取消未能提交")
             return
         future.add_done_callback(self._runtime_operation_finished)
+
+    def _submit_manual_text(self, text: str) -> None:
+        if self._runtime_host is None:
+            self.manual_input_failed.emit("手动输入当前不可用")
+            return
+        if not self._runtime_host.llm_configured:
+            self.manual_input_failed.emit("请先在设置中配置 API Key")
+            return
+        if self._conversation_phase is not ConversationPhase.IDLE:
+            self.manual_input_failed.emit("上一条消息仍在处理，请等待回复完成")
+            return
+        self.manual_input.set_submitting(True)
+        try:
+            future = self._runtime_host.submit_text(text)
+        except Exception as error:  # noqa: BLE001 输入边界只显示安全错误
+            _ = error
+            self.manual_input_failed.emit("手动输入未能提交，请稍后再试")
+            return
+        future.add_done_callback(self._manual_text_submitted)
+
+    def _manual_text_submitted(self, future: Future[Any]) -> None:
+        try:
+            future.result()
+        except InvalidTransition:
+            self.manual_input_failed.emit("当前正在处理其他请求，请稍后再试")
+            return
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.manual_input_failed.emit("手动输入发送失败，请稍后再试")
+            return
+        self.manual_input_succeeded.emit()
+
+    def _refresh_chat_session(self) -> None:
+        if self._runtime_host is None:
+            self.manual_input_failed.emit("会话记录当前不可用")
+            return
+        try:
+            future = self._runtime_host.current_session_id()
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.manual_input_failed.emit("当前会话读取失败")
+            return
+        future.add_done_callback(self._current_chat_session_loaded)
+
+    def _current_chat_session_loaded(self, future: Future[str]) -> None:
+        try:
+            session_id = future.result()
+            if not isinstance(session_id, str):
+                raise TypeError("当前会话 ID 无效")
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.manual_input_failed.emit("当前会话读取失败")
+            return
+        self._request_chat_turns(session_id)
+
+    def _request_chat_turns(self, session_id: str) -> None:
+        if self._runtime_host is None:
+            return
+        try:
+            future = self._runtime_host.list_session_turns(session_id)
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.manual_input_failed.emit("会话记录读取失败")
+            return
+        future.add_done_callback(
+            lambda result: self._chat_turns_loaded(session_id, result)
+        )
+
+    def _chat_turns_loaded(
+        self,
+        session_id: str,
+        future: Future[Any],
+    ) -> None:
+        try:
+            turns = future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.manual_input_failed.emit("会话记录读取失败")
+            return
+        self.chat_session_ready.emit((session_id, turns))
+
+    def _apply_chat_session(self, payload: object) -> None:
+        session_id, turns = payload
+        title = turns[0].user_text if turns else "新会话"
+        self.manual_input.set_session(session_id, turns, title)
+
+    def _load_session_detail(self, session_id: str) -> None:
+        if self._runtime_host is None:
+            return
+        try:
+            future = self._runtime_host.list_session_turns(session_id)
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("会话详情读取失败")
+            return
+        future.add_done_callback(self._session_detail_loaded)
+
+    def _session_detail_loaded(self, future: Future[Any]) -> None:
+        try:
+            turns = future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("会话详情读取失败")
+            return
+        self.session_detail_ready.emit(turns)
+
+    def _activate_session(self, session_id: str) -> None:
+        if not self._session_change_allowed():
+            return
+        assert self._runtime_host is not None
+        try:
+            future = self._runtime_host.activate_session(session_id)
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("会话切换未能提交")
+            return
+        future.add_done_callback(
+            lambda result: self._session_activated(session_id, result)
+        )
+
+    def _session_activated(
+        self,
+        session_id: str,
+        future: Future[Any],
+    ) -> None:
+        try:
+            turns = future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("会话切换失败")
+            return
+        self.session_activated_ready.emit((session_id, turns))
+
+    def _apply_session_activated(self, payload: object) -> None:
+        session_id, turns = payload
+        title = turns[0].user_text if turns else "新会话"
+        self.manual_input.set_session(session_id, turns, title)
+        self.settings.set_session_detail(turns)
+        self.session_status_ready.emit("已切换当前会话")
+        self._refresh_sessions()
+
+    def _new_session(self) -> None:
+        if not self._session_change_allowed():
+            return
+        assert self._runtime_host is not None
+        try:
+            future = self._runtime_host.new_session()
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("新建会话未能提交")
+            return
+        future.add_done_callback(self._new_session_created)
+
+    def _new_session_created(self, future: Future[str]) -> None:
+        try:
+            session_id = future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("新建会话失败")
+            return
+        self.new_session_ready.emit(session_id)
+
+    def _apply_new_session(self, session_id: str) -> None:
+        self.manual_input.set_session(session_id, (), "新会话")
+        self.settings.set_session_detail(())
+        self.session_status_ready.emit("已新建会话")
+        self._refresh_sessions()
+
+    def _session_change_allowed(self) -> bool:
+        if self._runtime_host is None:
+            self.session_status_ready.emit("会话管理当前不可用")
+            return False
+        if self._conversation_phase is not ConversationPhase.IDLE:
+            message = "当前请求处理完成后才能切换会话"
+            self.session_status_ready.emit(message)
+            self.manual_input.show_error(message)
+            return False
+        return True
+
+    def _refresh_sessions(self) -> None:
+        if self._runtime_host is None:
+            return
+        try:
+            future = self._runtime_host.list_sessions()
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("会话列表当前不可用")
+            return
+        future.add_done_callback(self._sessions_loaded)
+
+    def _sessions_loaded(self, future: Future[Any]) -> None:
+        try:
+            records = future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("会话列表读取失败")
+            return
+        self.session_records_ready.emit(records)
+
+    def _delete_session(self, session_id: str) -> None:
+        if not self._session_change_allowed():
+            return
+        parent = self.manual_input if self.manual_input.isVisible() else self.settings
+        if not _confirm_session_delete(parent):
+            return
+        try:
+            assert self._runtime_host is not None
+            future = self._runtime_host.delete_session(session_id)
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("会话删除未能提交")
+            return
+        future.add_done_callback(self._session_deleted)
+
+    def _session_deleted(self, future: Future[Any]) -> None:
+        try:
+            deleted = bool(future.result())
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("会话删除失败")
+            return
+        self.session_status_ready.emit("会话已删除" if deleted else "会话不存在")
+        self._refresh_sessions()
+        self._refresh_chat_session()
+
+    def _clear_sessions(self) -> None:
+        if not self._session_change_allowed():
+            return
+        if not _confirm_session_clear(self.settings):
+            return
+        try:
+            assert self._runtime_host is not None
+            future = self._runtime_host.clear_sessions()
+        except Exception as error:  # noqa: BLE001 会话边界只显示安全错误
+            _ = error
+            self.session_status_ready.emit("会话清空未能提交")
+            return
+        future.add_done_callback(self._sessions_cleared)
+
+    def _sessions_cleared(self, future: Future[Any]) -> None:
+        try:
+            affected = int(future.result())
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.session_status_ready.emit("会话清空失败")
+            return
+        self.session_status_ready.emit(f"已清理 {affected} 条会话数据")
+        self._refresh_sessions()
+        self._refresh_chat_session()
 
     def _refresh_memories(self) -> None:
         if self._runtime_host is None:

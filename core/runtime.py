@@ -46,6 +46,8 @@ class CoordinatorService(Protocol):
 
     async def speak_notice(self, text: str) -> TurnId: ...
 
+    async def submit_text(self, text: str) -> TurnId: ...
+
     async def set_speech_enabled(self, enabled: bool) -> None: ...
 
 
@@ -69,6 +71,25 @@ class MemoryDataService(Protocol):
     def export_json(self, destination: str) -> int: ...
 
 
+class SessionDataService(Protocol):
+    """RuntimeHost 使用的同步会话数据管理边界"""
+
+    def list_records(self) -> tuple[Any, ...]: ...
+
+    @property
+    def current_session_id(self) -> str: ...
+
+    def list_turns(self, session_id: str) -> tuple[Any, ...]: ...
+
+    def activate(self, session_id: str) -> tuple[Any, ...]: ...
+
+    def new(self) -> str: ...
+
+    def delete(self, turn_id: str) -> bool: ...
+
+    def clear(self) -> int: ...
+
+
 class PetInstallerService(Protocol):
     """RuntimeHost 使用的同步桌宠包安装边界"""
 
@@ -81,6 +102,14 @@ class DiagnosticServiceProtocol(Protocol):
     async def run(self) -> Any: ...
 
     async def export(self, destination: str) -> None: ...
+
+
+class TtsVoiceServiceProtocol(Protocol):
+    """RuntimeHost 使用的中文声音目录与试听边界"""
+
+    async def list_chinese_voices(self) -> tuple[Any, ...]: ...
+
+    async def preview(self, voice_name: str) -> None: ...
 
 
 class AsrPreparationService(Protocol):
@@ -127,9 +156,11 @@ class RuntimeServices:
     wake_service: WakeWordRuntimeServiceProtocol | None = None
     closers: tuple[Callable[[], None], ...] = ()
     memory: MemoryDataService | None = None
+    sessions: SessionDataService | None = None
     pet_installer: PetInstallerService | None = None
     diagnostics: DiagnosticServiceProtocol | None = None
     asr_preparer: AsrPreparationService | None = None
+    tts_voice_service: TtsVoiceServiceProtocol | None = None
     llm_configured: bool = False
 
 
@@ -209,10 +240,21 @@ class RuntimeHost:
     def speak_notice(self, text: str) -> Future[TurnId]:
         return self._submit(self._services.coordinator.speak_notice(text))
 
+    def submit_text(self, text: str) -> Future[TurnId]:
+        return self._submit(self._services.coordinator.submit_text(text))
+
     def set_speech_enabled(self, enabled: bool) -> Future[None]:
         return self._submit(
             self._services.coordinator.set_speech_enabled(enabled)
         )
+
+    def list_tts_voices(self) -> Future[tuple[Any, ...]]:
+        service = self._require_tts_voice_service()
+        return self._submit(service.list_chinese_voices())
+
+    def preview_tts_voice(self, voice_name: str) -> Future[None]:
+        service = self._require_tts_voice_service()
+        return self._submit(service.preview(voice_name))
 
     def asr_model_state(self) -> Future[AsrModelState]:
         preparer = self._require_asr_preparer()
@@ -255,6 +297,42 @@ class RuntimeHost:
         return self._submit(
             asyncio.to_thread(memory.export_json, destination)
         )
+
+    def list_sessions(self) -> Future[tuple[Any, ...]]:
+        sessions = self._require_sessions()
+        return self._submit(asyncio.to_thread(sessions.list_records))
+
+    def current_session_id(self) -> Future[str]:
+        sessions = self._require_sessions()
+
+        async def read_current() -> str:
+            return sessions.current_session_id
+
+        return self._submit(read_current())
+
+    def list_session_turns(self, session_id: str) -> Future[tuple[Any, ...]]:
+        sessions = self._require_sessions()
+        return self._submit(
+            asyncio.to_thread(sessions.list_turns, session_id)
+        )
+
+    def activate_session(self, session_id: str) -> Future[tuple[Any, ...]]:
+        sessions = self._require_sessions()
+        return self._submit(
+            asyncio.to_thread(sessions.activate, session_id)
+        )
+
+    def new_session(self) -> Future[str]:
+        sessions = self._require_sessions()
+        return self._submit(asyncio.to_thread(sessions.new))
+
+    def delete_session(self, turn_id: str) -> Future[bool]:
+        sessions = self._require_sessions()
+        return self._submit(asyncio.to_thread(sessions.delete, turn_id))
+
+    def clear_sessions(self) -> Future[int]:
+        sessions = self._require_sessions()
+        return self._submit(asyncio.to_thread(sessions.clear))
 
     def install_pet(self, source: str) -> Future[Path]:
         installer = self._services.pet_installer
@@ -343,6 +421,12 @@ class RuntimeHost:
             raise RuntimeHostError("记忆数据管理当前不可用")
         return memory
 
+    def _require_sessions(self) -> SessionDataService:
+        sessions = self._services.sessions
+        if sessions is None:
+            raise RuntimeHostError("会话数据管理当前不可用")
+        return sessions
+
     def _require_diagnostics(self) -> DiagnosticServiceProtocol:
         diagnostics = self._services.diagnostics
         if diagnostics is None:
@@ -354,6 +438,12 @@ class RuntimeHost:
         if preparer is None:
             raise RuntimeHostError("ASR 模型准备当前不可用")
         return preparer
+
+    def _require_tts_voice_service(self) -> TtsVoiceServiceProtocol:
+        service = self._services.tts_voice_service
+        if service is None:
+            raise RuntimeHostError("中文声音目录当前不可用")
+        return service
 
     def _require_wake_service(self) -> WakeWordRuntimeServiceProtocol:
         service = self._services.wake_service

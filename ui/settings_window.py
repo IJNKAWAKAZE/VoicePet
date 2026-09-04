@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QSignalBlocker, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -20,9 +21,11 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -32,63 +35,210 @@ from core.config import AppConfig, ConfigError
 from .pet_shell import PetChoice
 
 _STYLE = """
-QWidget { color: #EAF6F5; font-family: "Microsoft YaHei UI"; font-size: 13px; }
-QWidget#settings_root { background: #071521; }
-QWidget#settings_sidebar { background: #081B29; border-right: 1px solid #17384A; }
-QLabel#brand_mark { color: #65D6D0; font-family: DengXian; font-size: 20px; font-weight: 700; padding: 24px 20px 2px 20px; }
-QLabel#brand_caption { color: #7294A5; font-family: Consolas; font-size: 10px; letter-spacing: 1px; padding: 0 20px 18px 20px; }
-QLabel#local_mark { color: #52758A; font-family: Consolas; font-size: 10px; padding: 16px 20px; }
+QWidget { color: #F1F5F7; font-family: "Microsoft YaHei UI"; font-size: 13px; }
+QWidget#settings_root { background: #0D1117; }
+QWidget#settings_sidebar { background: #111720; border-right: 1px solid #28313C; }
+QLabel#brand_mark { color: #5FD3C7; font-size: 20px; font-weight: 700; padding: 24px 20px 2px 20px; }
+QLabel#brand_caption { color: #7F8C99; font-family: Consolas; font-size: 10px; letter-spacing: 1px; padding: 0 20px 18px 20px; }
+QLabel#local_mark { color: #687582; font-family: Consolas; font-size: 10px; padding: 16px 20px; }
 QListWidget#settings_navigation { background: transparent; border: 0; padding: 8px 10px; outline: 0; }
-QListWidget#settings_navigation::item { color: #9BB3BE; padding: 12px 16px; margin: 3px 0; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 7px; }
-QListWidget#settings_navigation::item:hover { color: #EAF6F5; background: #0D2637; }
-QListWidget#settings_navigation::item:selected { color: #65D6D0; background: #102B3F; border-left: 3px solid #65D6D0; }
-QStackedWidget, QScrollArea, QScrollArea > QWidget > QWidget { background: #071521; border: 0; }
-QLabel#section_title { color: #EAF6F5; font-family: DengXian; font-size: 25px; font-weight: 700; }
-QLabel#section_description { color: #7294A5; font-size: 12px; padding-bottom: 8px; }
-QFrame#settings_card { background: #0B2030; border: 1px solid #173E52; border-radius: 12px; }
-QLabel#card_title { color: #EAF6F5; font-family: DengXian; font-size: 16px; font-weight: 600; }
-QLabel#card_description { color: #7294A5; font-size: 11px; }
-QFrame#settings_footer { background: #091C2A; border-top: 1px solid #17384A; }
-QPushButton { background: #102B3F; color: #EAF6F5; border: 1px solid #315C70; border-radius: 8px; padding: 8px 13px; min-height: 20px; }
-QPushButton:hover { background: #15364B; border-color: #65D6D0; color: #FFFFFF; }
-QPushButton:pressed { background: #0A2131; }
-QPushButton:disabled { color: #527080; background: #0A1B28; border-color: #183849; }
-QPushButton#save_settings { background: #65D6D0; color: #071521; border: 1px solid #65D6D0; border-radius: 7px; padding: 9px 24px; font-weight: 700; }
-QPushButton#save_settings:hover { background: #86E5DF; }
-QPushButton#save_settings:pressed { background: #4DBBB7; }
-QPushButton#memory_action { background: #102B3F; color: #EAF6F5; border: 1px solid #315C70; border-radius: 8px; padding: 8px 12px; }
-QPushButton#memory_action:hover { border-color: #65D6D0; color: #65D6D0; }
-QComboBox, QLineEdit, QPlainTextEdit, QDoubleSpinBox, QSpinBox { background: #071A28; border: 1px solid #285064; border-radius: 7px; padding: 6px 9px; min-height: 26px; selection-background-color: #1F4B60; }
+QListWidget#settings_navigation::item { color: #A5B0BA; padding: 12px 16px; margin: 3px 0; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 8px; }
+QListWidget#settings_navigation::item:hover { color: #F1F5F7; background: #1A222D; }
+QListWidget#settings_navigation::item:selected { color: #74DED3; background: #1B2B31; border-left: 3px solid #5FD3C7; }
+QStackedWidget, QScrollArea, QScrollArea > QWidget > QWidget { background: #0D1117; border: 0; }
+QLabel#section_title { color: #F7FAFB; font-size: 24px; font-weight: 700; }
+QLabel#section_description { color: #8E9AA6; font-size: 12px; padding-bottom: 8px; }
+QFrame#settings_card { background: #161C24; border: 1px solid #2A3440; border-radius: 12px; }
+QLabel#card_title { color: #F7FAFB; font-size: 16px; font-weight: 600; }
+QLabel#card_description { color: #8E9AA6; font-size: 11px; }
+QFrame#settings_footer { background: #121820; border-top: 1px solid #28313C; }
+QPushButton { background: #202A35; color: #EDF2F4; border: 1px solid #3A4653; border-radius: 8px; padding: 8px 13px; min-height: 20px; }
+QPushButton:hover { background: #293541; border-color: #5FD3C7; color: #FFFFFF; }
+QPushButton:pressed { background: #182129; }
+QPushButton:disabled { color: #687582; background: #171D24; border-color: #2A333D; }
+QPushButton#save_settings { background: #5FD3C7; color: #0D1719; border: 1px solid #5FD3C7; border-radius: 8px; padding: 9px 24px; font-weight: 700; }
+QPushButton#save_settings:hover { background: #7BE0D6; }
+QPushButton#save_settings:pressed { background: #49BDB2; }
+QPushButton#memory_action { background: #202A35; color: #EDF2F4; border: 1px solid #3A4653; border-radius: 8px; padding: 8px 12px; }
+QPushButton#memory_action:hover { border-color: #5FD3C7; color: #74DED3; }
+QComboBox, QLineEdit, QPlainTextEdit, QDoubleSpinBox, QSpinBox { background: #0F151C; border: 1px solid #374451; border-radius: 8px; padding: 6px 10px; min-height: 28px; selection-background-color: #285A5A; }
 QPlainTextEdit { min-height: 180px; }
-QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QDoubleSpinBox:hover, QSpinBox:hover { border-color: #3E7186; }
-QComboBox:focus, QLineEdit:focus, QPlainTextEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus { border-color: #65D6D0; }
-QComboBox QAbstractItemView { background: #0B2030; color: #EAF6F5; border: 1px solid #315C70; selection-background-color: #1F4B60; }
-QComboBox::drop-down { border: 0; width: 30px; }
-QComboBox::down-arrow { width: 8px; height: 8px; }
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { background: #102B3F; border: 0; border-left: 1px solid #285064; width: 22px; }
-QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { background: #1A4055; }
-QSlider::groove:horizontal { height: 4px; background: #1C455C; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #65D6D0; border-radius: 2px; }
-QSlider::handle:horizontal { background: #EAF6F5; border: 2px solid #65D6D0; width: 14px; margin: -6px 0; border-radius: 8px; }
-QProgressBar { background: #071A28; border: 1px solid #285064; border-radius: 7px; min-height: 20px; text-align: center; color: #EAF6F5; }
-QProgressBar::chunk { background: #65D6D0; border-radius: 6px; }
-QLabel#sonar_value { color: #65D6D0; font-family: Consolas; font-weight: 700; min-width: 42px; }
+QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QDoubleSpinBox:hover, QSpinBox:hover { border-color: #536171; }
+QComboBox:focus, QLineEdit:focus, QPlainTextEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus { border-color: #5FD3C7; }
+QComboBox QAbstractItemView { background: #1A212A; color: #F1F5F7; border: 0; padding: 4px; outline: 0; selection-background-color: #285A5A; }
+QComboBox QAbstractItemView::item { min-height: 32px; padding: 0 10px; border-radius: 5px; }
+QComboBox::drop-down { border: 0; width: 0; }
+QComboBox::down-arrow { image: none; }
+QComboBox QLineEdit { background: transparent; border: 0; padding: 0; }
+QFrame#select_control, QFrame#spin_control { background: #0F151C; border: 1px solid #374451; border-radius: 8px; }
+QFrame#select_control[interactionActive="true"], QFrame#spin_control[interactionActive="true"] { background: #151E27; border-color: #5FD3C7; }
+QFrame#select_control QComboBox, QFrame#spin_control QDoubleSpinBox, QFrame#spin_control QSpinBox { background: transparent; border: 0; border-radius: 7px; }
+QToolButton#select_toggle { background: transparent; color: #8FE6DE; border: 0; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+QToolButton#select_toggle:hover { background: transparent; }
+QToolButton#spin_up, QToolButton#spin_down { background: transparent; color: #8FE6DE; border: 0; }
+QToolButton#spin_up { border-top-right-radius: 7px; }
+QToolButton#spin_down { border-bottom-right-radius: 7px; }
+QToolButton#spin_up:hover, QToolButton#spin_down:hover { background: transparent; }
+QPushButton#voice_preview { background: #1A242E; color: #DCE7EA; border: 1px solid #3A4653; border-radius: 8px; padding: 7px 16px; min-height: 28px; }
+QPushButton#voice_preview:hover { background: #203139; color: #FFFFFF; border-color: #5FD3C7; }
+QPushButton#voice_preview:pressed { background: #18272E; }
+QListWidget#memory_list, QListWidget#session_list, QListWidget#diagnostics_list { background: #0F151C; color: #DDE5E9; border: 1px solid #374451; border-radius: 8px; padding: 5px; outline: 0; }
+QListWidget#memory_list::item, QListWidget#session_list::item, QListWidget#diagnostics_list::item { padding: 8px 10px; border-radius: 5px; }
+QListWidget#memory_list::item:hover, QListWidget#session_list::item:hover, QListWidget#diagnostics_list::item:hover { background: #202A35; }
+QListWidget#memory_list::item:selected, QListWidget#session_list::item:selected, QListWidget#diagnostics_list::item:selected { background: #285A5A; color: #FFFFFF; }
+QLabel#voice_catalog_status { color: #8E9AA6; font-size: 11px; padding-top: 3px; }
+QSlider::groove:horizontal { height: 4px; background: #34404C; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #5FD3C7; border-radius: 2px; }
+QSlider::handle:horizontal { background: #F4FBFA; border: 2px solid #5FD3C7; width: 14px; margin: -6px 0; border-radius: 8px; }
+QProgressBar { background: #0F151C; border: 1px solid #374451; border-radius: 7px; min-height: 20px; text-align: center; color: #F1F5F7; }
+QProgressBar::chunk { background: #5FD3C7; border-radius: 6px; }
+QLabel#sonar_value { color: #74DED3; font-family: Consolas; font-weight: 700; min-width: 42px; }
 QLabel#validation_message { color: #FFB3A7; padding: 4px 0; }
 QCheckBox { min-height: 28px; spacing: 9px; }
-QCheckBox::indicator { width: 17px; height: 17px; border-radius: 5px; border: 1px solid #3B687C; background: #071A28; }
-QCheckBox::indicator:hover { border-color: #65D6D0; }
-QCheckBox::indicator:checked { background: #65D6D0; border: 4px solid #173A4D; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 6px 2px; }
-QScrollBar::handle:vertical { background: #315C70; border-radius: 4px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: #65D6D0; }
+QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #536171; background: #0F151C; }
+QCheckBox::indicator:hover { border-color: #5FD3C7; }
+QCheckBox::indicator:checked { background: #5FD3C7; border: 4px solid #27413F; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 6px 3px; }
+QScrollBar::handle:vertical { background: #4A5663; border-radius: 5px; min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: #6B7A89; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px 6px; }
-QScrollBar::handle:horizontal { background: #315C70; border-radius: 4px; min-width: 36px; }
-QScrollBar::handle:horizontal:hover { background: #65D6D0; }
+QScrollBar::handle:horizontal { background: #4A5663; border-radius: 4px; min-width: 36px; }
+QScrollBar::handle:horizontal:hover { background: #6B7A89; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 """
+
+
+class _ChevronButton(QToolButton):
+    """不依赖字体绘制清晰方向箭头"""
+
+    def __init__(self, direction: str) -> None:
+        super().__init__()
+        self.direction = direction
+        self._hovered = False
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        control = self.parentWidget()
+        while control is not None and not isinstance(control, _ControlFrame):
+            control = control.parentWidget()
+        active = control is not None and bool(
+            control.property("interactionActive")
+        )
+        if self._hovered:
+            hover_color = "#314750" if self.isDown() else "#263A42"
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(hover_color)))
+            background = self.rect().adjusted(5, 3, -5, -3)
+            painter.drawRoundedRect(background, 6, 6)
+        color = QColor(
+            "#FFFFFF"
+            if self._hovered
+            else "#8FE6DE"
+            if active
+            else "#8FA1AC"
+        )
+        pen = QPen(color, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        half_width = 5.0 if self.direction == "down" else 4.0
+        half_height = 2.5
+        if self.direction == "up":
+            points = (
+                QPointF(center_x - half_width, center_y + half_height),
+                QPointF(center_x, center_y - half_height),
+                QPointF(center_x + half_width, center_y + half_height),
+            )
+        else:
+            points = (
+                QPointF(center_x - half_width, center_y - half_height),
+                QPointF(center_x, center_y + half_height),
+                QPointF(center_x + half_width, center_y - half_height),
+            )
+        painter.drawPolyline(points)
+
+
+class _ModernComboBox(QComboBox):
+    """统一下拉弹层背景并移除系统白边"""
+
+    def showPopup(self) -> None:
+        popup = self.view().window()
+        popup.setObjectName("voicepet_combo_popup")
+        popup.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        popup.setAutoFillBackground(True)
+        palette = popup.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#1A212A"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#1A212A"))
+        popup.setPalette(palette)
+        popup.setStyleSheet(
+            "QFrame#voicepet_combo_popup {"
+            "background: #1A212A;"
+            "border: 1px solid #465361;"
+            "}"
+        )
+        super().showPopup()
+
+
+class _ControlFrame(QFrame):
+    """让组合控件共享统一的悬停与聚焦反馈"""
+
+    def __init__(self, object_name: str) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        self.setProperty("interactionActive", False)
+        self._tracked_widgets: list[QWidget] = []
+
+    def track(self, *widgets: QWidget) -> None:
+        for widget in widgets:
+            widget.installEventFilter(self)
+            self._tracked_widgets.append(widget)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() in {QEvent.Type.Enter, QEvent.Type.FocusIn}:
+            self._set_interaction_active(True)
+        elif event.type() in {QEvent.Type.Leave, QEvent.Type.FocusOut}:
+            QTimer.singleShot(0, self._sync_interaction_state)
+        return super().eventFilter(watched, event)
+
+    def enterEvent(self, event) -> None:
+        self._set_interaction_active(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        QTimer.singleShot(0, self._sync_interaction_state)
+        super().leaveEvent(event)
+
+    def _sync_interaction_state(self) -> None:
+        active = self.underMouse() or any(
+            widget.underMouse() or widget.hasFocus()
+            for widget in self._tracked_widgets
+        )
+        self._set_interaction_active(active)
+
+    def _set_interaction_active(self, active: bool) -> None:
+        if bool(self.property("interactionActive")) == active:
+            return
+        self.setProperty("interactionActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
 
 class SettingsWindow(QWidget):
@@ -100,12 +250,19 @@ class SettingsWindow(QWidget):
     memory_confirm_requested = Signal(str)
     memory_resolve_requested = Signal(str)
     memory_export_requested = Signal()
+    session_refresh_requested = Signal()
+    session_delete_requested = Signal(str)
+    session_clear_requested = Signal()
+    session_selection_changed = Signal(str)
+    session_activate_requested = Signal(str)
+    session_new_requested = Signal()
     credential_save_requested = Signal(str)
     credential_delete_requested = Signal()
     pet_file_import_requested = Signal()
     pet_directory_import_requested = Signal()
     wake_model_download_requested = Signal()
     wake_model_download_cancel_requested = Signal()
+    voice_preview_requested = Signal(str)
     diagnostics_run_requested = Signal()
     diagnostics_export_requested = Signal()
     pet_selection_changed = Signal(str)
@@ -201,6 +358,7 @@ class SettingsWindow(QWidget):
         self.debounce_spin.setSingleStep(0.1)
         self.debounce_spin.setSuffix(" 秒")
         self.debounce_spin.setValue(config.wake_word.debounce_sec)
+        self.debounce_control = self._spin_control(self.debounce_spin)
         self.asr_model_edit = QLineEdit(config.asr.model)
         self.wake_enabled_checkbox = QCheckBox("启用语音唤醒")
         self.wake_enabled_checkbox.setChecked(config.wake_word.enabled)
@@ -238,16 +396,38 @@ class SettingsWindow(QWidget):
         wake_model_layout.addWidget(self.wake_model_status)
         wake_model_layout.addWidget(self.wake_model_progress)
         wake_model_layout.addLayout(wake_model_actions)
-        self.voice_combo = QComboBox()
-        self.voice_combo.setEditable(True)
-        self.voice_combo.addItems(
-            [
+        self.voice_combo = _ModernComboBox()
+        self.voice_combo.setEditable(False)
+        for voice_name in dict.fromkeys(
+            (
                 config.tts.voice,
                 "zh-CN-XiaoxiaoNeural",
                 "zh-CN-YunxiNeural",
-            ]
+            )
+        ):
+            self.voice_combo.addItem(voice_name, voice_name)
+        self.voice_combo.setCurrentIndex(
+            self.voice_combo.findData(config.tts.voice)
         )
-        self.voice_combo.setCurrentText(config.tts.voice)
+        self.voice_control = self._select_control(self.voice_combo)
+        self.voice_preview_button = QPushButton("试听")
+        self.voice_preview_button.setObjectName("voice_preview")
+        self.voice_preview_button.setToolTip("试听当前选择的中文声音")
+        self.voice_preview_button.clicked.connect(self._preview_voice)
+        voice_selector = QWidget()
+        voice_selector_layout = QHBoxLayout(voice_selector)
+        voice_selector_layout.setContentsMargins(0, 0, 0, 0)
+        voice_selector_layout.setSpacing(8)
+        voice_selector_layout.addWidget(self.voice_control, 1)
+        voice_selector_layout.addWidget(self.voice_preview_button)
+        self.voice_catalog_status = QLabel("打开设置后获取全部中文声音")
+        self.voice_catalog_status.setObjectName("voice_catalog_status")
+        voice_panel = QWidget()
+        voice_panel_layout = QVBoxLayout(voice_panel)
+        voice_panel_layout.setContentsMargins(0, 0, 0, 0)
+        voice_panel_layout.setSpacing(2)
+        voice_panel_layout.addWidget(voice_selector)
+        voice_panel_layout.addWidget(self.voice_catalog_status)
         self.speech_enabled_checkbox = QCheckBox("语音播报")
         self.speech_enabled_checkbox.setChecked(config.tts.enabled)
         voice = self._page(
@@ -263,7 +443,7 @@ class SettingsWindow(QWidget):
                 "唤醒灵敏度",
                 sensitivity,
                 "唤醒防抖",
-                self.debounce_spin,
+                self.debounce_control,
                 "中文唤醒模型",
                 wake_model_panel,
                 "转写模型",
@@ -275,12 +455,12 @@ class SettingsWindow(QWidget):
                 "播报开关",
                 self.speech_enabled_checkbox,
                 "播报声音",
-                self.voice_combo,
+                voice_panel,
             ),
         )
 
         self.llm_model_edit = QLineEdit(config.llm.model)
-        self.llm_api_combo = QComboBox()
+        self.llm_api_combo = _ModernComboBox()
         self.llm_api_combo.addItem("Responses API", "responses")
         self.llm_api_combo.addItem(
             "Chat Completions API",
@@ -289,13 +469,15 @@ class SettingsWindow(QWidget):
         self.llm_api_combo.setCurrentIndex(
             self.llm_api_combo.findData(config.llm.api)
         )
+        self.llm_api_control = self._select_control(self.llm_api_combo)
         self.llm_base_url_edit = QLineEdit(config.llm.base_url)
         self.llm_base_url_edit.setPlaceholderText(
             "留空时使用 OpenAI 官方默认地址"
         )
-        self.reasoning_combo = QComboBox()
+        self.reasoning_combo = _ModernComboBox()
         self.reasoning_combo.addItems(["low", "medium", "high"])
         self.reasoning_combo.setCurrentText(config.llm.reasoning_effort)
+        self.reasoning_control = self._select_control(self.reasoning_combo)
         self.store_checkbox = QCheckBox("允许服务端保存响应")
         self.store_checkbox.setChecked(config.llm.store)
         self.persona_edit = QPlainTextEdit(config.llm.system_prompt)
@@ -332,13 +514,13 @@ class SettingsWindow(QWidget):
                 "服务提供方",
                 QLabel(config.llm.provider),
                 "API 协议",
-                self.llm_api_combo,
+                self.llm_api_control,
                 "API Base URL",
                 self.llm_base_url_edit,
                 "模型",
                 self.llm_model_edit,
                 "推理强度",
-                self.reasoning_combo,
+                self.reasoning_control,
             ),
             self._card(
                 "角色设定",
@@ -356,12 +538,76 @@ class SettingsWindow(QWidget):
             ),
         )
 
-        self.pet_combo = QComboBox()
+        self.session_list = QListWidget()
+        self.session_list.setObjectName("session_list")
+        self.session_list.setMinimumHeight(170)
+        self.session_detail = QPlainTextEdit()
+        self.session_detail.setObjectName("session_detail")
+        self.session_detail.setReadOnly(True)
+        self.session_detail.setPlaceholderText("选择会话后查看完整聊天记录")
+        self.session_detail.setMinimumHeight(190)
+        self.session_new_button = QPushButton("新建会话")
+        self.session_activate_button = QPushButton("切换到选中会话")
+        self.session_refresh_button = QPushButton("刷新")
+        self.session_delete_button = QPushButton("删除选中")
+        self.session_clear_button = QPushButton("清空全部")
+        for button in (
+            self.session_new_button,
+            self.session_activate_button,
+            self.session_refresh_button,
+            self.session_delete_button,
+            self.session_clear_button,
+        ):
+            button.setObjectName("memory_action")
+        self.session_refresh_button.clicked.connect(
+            self.session_refresh_requested.emit
+        )
+        self.session_new_button.clicked.connect(
+            self.session_new_requested.emit
+        )
+        self.session_activate_button.clicked.connect(
+            self._activate_selected_session
+        )
+        self.session_delete_button.clicked.connect(
+            self._delete_selected_session
+        )
+        self.session_clear_button.clicked.connect(
+            self.session_clear_requested.emit
+        )
+        self.session_list.currentItemChanged.connect(
+            self._selected_session_changed
+        )
+        session_actions = QHBoxLayout()
+        session_actions.addWidget(self.session_new_button)
+        session_actions.addWidget(self.session_activate_button)
+        session_actions.addWidget(self.session_refresh_button)
+        session_actions.addWidget(self.session_delete_button)
+        session_actions.addStretch(1)
+        session_actions.addWidget(self.session_clear_button)
+        session_panel = QWidget()
+        session_layout = QVBoxLayout(session_panel)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.addWidget(self.session_list)
+        session_layout.addWidget(self.session_detail)
+        session_layout.addLayout(session_actions)
+        sessions = self._page(
+            "会话",
+            "查看和管理保存在本机的近期问答",
+            self._card(
+                "近期会话",
+                "删除后相关内容不会再参与后续对话上下文",
+                "会话记录",
+                session_panel,
+            ),
+        )
+
+        self.pet_combo = _ModernComboBox()
         self.pet_combo.setEditable(False)
         self.pet_combo.addItem(config.ui.active_skin, config.ui.active_skin)
         self.pet_combo.currentIndexChanged.connect(
             self._emit_pet_selection_changed
         )
+        self.pet_control = self._select_control(self.pet_combo)
         self.always_on_top_checkbox = QCheckBox("让桌宠保持在其他窗口上方")
         self.always_on_top_checkbox.setChecked(config.ui.always_on_top)
         self.hot_reload_checkbox = QCheckBox("形象文件变化时自动刷新")
@@ -391,7 +637,7 @@ class SettingsWindow(QWidget):
                 "形象",
                 "选择后立即预览，保存后下次启动继续使用",
                 "当前形象",
-                self.pet_combo,
+                self.pet_control,
                 "导入形象",
                 pet_import_panel,
             ),
@@ -413,6 +659,9 @@ class SettingsWindow(QWidget):
         self.short_term_retention_spin.setValue(
             config.privacy.short_term_retention_days
         )
+        self.short_term_retention_control = self._spin_control(
+            self.short_term_retention_spin
+        )
         self.diagnostic_recording_checkbox = QCheckBox(
             "仅在主动诊断时保留录音"
         )
@@ -420,6 +669,7 @@ class SettingsWindow(QWidget):
             config.privacy.diagnostic_recording
         )
         self.memory_list = QListWidget()
+        self.memory_list.setObjectName("memory_list")
         self.memory_list.setMaximumHeight(150)
         self.memory_refresh_button = QPushButton("刷新")
         self.memory_confirm_button = QPushButton("确认候选")
@@ -463,7 +713,7 @@ class SettingsWindow(QWidget):
                 "记忆",
                 self.memory_checkbox,
                 "短期摘要保留",
-                self.short_term_retention_spin,
+                self.short_term_retention_control,
                 "诊断录音",
                 self.diagnostic_recording_checkbox,
             ),
@@ -477,6 +727,8 @@ class SettingsWindow(QWidget):
         self.diagnostics_summary = QLabel("尚未运行诊断")
         self.diagnostics_summary.setObjectName("sonar_value")
         self.diagnostics_list = QListWidget()
+        self.diagnostics_list.setObjectName("diagnostics_list")
+        self.diagnostics_list.setMinimumHeight(220)
         self.diagnostics_run_button = QPushButton("运行诊断")
         self.diagnostics_export_button = QPushButton("导出脱敏 ZIP")
         for button in (
@@ -512,10 +764,77 @@ class SettingsWindow(QWidget):
         return (
             ("语音", voice),
             ("AI", ai),
+            ("会话", sessions),
             ("桌宠", pet),
             ("隐私", privacy),
             ("诊断", diagnostics),
         )
+
+    @staticmethod
+    def _select_control(combo: QComboBox) -> QFrame:
+        control = _ControlFrame("select_control")
+        control.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        layout = QHBoxLayout(control)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle = _ChevronButton("down")
+        toggle.setObjectName("select_toggle")
+        toggle.setAccessibleName("展开选项")
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        toggle.setFixedWidth(34)
+        toggle.clicked.connect(lambda checked=False: combo.showPopup())
+        layout.addWidget(combo, 1)
+        layout.addWidget(toggle)
+        control.track(combo, toggle)
+        return control
+
+    @staticmethod
+    def _spin_control(spin: QDoubleSpinBox | QSpinBox) -> QFrame:
+        control = _ControlFrame("spin_control")
+        control.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        layout = QHBoxLayout(control)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        spin.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        buttons = QWidget()
+        buttons.setFixedWidth(34)
+        button_layout = QVBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(0)
+        up_button = _ChevronButton("up")
+        up_button.setObjectName("spin_up")
+        up_button.setAccessibleName("增加")
+        down_button = _ChevronButton("down")
+        down_button.setObjectName("spin_down")
+        down_button.setAccessibleName("减少")
+        for button in (up_button, down_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setAutoRepeat(True)
+        up_button.clicked.connect(lambda checked=False: spin.stepUp())
+        down_button.clicked.connect(lambda checked=False: spin.stepDown())
+        button_layout.addWidget(up_button)
+        button_layout.addWidget(down_button)
+        layout.addWidget(spin, 1)
+        layout.addWidget(buttons)
+        control.track(spin, up_button, down_button)
+        return control
 
     @staticmethod
     def _page(title: str, description: str, *cards: QFrame) -> QScrollArea:
@@ -556,6 +875,9 @@ class SettingsWindow(QWidget):
         layout.addWidget(caption)
         form = QFormLayout()
         form.setContentsMargins(0, 8, 0, 0)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
         for index in range(0, len(items), 2):
@@ -592,7 +914,7 @@ class SettingsWindow(QWidget):
                 tts=replace(
                     self._config.tts,
                     enabled=self.speech_enabled_checkbox.isChecked(),
-                    voice=self.voice_combo.currentText().strip(),
+                    voice=self.selected_voice_name(),
                 ),
                 ui=replace(
                     self._config.ui,
@@ -669,6 +991,55 @@ class SettingsWindow(QWidget):
         pet_id = self.pet_combo.currentData()
         return pet_id if isinstance(pet_id, str) else self._config.ui.active_skin
 
+    def selected_voice_name(self) -> str:
+        """返回当前中文声音的服务端短名称"""
+
+        voice_name = self.voice_combo.currentData()
+        if isinstance(voice_name, str) and voice_name.strip():
+            return voice_name.strip()
+        return self.voice_combo.currentText().strip()
+
+    def set_voice_options(self, voices: Sequence[object]) -> None:
+        """用动态中文声音目录刷新下拉框并保留当前选择"""
+
+        selected = self.selected_voice_name()
+        blocker = QSignalBlocker(self.voice_combo)
+        self.voice_combo.clear()
+        for voice in voices:
+            short_name = getattr(voice, "short_name", None)
+            label = getattr(voice, "label", None)
+            if isinstance(short_name, str) and isinstance(label, str):
+                self.voice_combo.addItem(label, short_name)
+        selected_index = self.voice_combo.findData(selected)
+        if selected_index < 0 and selected:
+            self.voice_combo.insertItem(0, selected, selected)
+            selected_index = 0
+        if selected_index < 0 and self.voice_combo.count():
+            selected_index = 0
+        self.voice_combo.setCurrentIndex(selected_index)
+        del blocker
+        self.voice_catalog_status.setText(
+            f"已获取 {len(voices)} 个在线中文声音"
+        )
+        self.voice_preview_button.setEnabled(bool(self.voice_combo.count()))
+
+    def set_voice_catalog_status(self, message: str) -> None:
+        """显示中文声音目录加载状态"""
+
+        self.voice_catalog_status.setText(message)
+
+    def set_voice_preview_active(self, active: bool, message: str) -> None:
+        """切换试听按钮状态并显示安全结果"""
+
+        self.voice_preview_button.setEnabled(not active)
+        self.voice_preview_button.setText("试听中…" if active else "试听")
+        self.voice_catalog_status.setText(message)
+
+    def _preview_voice(self) -> None:
+        voice_name = self.selected_voice_name()
+        if voice_name:
+            self.voice_preview_requested.emit(voice_name)
+
     def select_pet_id(self, pet_id: str) -> bool:
         """静默选择指定形象并返回是否存在"""
 
@@ -696,6 +1067,77 @@ class SettingsWindow(QWidget):
             self.memory_list.addItem(item_text)
             item = self.memory_list.item(self.memory_list.count() - 1)
             item.setData(Qt.ItemDataRole.UserRole, record.id)
+
+    def set_session_records(self, records) -> None:
+        """刷新多轮会话摘要并标记当前会话"""
+
+        selected = self._selected_session_id()
+        self.session_list.clear()
+        for record in records:
+            timestamp = record.updated_at.astimezone().strftime("%m-%d %H:%M")
+            title = self._compact_text(record.title, 48)
+            preview = self._compact_text(record.last_assistant_text, 72)
+            active_mark = "● 当前  " if record.is_active else ""
+            self.session_list.addItem(
+                f"{active_mark}{timestamp}  {title}  ·  {record.turn_count} 轮\n"
+                f"VoicePet：{preview}"
+            )
+            item = self.session_list.item(self.session_list.count() - 1)
+            item.setData(Qt.ItemDataRole.UserRole, record.id)
+            if record.id == selected or (selected is None and record.is_active):
+                self.session_list.setCurrentItem(item)
+
+    def set_session_detail(self, turns) -> None:
+        """显示选中会话的完整多轮问答"""
+
+        blocks: list[str] = []
+        for index, turn in enumerate(turns, start=1):
+            timestamp = turn.created_at.astimezone().strftime("%m-%d %H:%M")
+            blocks.append(
+                f"第 {index} 轮 · {timestamp}\n"
+                f"你：{turn.user_text}\n\n"
+                f"VoicePet：{turn.assistant_text}"
+            )
+        self.session_detail.setPlainText("\n\n──────────\n\n".join(blocks))
+
+    def _delete_selected_session(self) -> None:
+        item = self.session_list.currentItem()
+        if item is None:
+            self.validation_message.setText("请先选择要删除的会话")
+            return
+        session_id = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(session_id, str):
+            self.session_delete_requested.emit(session_id)
+
+    def _activate_selected_session(self) -> None:
+        session_id = self._selected_session_id()
+        if session_id is None:
+            self.validation_message.setText("请先选择要切换的会话")
+            return
+        self.session_activate_requested.emit(session_id)
+
+    def _selected_session_changed(self, current, previous) -> None:
+        del previous
+        if current is None:
+            self.session_detail.clear()
+            return
+        session_id = current.data(Qt.ItemDataRole.UserRole)
+        if isinstance(session_id, str):
+            self.session_selection_changed.emit(session_id)
+
+    def _selected_session_id(self) -> str | None:
+        item = self.session_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _compact_text(text: str, limit: int) -> str:
+        normalized = " ".join(text.split())
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: limit - 1]}…"
 
     def _delete_selected_memory(self) -> None:
         item = self.memory_list.currentItem()

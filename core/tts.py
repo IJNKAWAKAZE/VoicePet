@@ -7,14 +7,14 @@ import inspect
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .cancellation import CancellationToken, CancelledError
+from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .network_resilience import NetworkCircuitOpenError, NetworkResilience
 
 
@@ -70,6 +70,38 @@ class SynthesizedAudio:
             raise TtsConfigurationError("音频后端名称不能为空")
 
 
+@dataclass(frozen=True, slots=True)
+class TtsVoiceOption:
+    """设置页展示的在线中文声音"""
+
+    short_name: str
+    locale: str
+    gender: str
+
+    def __post_init__(self) -> None:
+        if not self.short_name.strip() or not self.locale.strip():
+            raise TtsConfigurationError("语音目录条目不能为空")
+
+    @property
+    def label(self) -> str:
+        regions = {
+            "zh-CN": "中国大陆",
+            "zh-HK": "中国香港",
+            "zh-TW": "中国台湾",
+            "zh-CN-liaoning": "辽宁",
+            "zh-CN-shaanxi": "陕西",
+        }
+        region = regions.get(self.locale, self.locale)
+        voice_name = self.short_name
+        prefix = f"{self.locale}-"
+        voice_name = voice_name.removeprefix(prefix).removesuffix("Neural")
+        gender = {"Female": "女声", "Male": "男声"}.get(
+            self.gender,
+            self.gender or "未知",
+        )
+        return f"{region} · {voice_name} · {gender}"
+
+
 class SpeechSynthesizer(Protocol):
     """异步语音合成器边界"""
 
@@ -88,6 +120,90 @@ class AudioPlayer(Protocol):
         audio: SynthesizedAudio,
         token: CancellationToken,
     ) -> None: ...
+
+
+VoiceCatalogLoader = Callable[
+    [],
+    Awaitable[Sequence[Mapping[str, object]]],
+]
+VoiceSynthesizerFactory = Callable[[str], SpeechSynthesizer]
+
+
+class EdgeTtsVoiceService:
+    """动态获取中文声音并提供设置页试听"""
+
+    def __init__(
+        self,
+        audio_player: AudioPlayer,
+        *,
+        catalog_loader: VoiceCatalogLoader | None = None,
+        synthesizer_factory: VoiceSynthesizerFactory | None = None,
+    ) -> None:
+        if catalog_loader is None:
+            try:
+                from edge_tts import list_voices
+            except (ImportError, ModuleNotFoundError) as error:
+                raise TtsConfigurationError(
+                    "缺少 edge-tts 依赖，请安装 voicepet[tts]"
+                ) from error
+            catalog_loader = list_voices
+        self._audio_player = audio_player
+        self._catalog_loader = catalog_loader
+        self._synthesizer_factory = synthesizer_factory or (
+            lambda voice: EdgeTtsSynthesizer(voice=voice)
+        )
+        self._cache: tuple[TtsVoiceOption, ...] | None = None
+        self._preview_lock = asyncio.Lock()
+
+    async def list_chinese_voices(self) -> tuple[TtsVoiceOption, ...]:
+        if self._cache is not None:
+            return self._cache
+        try:
+            entries = await self._catalog_loader()
+        except TtsError:
+            raise
+        except Exception as error:
+            raise TtsNetworkError(
+                f"中文声音目录获取失败: {type(error).__name__}"
+            ) from error
+        voices: dict[str, TtsVoiceOption] = {}
+        for entry in entries:
+            short_name = entry.get("ShortName")
+            locale = entry.get("Locale")
+            gender = entry.get("Gender", "")
+            if (
+                not isinstance(short_name, str)
+                or not isinstance(locale, str)
+                or not locale.casefold().startswith("zh-")
+            ):
+                continue
+            voices[short_name] = TtsVoiceOption(
+                short_name,
+                locale,
+                gender if isinstance(gender, str) else "",
+            )
+        if not voices:
+            raise TtsSynthesisError("在线服务未返回中文声音")
+        self._cache = tuple(
+            sorted(
+                voices.values(),
+                key=lambda voice: (voice.locale, voice.short_name),
+            )
+        )
+        return self._cache
+
+    async def preview(self, voice_name: str) -> None:
+        normalized = voice_name.strip()
+        if not normalized or not normalized.casefold().startswith("zh-"):
+            raise TtsConfigurationError("只能试听中文声音")
+        async with self._preview_lock:
+            source = CancellationSource()
+            synthesizer = self._synthesizer_factory(normalized)
+            audio = await synthesizer.synthesize(
+                "你好，我是 VoicePet，很高兴认识你",
+                source.token,
+            )
+            await self._audio_player.play(audio, source.token)
 
 
 class EdgeTtsSynthesizer:

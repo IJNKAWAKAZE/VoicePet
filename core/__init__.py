@@ -90,6 +90,7 @@ from .events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     TurnId,
@@ -178,10 +179,12 @@ from .runtime_factory import build_default_runtime
 from .session_archive import (
     SessionArchiveError,
     SessionArchiveStore,
+    SessionRecord,
     SessionTurnRecord,
     ShortTermSummaryRecord,
 )
 from .session_context import SessionContext
+from .session_data import SessionDataManager
 from .short_term_summary import (
     SHORT_TERM_SUMMARY_TOOL_NAME,
     ShortTermSummaryDraft,
@@ -223,6 +226,7 @@ from .tool_worker import (
 from .tts import (
     AudioPlayer,
     EdgeTtsSynthesizer,
+    EdgeTtsVoiceService,
     FallbackSpeechSynthesizer,
     ResilientSpeechSynthesizer,
     SentenceChunker,
@@ -233,6 +237,7 @@ from .tts import (
     TtsNetworkError,
     TtsPlaybackError,
     TtsSynthesisError,
+    TtsVoiceOption,
     WindowsMciAudioPlayer,
     WindowsSapiBackend,
     WindowsSapiSynthesizer,
@@ -331,6 +336,7 @@ __all__ = [
     "DiagnosticStatus",
     "DpapiCredentialStore",
     "EdgeTtsSynthesizer",
+    "EdgeTtsVoiceService",
     "ErrorSeverity",
     "EventBus",
     "FallbackSpeechSynthesizer",
@@ -409,6 +415,8 @@ __all__ = [
     "SessionArchiveError",
     "SessionArchiveStore",
     "SessionContext",
+    "SessionDataManager",
+    "SessionRecord",
     "SessionTurnRecord",
     "SherpaOnnxKeywordDetector",
     "ShortTermSummaryDraft",
@@ -425,6 +433,7 @@ __all__ = [
     "SynthesizedAudio",
     "SystemInfoTool",
     "TextDelta",
+    "TextInputSubmitted",
     "ToolCatalog",
     "ToolClientError",
     "ToolConfigurationError",
@@ -451,6 +460,7 @@ __all__ = [
     "TtsNetworkError",
     "TtsPlaybackError",
     "TtsSynthesisError",
+    "TtsVoiceOption",
     "TurnBudget",
     "TurnBudgetExceededError",
     "TurnBudgetLimits",

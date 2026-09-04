@@ -70,6 +70,7 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     TurnId,
@@ -177,6 +178,7 @@ def test_every_runtime_event_carries_both_identifiers():
     correlation = CorrelationId.new()
     events = [
         TranscriptReady(turn, correlation, "hello"),
+        TextInputSubmitted(turn, correlation, "hello"),
         TextDelta(turn, correlation, "hel"),
         ApprovalRequested(turn, correlation, "call-1", "Open app", "R1"),
         ToolResultReady(turn, correlation, "call-1", "success", {"ok": True}),
@@ -345,6 +347,20 @@ def test_notice_starts_directly_in_synthesizing_only_from_idle():
     assert machine.turn_id == event.turn_id
     with pytest.raises(InvalidTransition):
         machine.start_notice(CorrelationId.new())
+
+
+def test_text_turn_starts_directly_in_thinking_only_from_idle():
+    machine = ConversationStateMachine()
+    correlation = CorrelationId.new()
+
+    event = machine.start_text_turn(correlation)
+
+    assert event.previous is ConversationPhase.IDLE
+    assert event.current is ConversationPhase.THINKING
+    assert event.correlation_id == correlation
+    assert machine.turn_id == event.turn_id
+    with pytest.raises(InvalidTransition):
+        machine.start_text_turn(CorrelationId.new())
 
 
 @pytest.mark.parametrize(

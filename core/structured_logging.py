@@ -19,6 +19,7 @@ from .events import (
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     WakeCommandPending,
@@ -180,6 +181,7 @@ class StructuredLogStore:
 
 RuntimeLogEvent = (
     StateChanged
+    | TextInputSubmitted
     | TranscriptReady
     | LlmUsageRecorded
     | ApprovalRequested
@@ -196,6 +198,7 @@ class RuntimeEventLogger:
 
     _EVENT_TYPES = (
         StateChanged,
+        TextInputSubmitted,
         TranscriptReady,
         LlmUsageRecorded,
         ApprovalRequested,
@@ -248,6 +251,8 @@ class RuntimeEventLogger:
             )
         if isinstance(event, TranscriptReady):
             return "info", "asr", "语音转写完成", {}
+        if isinstance(event, TextInputSubmitted):
+            return "info", "input", "手动文本已提交", {}
         if isinstance(event, WakeCommandPending):
             return "info", "wake", "唤醒后等待补充指令", {}
         if isinstance(event, LlmUsageRecorded):

@@ -3,21 +3,24 @@ import os
 import threading
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, QSize, Qt, QUrl
-from PySide6.QtGui import QEnterEvent, QTextDocument
+from PySide6.QtGui import QEnterEvent, QPalette, QTextDocument
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QToolButton
 
 from core.config import AppConfig
 from core.event_bus import EventBus
 from core.events import ConversationPhase, CorrelationId, TextDelta, TurnId
+from core.tts import TtsVoiceOption
 from ui.confirm_dialog import ConfirmationDialog
 from ui.event_bridge import QtEventBridge
+from ui.manual_input import ManualInputDialog
 from ui.pet_shell import (
     ConversationBubble,
     PetChoice,
@@ -106,11 +109,12 @@ def test_settings_window_has_deep_sea_sections_and_emits_config():
     assert window.navigation_labels == (
         "语音",
         "AI",
+        "会话",
         "桌宠",
         "隐私",
         "诊断",
     )
-    assert "#65D6D0" in window.styleSheet()
+    assert "#5FD3C7" in window.styleSheet()
     assert window.findChild(type(window.save_button), "save_settings") is window.save_button
 
     window.save_button.click()
@@ -120,13 +124,54 @@ def test_settings_window_has_deep_sea_sections_and_emits_config():
     assert window.isVisible() is False
 
 
+def test_settings_window_shows_explicit_select_and_spin_controls():
+    app()
+    window = SettingsWindow(AppConfig())
+    select_buttons = window.findChildren(QToolButton, "select_toggle")
+    up_buttons = window.findChildren(QToolButton, "spin_up")
+    down_buttons = window.findChildren(QToolButton, "spin_down")
+
+    assert len(select_buttons) == 4
+    assert all(button.accessibleName() == "展开选项" for button in select_buttons)
+    assert all(not button.toolTip() for button in select_buttons)
+    assert len(up_buttons) == 2
+    assert len(down_buttons) == 2
+    voice_toggle = window.voice_control.findChild(QToolButton, "select_toggle")
+    QCoreApplication.sendEvent(voice_toggle, QEvent(QEvent.Type.Enter))
+    assert window.voice_control.property("interactionActive") is True
+    assert voice_toggle._hovered is True
+    debounce_up = window.debounce_control.findChild(QToolButton, "spin_up")
+    debounce_down = window.debounce_control.findChild(QToolButton, "spin_down")
+    previous = window.debounce_spin.value()
+    debounce_up.click()
+    assert window.debounce_spin.value() == previous + 0.1
+    debounce_down.click()
+    assert window.debounce_spin.value() == previous
+    window.pet_combo.showPopup()
+    QCoreApplication.processEvents()
+    popup = window.pet_combo.view().window()
+    popup_image = popup.grab().toImage()
+    assert popup.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    assert popup.palette().color(QPalette.ColorRole.Window).name() == "#1a212a"
+    assert popup_image.pixelColor(popup_image.width() // 2, 0).name() != "#ffffff"
+    assert (
+        popup_image.pixelColor(
+            popup_image.width() // 2,
+            popup_image.height() - 1,
+        ).name()
+        != "#ffffff"
+    )
+    window.pet_combo.hidePopup()
+    window.close()
+
+
 def test_settings_window_uses_scrollable_cards_and_fixed_footer():
     app()
     window = SettingsWindow(AppConfig())
 
     assert window.width() >= 860
     assert window.height() >= 640
-    assert window._pages.count() == 5
+    assert window._pages.count() == 6
     assert all(
         isinstance(window._pages.widget(index), QScrollArea)
         and window._pages.widget(index).widgetResizable()
@@ -162,7 +207,9 @@ def test_settings_window_builds_new_config_from_edited_controls():
     window.sensitivity_slider.setValue(72)
     window.debounce_spin.setValue(2.4)
     window.asr_model_edit.setText("medium")
-    window.voice_combo.setEditText("zh-CN-YunxiNeural")
+    window.voice_combo.setCurrentIndex(
+        window.voice_combo.findData("zh-CN-YunxiNeural")
+    )
     window.llm_model_edit.setText("gpt-test")
     window.llm_api_combo.setCurrentIndex(
         window.llm_api_combo.findData("chat_completions")
@@ -196,6 +243,28 @@ def test_settings_window_builds_new_config_from_edited_controls():
     assert config.privacy.short_term_retention_days == 14
     assert config.privacy.diagnostic_recording is True
     assert window.sensitivity_value.text() == "72%"
+    window.close()
+
+
+def test_settings_window_lists_dynamic_chinese_voices_and_requests_preview():
+    app()
+    window = SettingsWindow(AppConfig())
+    previews = []
+    window.voice_preview_requested.connect(previews.append)
+    voices = (
+        TtsVoiceOption("zh-CN-XiaoxiaoNeural", "zh-CN", "Female"),
+        TtsVoiceOption("zh-TW-YunJheNeural", "zh-TW", "Male"),
+    )
+
+    window.set_voice_options(voices)
+    window.voice_combo.setCurrentIndex(1)
+    window.voice_preview_button.click()
+
+    assert window.voice_combo.count() == 2
+    assert window.voice_combo.itemData(1) == "zh-TW-YunJheNeural"
+    assert "中国台湾" in window.voice_combo.itemText(1)
+    assert previews == ["zh-TW-YunJheNeural"]
+    assert "2 个" in window.voice_catalog_status.text()
     window.close()
 
 
@@ -361,18 +430,158 @@ def test_tray_actions_emit_clear_user_intents():
     tray = TrayController()
     intents = []
     tray.wake_requested.connect(lambda: intents.append("wake"))
+    tray.manual_input_requested.connect(lambda: intents.append("manual"))
     tray.settings_requested.connect(lambda: intents.append("settings"))
     tray.quit_requested.connect(lambda: intents.append("quit"))
 
     tray.wake_action.trigger()
+    tray.manual_input_action.trigger()
     tray.settings_action.trigger()
     tray.quit_action.trigger()
 
-    assert intents == ["wake", "settings", "quit"]
+    assert intents == ["wake", "manual", "settings", "quit"]
     assert tray.wake_action.text() == "开始聆听"
+    assert tray.manual_input_action.text() == "手动输入"
     assert tray.settings_action.text() == "打开设置"
     assert tray.quit_action.text() == "退出 VoicePet"
     tray.close()
+
+
+def test_manual_input_dialog_submits_with_enter_and_keeps_errors_local():
+    app()
+    dialog = ManualInputDialog()
+    submitted = []
+    dialog.submitted.connect(submitted.append)
+    dialog.open_for_input()
+
+    QTest.keyClick(dialog.text_edit, Qt.Key.Key_Return)
+    assert submitted == []
+    assert "请输入" in dialog.error_label.text()
+
+    dialog.text_edit.setText("  帮我看看天气  ")
+    QTest.keyClick(dialog.text_edit, Qt.Key.Key_Return)
+    assert submitted == ["帮我看看天气"]
+    assert dialog.isVisible()
+
+    dialog.set_submitting(True)
+    assert dialog.send_button.isEnabled() is False
+    dialog.submission_succeeded()
+    assert dialog.text_edit.text() == ""
+    assert dialog.isVisible()
+    assert dialog.send_button.text() == "回复中…"
+    assert dialog.text_edit.isEnabled() is False
+    dialog.set_processing(False)
+    assert dialog.text_edit.isEnabled() is True
+    dialog.append_user_message("帮我看看天气")
+    dialog.append_assistant_delta("今天晴朗")
+    assert "帮我看看天气" in dialog.conversation_text
+    assert "今天晴朗" in dialog.conversation_text
+    assert not hasattr(dialog, "cancel_button")
+    dialog.close()
+    assert dialog.isHidden()
+    dialog.open_for_input()
+    assert "今天晴朗" in dialog.conversation_text
+    dialog.close()
+
+
+def test_chat_window_sidebar_switches_sessions_without_reopening():
+    app()
+    window = ManualInputDialog()
+    switched = []
+    deleted = []
+    window.session_activate_requested.connect(switched.append)
+    window.session_delete_requested.connect(deleted.append)
+    window.set_session("session-1", (), "当前会话")
+    records = (
+        SimpleNamespace(
+            id="session-1",
+            title="当前会话",
+            turn_count=2,
+            updated_at=datetime(2026, 9, 4, 10, tzinfo=UTC),
+            is_active=True,
+        ),
+        SimpleNamespace(
+            id="session-2",
+            title="另一个会话",
+            turn_count=3,
+            updated_at=datetime(2026, 9, 4, 9, tzinfo=UTC),
+            is_active=False,
+        ),
+    )
+
+    window.set_session_records(records)
+    window.open_for_input()
+    second_card = window.session_list.itemWidget(window.session_list.item(1))
+    second_card.activated.emit("session-2")
+    delete_button = second_card.findChild(QToolButton, "delete_session")
+    delete_button.click()
+
+    assert window.session_list.count() == 2
+    assert switched == ["session-2"]
+    assert deleted == ["session-2"]
+    assert window.isVisible()
+    window.close()
+
+
+def test_chat_window_uses_wide_bubbles_typing_status_and_scrolls_to_bottom():
+    application = app()
+    window = ManualInputDialog()
+    window.set_session("session-1", (), "测试会话")
+    window.open_for_input()
+    window.set_assistant_typing(True)
+    application.processEvents()
+
+    typing_labels = window.findChildren(QLabel, "typing_body")
+    assert any(label.isVisible() and "正在输入" in label.text() for label in typing_labels)
+
+    window.append_user_message("继续")
+    window.append_assistant_delta("这是一条")
+    application.processEvents()
+    first_bubble = window.findChildren(QFrame, "message_assistant")[-1]
+    initial_width = first_bubble.width()
+    window.append_assistant_delta(
+        "较长的回复，用来确认聊天气泡会随着流式回复持续加宽，"
+        "不会再把每句话挤成一条很窄的文字柱。"
+    )
+    application.processEvents()
+    assert first_bubble.width() > initial_width
+    for index in range(18):
+        window.append_user_message(f"第 {index} 条消息")
+        window.append_assistant_delta(f"第 {index} 条回复")
+        window.finish_assistant_message()
+    spin_until(
+        lambda: window.history_view.verticalScrollBar().maximum() > 0
+        and window.history_view.verticalScrollBar().value()
+        == window.history_view.verticalScrollBar().maximum()
+    )
+
+    assistant_bubbles = window.findChildren(QFrame, "message_assistant")
+    assert any(bubble.width() >= 500 for bubble in assistant_bubbles)
+    assert window.history_view.verticalScrollBar().value() > 0
+    assert not any(label.isVisible() for label in window.findChildren(QLabel, "typing_body"))
+    window.close()
+
+
+def test_chat_window_first_open_scrolls_existing_history_to_bottom():
+    app()
+    window = ManualInputDialog()
+    turns = tuple(
+        SimpleNamespace(
+            user_text=f"历史问题 {index}",
+            assistant_text=f"历史回答 {index}",
+        )
+        for index in range(20)
+    )
+    window.set_session("session-1", turns, "历史会话")
+
+    window.open_for_input()
+
+    spin_until(
+        lambda: window.history_view.verticalScrollBar().maximum() > 0
+        and window.history_view.verticalScrollBar().value()
+        == window.history_view.verticalScrollBar().maximum()
+    )
+    window.close()
 
 
 def test_pet_shell_is_transparent_topmost_and_bubble_renders_safe_markdown():
@@ -706,6 +915,62 @@ def test_settings_window_lists_memory_and_emits_data_management_intents():
     assert confirmed == ["memory-1"]
     assert resolved == ["memory-2"]
     assert exported == [True]
+    window.close()
+
+
+def test_settings_window_lists_sessions_and_emits_management_intents():
+    app()
+    window = SettingsWindow(AppConfig())
+    refreshed = []
+    deleted = []
+    cleared = []
+    selected = []
+    activated = []
+    created = []
+    window.session_refresh_requested.connect(lambda: refreshed.append(True))
+    window.session_delete_requested.connect(deleted.append)
+    window.session_clear_requested.connect(lambda: cleared.append(True))
+    window.session_selection_changed.connect(selected.append)
+    window.session_activate_requested.connect(activated.append)
+    window.session_new_requested.connect(lambda: created.append(True))
+    records = (
+        SimpleNamespace(
+            id="session-1",
+            title="帮我规划今天的工作",
+            turn_count=2,
+            last_assistant_text="先整理待办，再安排优先级",
+            created_at=datetime(2026, 9, 4, 9, 30, tzinfo=UTC),
+            updated_at=datetime(2026, 9, 4, 9, 35, tzinfo=UTC),
+            is_active=True,
+        ),
+    )
+
+    window.set_session_records(records)
+    window.session_list.setCurrentRow(0)
+    window.session_refresh_button.click()
+    window.session_activate_button.click()
+    window.session_new_button.click()
+    window.session_delete_button.click()
+    window.session_clear_button.click()
+    window.set_session_detail(
+        (
+            SimpleNamespace(
+                user_text="第一问",
+                assistant_text="第一答",
+                created_at=datetime(2026, 9, 4, 9, 30, tzinfo=UTC),
+            ),
+        )
+    )
+
+    assert window.session_list.count() == 1
+    assert "帮我规划今天的工作" in window.session_list.item(0).text()
+    assert refreshed == [True]
+    assert selected == ["session-1"]
+    assert activated == ["session-1"]
+    assert created == [True]
+    assert deleted == ["session-1"]
+    assert cleared == [True]
+    assert "第一问" in window.session_detail.toPlainText()
     window.close()
 
 

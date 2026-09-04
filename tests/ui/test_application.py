@@ -1,6 +1,7 @@
 import os
 from concurrent.futures import Future
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,8 +9,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 import ui.application as application_module
 from core.asr import AsrModelState
@@ -25,13 +26,15 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TextInputSubmitted,
     ToolResultReady,
     TranscriptReady,
     TurnId,
 )
 from core.policy import ConfirmationMode
 from core.runtime_errors import runtime_error_event
-from core.tts import TtsPlaybackError
+from core.state_machine import InvalidTransition
+from core.tts import TtsPlaybackError, TtsVoiceOption
 from core.wake import WakeRuntimeStatus
 from core.wake_models import WakeDownloadProgress, WakeModelState
 from ui.application import ApplicationController, run_ui
@@ -90,6 +93,72 @@ def test_model_download_confirmation_maps_standard_button(
     parent.close()
 
 
+def test_session_clear_dialog_has_readable_chinese_danger_action():
+    application = app_instance()
+    parent = SettingsWindow(AppConfig())
+
+    dialog = application_module._build_session_clear_dialog(parent)
+
+    assert dialog.windowTitle() == "清空全部会话"
+    assert "永久删除" in dialog.text()
+    clear_button = dialog.button(QMessageBox.StandardButton.Yes)
+    cancel_button = dialog.button(QMessageBox.StandardButton.No)
+    assert clear_button.text() == "清空全部"
+    assert clear_button.objectName() == "danger_action"
+    assert cancel_button.text() == "取消"
+    assert dialog.defaultButton() is cancel_button
+    assert "background: #081827" in dialog.styleSheet()
+    assert "#danger_action" in dialog.styleSheet()
+    dialog.show()
+    application.processEvents()
+    icon_label = dialog.findChild(QLabel, "qt_msgboxex_icon_label")
+    text_label = dialog.findChild(QLabel, "qt_msgbox_label")
+    assert icon_label is not None
+    assert text_label is not None
+    assert icon_label.width() <= 64
+    assert text_label.width() <= 460
+    assert dialog.width() < 600
+    dialog.close()
+    parent.close()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (QMessageBox.StandardButton.Yes, True),
+        (QMessageBox.StandardButton.No, False),
+    ],
+)
+def test_session_clear_confirmation_maps_standard_button(
+    monkeypatch,
+    result,
+    expected,
+):
+    app_instance()
+    parent = SettingsWindow(AppConfig())
+    monkeypatch.setattr(QMessageBox, "exec", lambda dialog: int(result))
+
+    assert application_module._confirm_session_clear(parent) is expected
+    parent.close()
+
+
+def test_session_delete_dialog_has_chinese_safe_default():
+    app_instance()
+    parent = SettingsWindow(AppConfig())
+
+    dialog = application_module._build_session_delete_dialog(parent)
+
+    delete_button = dialog.button(QMessageBox.StandardButton.Yes)
+    cancel_button = dialog.button(QMessageBox.StandardButton.No)
+    assert dialog.windowTitle() == "删除会话"
+    assert delete_button.text() == "删除会话"
+    assert delete_button.objectName() == "danger_action"
+    assert cancel_button.text() == "取消"
+    assert dialog.defaultButton() is cancel_button
+    dialog.close()
+    parent.close()
+
+
 class FakeRuntimeHost:
     def __init__(self):
         self.started = 0
@@ -120,6 +189,18 @@ class FakeRuntimeHost:
         self.loads = 0
         self.notices = []
         self.speech_toggles = []
+        self.submitted_texts = []
+        self.submit_text_future = None
+        self.session_records = ()
+        self.deleted_sessions = []
+        self.cleared_sessions = 0
+        self.active_session_id = str(TurnId.new())
+        self.session_turns = {}
+        self.activated_sessions = []
+        self.new_sessions = 0
+        self.tts_voices = ()
+        self.tts_voice_checks = 0
+        self.tts_voice_previews = []
         self.wake_state = WakeModelState.READY
         self.wake_status = WakeRuntimeStatus.LISTENING
         self.wake_state_checks = 0
@@ -145,6 +226,26 @@ class FakeRuntimeHost:
 
     def set_speech_enabled(self, enabled):
         self.speech_toggles.append(enabled)
+        future = Future()
+        future.set_result(None)
+        return future
+
+    def submit_text(self, text):
+        self.submitted_texts.append(text)
+        if self.submit_text_future is not None:
+            return self.submit_text_future
+        future = Future()
+        future.set_result(TurnId.new())
+        return future
+
+    def list_tts_voices(self):
+        self.tts_voice_checks += 1
+        future = Future()
+        future.set_result(self.tts_voices)
+        return future
+
+    def preview_tts_voice(self, voice_name):
+        self.tts_voice_previews.append(voice_name)
         future = Future()
         future.set_result(None)
         return future
@@ -230,6 +331,47 @@ class FakeRuntimeHost:
 
     def export_memories(self, destination):
         self.exported_memories.append(destination)
+        future = Future()
+        future.set_result(2)
+        return future
+
+    def list_sessions(self):
+        future = Future()
+        future.set_result(self.session_records)
+        return future
+
+    def current_session_id(self):
+        future = Future()
+        future.set_result(self.active_session_id)
+        return future
+
+    def list_session_turns(self, session_id):
+        future = Future()
+        future.set_result(self.session_turns.get(session_id, ()))
+        return future
+
+    def activate_session(self, session_id):
+        self.active_session_id = session_id
+        self.activated_sessions.append(session_id)
+        future = Future()
+        future.set_result(self.session_turns.get(session_id, ()))
+        return future
+
+    def new_session(self):
+        self.active_session_id = str(TurnId.new())
+        self.new_sessions += 1
+        future = Future()
+        future.set_result(self.active_session_id)
+        return future
+
+    def delete_session(self, session_id):
+        self.deleted_sessions.append(session_id)
+        future = Future()
+        future.set_result(True)
+        return future
+
+    def clear_sessions(self):
+        self.cleared_sessions += 1
         future = Future()
         future.set_result(2)
         return future
@@ -331,12 +473,59 @@ def test_application_controller_routes_hotkey_activation_and_closes_once(tmp_pat
     assert hotkey.closed == 1
 
 
+def test_tray_manual_input_submits_text_and_stays_open_after_acceptance(tmp_path):
+    application = app_instance()
+    runtime = FakeRuntimeHost()
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        runtime_host=runtime,
+    )
+
+    controller.tray.manual_input_action.trigger()
+    assert controller.manual_input.isVisible()
+    controller.manual_input.text_edit.setText("帮我整理待办")
+    controller.manual_input.send_button.click()
+
+    assert runtime.submitted_texts == ["帮我整理待办"]
+    assert controller.manual_input.isVisible()
+    assert controller.manual_input.text_edit.text() == ""
+    controller.close()
+
+
+def test_manual_input_keeps_text_and_explains_busy_runtime(tmp_path):
+    application = app_instance()
+    runtime = FakeRuntimeHost()
+    runtime.submit_text_future = Future()
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        runtime_host=runtime,
+    )
+    controller.show_manual_input()
+    controller.manual_input.text_edit.setText("第二条请求")
+    controller.manual_input.send_button.click()
+
+    runtime.submit_text_future.set_exception(
+        InvalidTransition("cannot start text turn from THINKING")
+    )
+    QCoreApplication.processEvents()
+
+    assert controller.manual_input.isVisible()
+    assert controller.manual_input.text_edit.text() == "第二条请求"
+    assert "正在处理其他请求" in controller.manual_input.error_label.text()
+    controller.close()
+
+
 def test_application_controller_maps_runtime_events_to_safe_bubble(tmp_path):
     application = app_instance()
     bus = EventBus()
     event_types = (
         StateChanged,
         TranscriptReady,
+        TextInputSubmitted,
         TextDelta,
         ApprovalRequested,
         ToolResultReady,
@@ -371,6 +560,11 @@ def test_application_controller_maps_runtime_events_to_safe_bubble(tmp_path):
         bus.publish(TranscriptReady(turn_id, correlation_id, "打开设置"))
     )
     assert controller.pet.bubble.text() == "你：打开设置"
+
+    __import__("asyncio").run(
+        bus.publish(TextInputSubmitted(turn_id, correlation_id, "手动问题"))
+    )
+    assert controller.pet.bubble.text() == "你：手动问题"
 
     __import__("asyncio").run(
         bus.publish(
@@ -847,6 +1041,62 @@ def test_application_controller_routes_memory_management_off_ui_thread(
     controller.close()
 
 
+def test_application_controller_routes_session_management(tmp_path, monkeypatch):
+    application = app_instance()
+    runtime = FakeRuntimeHost()
+    session_id = runtime.active_session_id
+    turn = SimpleNamespace(
+        user_text="第一问",
+        assistant_text="第一答",
+        created_at=datetime(2026, 9, 4, 9, tzinfo=UTC),
+    )
+    runtime.session_turns[session_id] = (turn,)
+    runtime.session_records = (
+        SimpleNamespace(
+            id=session_id,
+            title="第一问",
+            turn_count=1,
+            last_assistant_text="第一答",
+            created_at=datetime(2026, 9, 4, 9, tzinfo=UTC),
+            updated_at=datetime(2026, 9, 4, 9, tzinfo=UTC),
+            is_active=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "ui.application._confirm_session_clear",
+        lambda parent: True,
+    )
+    monkeypatch.setattr(
+        "ui.application._confirm_session_delete",
+        lambda parent: True,
+    )
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        runtime_host=runtime,
+    )
+
+    controller.settings.session_refresh_button.click()
+    assert controller.settings.session_list.count() == 1
+    controller.settings.session_list.setCurrentRow(0)
+    assert "第一答" in controller.settings.session_detail.toPlainText()
+    controller.settings.session_activate_button.click()
+    assert runtime.activated_sessions == [session_id]
+    assert "第一问" in controller.manual_input.conversation_text
+    controller.manual_input.new_session_button.click()
+    assert runtime.new_sessions == 1
+    assert "这里还没有消息" in controller.manual_input.conversation_text
+    controller.settings.session_list.setCurrentRow(0)
+    controller.settings.session_delete_button.click()
+    controller.settings.session_clear_button.click()
+
+    assert runtime.deleted_sessions == [session_id]
+    assert runtime.cleared_sessions == 1
+    assert "已清理 2 条" in controller.settings.validation_message.text()
+    controller.close()
+
+
 def test_application_controller_imports_and_switches_pet_after_validation(
     tmp_path,
     monkeypatch,
@@ -1077,6 +1327,34 @@ def test_application_controller_applies_voice_toggle_immediately(tmp_path):
     controller.close()
 
 
+def test_application_controller_loads_and_previews_chinese_voices(tmp_path):
+    application = app_instance()
+    runtime = FakeRuntimeHost()
+    runtime.tts_voices = (
+        TtsVoiceOption("zh-CN-XiaoxiaoNeural", "zh-CN", "Female"),
+        TtsVoiceOption("zh-HK-WanLungNeural", "zh-HK", "Male"),
+    )
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        runtime_host=runtime,
+    )
+
+    controller.show_settings()
+    QCoreApplication.processEvents()
+
+    assert runtime.tts_voice_checks == 1
+    assert controller.settings.voice_combo.count() == 2
+    assert "中国大陆" in controller.settings.voice_combo.itemText(0)
+    controller.settings.voice_preview_button.click()
+    QCoreApplication.processEvents()
+    assert runtime.tts_voice_previews == ["zh-CN-XiaoxiaoNeural"]
+    assert controller.settings.voice_preview_button.text() == "试听"
+    assert controller.settings.voice_catalog_status.text() == "试听完成"
+    controller.close()
+
+
 def test_application_controller_marks_runtime_changes_for_restart_once(tmp_path):
     application = app_instance()
     controller = ApplicationController(
@@ -1172,6 +1450,7 @@ def test_settings_has_only_personal_runtime_pages():
     assert settings.navigation_labels == (
         "语音",
         "AI",
+        "会话",
         "桌宠",
         "隐私",
         "诊断",
