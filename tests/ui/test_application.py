@@ -9,7 +9,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 import ui.application as application_module
@@ -37,6 +37,7 @@ from core.state_machine import InvalidTransition
 from core.tts import TtsPlaybackError, TtsVoiceOption
 from core.wake import WakeRuntimeStatus
 from core.wake_models import WakeDownloadProgress, WakeModelState
+from core.window_state import WindowPosition
 from ui.application import ApplicationController, run_ui
 from ui.event_bridge import QtEventBridge
 from ui.pet_shell import PetChoice
@@ -189,6 +190,7 @@ class FakeRuntimeHost:
         self.loads = 0
         self.notices = []
         self.speech_toggles = []
+        self.manual_speech_toggles = []
         self.submitted_texts = []
         self.submit_text_future = None
         self.session_records = ()
@@ -226,6 +228,12 @@ class FakeRuntimeHost:
 
     def set_speech_enabled(self, enabled):
         self.speech_toggles.append(enabled)
+        future = Future()
+        future.set_result(None)
+        return future
+
+    def set_manual_input_speech_enabled(self, enabled):
+        self.manual_speech_toggles.append(enabled)
         future = Future()
         future.set_result(None)
         return future
@@ -409,6 +417,26 @@ class FailingConfigStore:
     def save(self, config):
         del config
         raise ConfigError("磁盘只读")
+
+
+class FakeStartupManager:
+    def __init__(self):
+        self.calls = []
+
+    def set_enabled(self, enabled):
+        self.calls.append(enabled)
+
+
+class FakePositionStore:
+    def __init__(self, position=None):
+        self.position = position
+        self.saved = []
+
+    def load(self):
+        return self.position
+
+    def save(self, position):
+        self.saved.append(position)
 
 
 class FakeCredentialStore:
@@ -1327,6 +1355,50 @@ def test_application_controller_applies_voice_toggle_immediately(tmp_path):
     controller.close()
 
 
+def test_application_controller_applies_manual_voice_toggle_immediately(tmp_path):
+    application = app_instance()
+    runtime = FakeRuntimeHost()
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        runtime_host=runtime,
+    )
+
+    controller.settings.manual_speech_enabled_checkbox.setChecked(True)
+    controller.settings.save_button.click()
+
+    assert runtime.manual_speech_toggles == [True]
+    assert "立即生效" in controller.settings.validation_message.text()
+    controller.close()
+
+
+def test_application_controller_applies_startup_and_persists_pet_position(tmp_path):
+    application = app_instance()
+    startup = FakeStartupManager()
+    positions = FakePositionStore(WindowPosition(320, 240))
+    controller = ApplicationController(
+        application,
+        ConfigStore(tmp_path / "config.json"),
+        AppConfig(),
+        startup_manager=startup,
+        position_store=positions,
+    )
+
+    controller.start()
+    application.processEvents()
+    assert controller.pet.renderer_global_position() == QPoint(320, 240)
+
+    controller.settings.start_at_login_checkbox.setChecked(True)
+    controller.settings.save_button.click()
+    controller.pet.position_changed.emit(QPoint(-500, 300))
+
+    assert startup.calls == [False, True]
+    assert positions.saved == [WindowPosition(-500, 300)]
+    assert "立即生效" in controller.settings.validation_message.text()
+    controller.close()
+
+
 def test_application_controller_loads_and_previews_chinese_voices(tmp_path):
     application = app_instance()
     runtime = FakeRuntimeHost()
@@ -1411,6 +1483,7 @@ def test_run_ui_normal_mode_builds_starts_and_closes_runtime(tmp_path, monkeypat
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     runtime = FakeRuntimeHost()
     hotkey = FakeHotkey()
+    startup = FakeStartupManager()
     built = []
 
     def runtime_builder(config, event_bus, data_root, *, api_key, pet_directory):
@@ -1430,6 +1503,7 @@ def test_run_ui_normal_mode_builds_starts_and_closes_runtime(tmp_path, monkeypat
             {"get": lambda self, name: "sk-runtime-secret"},
         )(),
         hotkey_factory=lambda: hotkey,
+        startup_manager_factory=lambda: startup,
         event_loop=lambda: 17,
     )
 
@@ -1441,6 +1515,7 @@ def test_run_ui_normal_mode_builds_starts_and_closes_runtime(tmp_path, monkeypat
     assert runtime.started == 1
     assert runtime.closed == 1
     assert hotkey.closed == 1
+    assert startup.calls == [False]
 
 
 def test_settings_has_only_personal_runtime_pages():

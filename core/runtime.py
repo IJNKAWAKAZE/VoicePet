@@ -50,6 +50,8 @@ class CoordinatorService(Protocol):
 
     async def set_speech_enabled(self, enabled: bool) -> None: ...
 
+    async def set_manual_input_speech_enabled(self, enabled: bool) -> None: ...
+
 
 class ActivationService(Protocol):
     """RuntimeHost 使用的统一激活边界"""
@@ -246,6 +248,11 @@ class RuntimeHost:
     def set_speech_enabled(self, enabled: bool) -> Future[None]:
         return self._submit(
             self._services.coordinator.set_speech_enabled(enabled)
+        )
+
+    def set_manual_input_speech_enabled(self, enabled: bool) -> Future[None]:
+        return self._submit(
+            self._services.coordinator.set_manual_input_speech_enabled(enabled)
         )
 
     def list_tts_voices(self) -> Future[tuple[Any, ...]]:

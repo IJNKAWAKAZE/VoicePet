@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from math import ceil
+
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QTextDocument
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -43,7 +46,7 @@ QFrame#message_user { background: #286B69; border: 1px solid #37807D; border-rad
 QFrame#message_assistant { background: #19232E; border: 1px solid #2D3A47; border-radius: 13px; }
 QLabel#message_user_name { color: #DFFFFC; font-size: 11px; font-weight: 700; }
 QLabel#message_assistant_name { color: #74DED3; font-size: 11px; font-weight: 700; }
-QLabel#message_body { color: #F2F6F7; font-size: 14px; }
+QTextBrowser#message_body { background: transparent; color: #F2F6F7; border: 0; padding: 0; font-size: 14px; }
 QLabel#empty_history { color: #73808D; font-size: 13px; }
 QLabel#typing_body { color: #9DAAB5; font-size: 13px; }
 QFrame#composer { background: #111820; border: 1px solid #34414E; border-radius: 12px; }
@@ -93,6 +96,55 @@ class _ChatLineEdit(QLineEdit):
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
         self.focus_changed.emit(False)
+
+
+class _MarkdownMessageBody(QTextBrowser):
+    """安全渲染聊天消息中的 Markdown"""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("message_body")
+        self.setReadOnly(True)
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.document().setDocumentMargin(0)
+        self.document().documentLayout().documentSizeChanged.connect(
+            self._document_size_changed
+        )
+        self.set_message(text)
+
+    def set_message(self, text: str) -> None:
+        features = (
+            QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+            | QTextDocument.MarkdownFeature.MarkdownNoHTML
+        )
+        self.document().setMarkdown(text, features)
+        self._fit_height()
+
+    def set_content_width(self, width: int) -> None:
+        self.setFixedWidth(max(1, width))
+        self.document().setTextWidth(max(1, width))
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        self._document_size_changed(self.document().size())
+
+    def _document_size_changed(self, size) -> None:
+        target_height = max(20, ceil(size.height()) + 2)
+        if self.height() != target_height:
+            self.setFixedHeight(target_height)
+            self.updateGeometry()
+        self.verticalScrollBar().setValue(0)
+
+    def loadResource(self, resource_type, name):
+        """阻止 Markdown 内容读取本地或远程图片"""
+
+        if resource_type == QTextDocument.ResourceType.ImageResource:
+            return None
+        return super().loadResource(resource_type, name)
 
 
 class _SessionCard(QFrame):
@@ -161,7 +213,7 @@ class ManualInputDialog(QWidget):
         self._session_id = ""
         self._messages: list[tuple[str, str]] = []
         self._assistant_streaming = False
-        self._streaming_body: QLabel | None = None
+        self._streaming_body: _MarkdownMessageBody | None = None
         self._streaming_bubble: QFrame | None = None
         self._submitting = False
         self._processing = False
@@ -381,13 +433,12 @@ class ManualInputDialog(QWidget):
                 self._messages[-1] = (role, current + text)
                 if self._streaming_body is not None:
                     updated = current + text
-                    self._streaming_body.setText(updated)
+                    self._streaming_body.set_message(updated)
                     if self._streaming_bubble is not None:
                         self._resize_bubble(
                             self._streaming_bubble,
                             self._streaming_body,
                             updated,
-                            "assistant",
                         )
                     self._scroll_to_bottom()
                     return
@@ -496,7 +547,7 @@ class ManualInputDialog(QWidget):
     def _message_row(
         role: str,
         text: str,
-    ) -> tuple[QWidget, QLabel, QFrame]:
+    ) -> tuple[QWidget, _MarkdownMessageBody, QFrame]:
         row = QWidget()
         row.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -504,16 +555,12 @@ class ManualInputDialog(QWidget):
         )
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 3, 0, 3)
-        body = QLabel(text)
-        body.setObjectName("message_body")
-        body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setMaximumWidth(500)
+        body = _MarkdownMessageBody(text)
         bubble = QFrame()
         bubble.setObjectName(
             "message_user" if role == "user" else "message_assistant"
         )
-        ManualInputDialog._resize_bubble(bubble, body, text, role)
+        ManualInputDialog._resize_bubble(bubble, body, text)
         bubble.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Maximum,
@@ -538,16 +585,16 @@ class ManualInputDialog(QWidget):
     @staticmethod
     def _resize_bubble(
         bubble: QFrame,
-        body: QLabel,
+        body: _MarkdownMessageBody,
         text: str,
-        role: str,
     ) -> None:
         longest_line = max(text.splitlines() or [text], key=len)
         natural_width = QFontMetrics(body.font()).horizontalAdvance(
             longest_line
         ) + 36
-        minimum_width = 180 if role == "assistant" else 96
+        minimum_width = 180
         bubble.setFixedWidth(max(minimum_width, min(natural_width, 540)))
+        body.set_content_width(bubble.width() - 28)
 
     @staticmethod
     def _typing_row() -> tuple[QWidget, QLabel]:

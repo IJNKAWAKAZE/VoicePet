@@ -442,6 +442,7 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
             session_archive=archive,
             speech_synthesizer=synthesizer,
             audio_player=player,
+            manual_input_speech_enabled=True,
         )
 
         turn_id = await coordinator.submit_text("  手动问题  ")
@@ -461,6 +462,33 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
         assert archive.calls == [(str(turn_id), "手动问题", "手动回复")]
         assert [text for text, _ in synthesizer.calls] == ["手动回复"]
         assert len(player.calls) == 1
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_manual_text_skips_tts_when_manual_speech_is_disabled():
+    async def scenario():
+        synthesizer = RecordingSynthesizer()
+        player = RecordingPlayer()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            UnexpectedTranscript(),
+            EventBus(),
+            llm_provider=ScriptedLlm(
+                [LlmTextDelta("安静回复"), LlmCompleted("response", 1, 1)]
+            ),
+            speech_synthesizer=synthesizer,
+            audio_player=player,
+            manual_input_speech_enabled=False,
+        )
+
+        await coordinator.submit_text("手动问题")
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert coordinator.response_text == "安静回复"
+        assert synthesizer.calls == []
+        assert player.calls == []
         await coordinator.stop()
 
     asyncio.run(scenario())

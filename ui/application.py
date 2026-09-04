@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Protocol
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 from core.asr import AsrModelState
@@ -32,9 +32,15 @@ from core.events import (
 from core.policy import ConfirmationMode
 from core.runtime import RuntimeHost, RuntimeServices
 from core.runtime_factory import build_default_runtime
+from core.startup import StartupError, WindowsStartupManager
 from core.state_machine import InvalidTransition
 from core.wake import WakeRuntimeStatus
 from core.wake_models import WakeDownloadProgress, WakeModelState
+from core.window_state import (
+    WindowPosition,
+    WindowPositionStore,
+    WindowStateError,
+)
 
 from .confirm_dialog import ConfirmationDialog
 from .event_bridge import QtEventBridge
@@ -185,6 +191,8 @@ class RuntimeHostProtocol(Protocol):
 
     def set_speech_enabled(self, enabled: bool) -> Future[None]: ...
 
+    def set_manual_input_speech_enabled(self, enabled: bool) -> Future[None]: ...
+
     def list_tts_voices(self) -> Future[Any]: ...
 
     def preview_tts_voice(self, voice_name: str) -> Future[None]: ...
@@ -253,6 +261,20 @@ class CredentialStoreProtocol(Protocol):
     def close(self) -> None: ...
 
 
+class StartupManagerProtocol(Protocol):
+    """设置页使用的当前用户开机启动边界"""
+
+    def set_enabled(self, enabled: bool) -> None: ...
+
+
+class WindowPositionStoreProtocol(Protocol):
+    """桌宠位置持久化边界"""
+
+    def load(self) -> WindowPosition | None: ...
+
+    def save(self, position: WindowPosition) -> None: ...
+
+
 _RUNTIME_EVENT_TYPES = (
     StateChanged,
     TranscriptReady,
@@ -312,6 +334,8 @@ class ApplicationController(QObject):
         pet_directory: str | Path | None = None,
         catalog_loader: Callable[[], tuple[PetChoice, ...]] | None = None,
         global_hotkey: Any | None = None,
+        startup_manager: StartupManagerProtocol | None = None,
+        position_store: WindowPositionStoreProtocol | None = None,
     ) -> None:
         super().__init__()
         self._application = application
@@ -324,6 +348,8 @@ class ApplicationController(QObject):
         self._pet_choices: dict[str, PetChoice] = {}
         self._last_preview_pet_id = config.ui.active_skin
         self._global_hotkey = global_hotkey
+        self._startup_manager = startup_manager
+        self._position_store = position_store
         self._response_text = ""
         self._conversation_phase = ConversationPhase.IDLE
         self._runtime_error_visible = False
@@ -348,6 +374,7 @@ class ApplicationController(QObject):
         self.tray.wake_requested.connect(self._activate_runtime)
         self.tray.manual_input_requested.connect(self.show_manual_input)
         self.pet.activation_requested.connect(self._activate_runtime)
+        self.pet.position_changed.connect(self._save_pet_position)
         if self._global_hotkey is not None:
             self._global_hotkey.activated.connect(
                 lambda: self._activate_runtime("hotkey")
@@ -448,6 +475,13 @@ class ApplicationController(QObject):
         return self._closed
 
     def start(self) -> None:
+        if self._startup_manager is not None:
+            try:
+                self._startup_manager.set_enabled(
+                    self._config.ui.start_at_login
+                )
+            except StartupError:
+                pass
         if self._runtime_host is not None:
             try:
                 self._runtime_host.start()
@@ -460,6 +494,7 @@ class ApplicationController(QObject):
                     self._prepare_cached_asr()
                     self._check_wake_model()
         self.pet.show()
+        self._restore_pet_position()
         self.tray.show()
 
     def show_settings(self) -> None:
@@ -511,6 +546,13 @@ class ApplicationController(QObject):
     def _save_config(self, config: AppConfig) -> None:
         application_mode = classify_config_change(self._config, config)
         speech_changed = self._config.tts.enabled != config.tts.enabled
+        manual_speech_changed = (
+            self._config.tts.manual_input_enabled
+            != config.tts.manual_input_enabled
+        )
+        startup_changed = (
+            self._config.ui.start_at_login != config.ui.start_at_login
+        )
         wake_changed = self._config.wake_word != config.wake_word
         try:
             self._config_store.save(config)
@@ -519,6 +561,14 @@ class ApplicationController(QObject):
             return
         self._config = config
         self.pet.set_always_on_top(config.ui.always_on_top)
+        if startup_changed and self._startup_manager is not None:
+            try:
+                self._startup_manager.set_enabled(config.ui.start_at_login)
+            except StartupError:
+                self.settings.validation_message.setText(
+                    "设置已保存，但开机启动设置失败，请检查系统权限"
+                )
+                return
         if speech_changed and self._runtime_host is not None:
             try:
                 future = self._runtime_host.set_speech_enabled(
@@ -531,6 +581,18 @@ class ApplicationController(QObject):
                 )
                 return
             future.add_done_callback(self._speech_setting_finished)
+        if manual_speech_changed and self._runtime_host is not None:
+            try:
+                future = self._runtime_host.set_manual_input_speech_enabled(
+                    config.tts.manual_input_enabled
+                )
+            except Exception as error:  # noqa: BLE001 配置已保存时仅报告安全错误
+                _ = error
+                self.settings.validation_message.setText(
+                    "设置已保存，但手动输入播报切换失败，重启后生效"
+                )
+                return
+            future.add_done_callback(self._manual_speech_setting_finished)
         if wake_changed and self._runtime_host is not None:
             try:
                 future = self._runtime_host.configure_wake_word(
@@ -560,6 +622,33 @@ class ApplicationController(QObject):
             self.memory_status_ready.emit(
                 "设置已保存，但语音播报切换失败，重启后生效"
             )
+
+    def _manual_speech_setting_finished(self, future: Future[None]) -> None:
+        try:
+            future.result()
+        except Exception as error:  # noqa: BLE001 后台异常不能跨线程操作 QWidget
+            _ = error
+            self.memory_status_ready.emit(
+                "设置已保存，但手动输入播报切换失败，重启后生效"
+            )
+
+    def _restore_pet_position(self) -> None:
+        if self._position_store is None:
+            return
+        position = self._position_store.load()
+        if position is None:
+            return
+        self.pet.move_renderer_to(QPoint(position.x, position.y))
+
+    def _save_pet_position(self, position: QPoint) -> None:
+        if self._position_store is None:
+            return
+        try:
+            self._position_store.save(
+                WindowPosition(position.x(), position.y())
+            )
+        except (ValueError, WindowStateError):
+            return
 
     def _load_tts_voice_catalog(self) -> None:
         if self._voice_catalog_loaded or self._voice_catalog_loading:
@@ -1729,6 +1818,8 @@ def run_ui(
     runtime_host_factory: Callable[[RuntimeServices], RuntimeHostProtocol] = RuntimeHost,
     credential_store_factory: Callable[[object], Any] = DpapiCredentialStore,
     hotkey_factory: Callable[[], Any | None] = create_global_hotkey,
+    startup_manager_factory: Callable[[], Any] = WindowsStartupManager,
+    position_store_factory: Callable[[object], Any] = WindowPositionStore,
     event_loop: Callable[[], int] | None = None,
 ) -> int:
     """加载配置并运行 Qt 主进程或无窗口 smoke test"""
@@ -1765,6 +1856,13 @@ def run_ui(
     )
     runtime_host = runtime_host_factory(services)
     global_hotkey = hotkey_factory()
+    try:
+        startup_manager = startup_manager_factory()
+    except StartupError:
+        startup_manager = None
+    position_store = position_store_factory(
+        config_path.parent / "window-state.json"
+    )
     bridge = QtEventBridge(event_bus, _RUNTIME_EVENT_TYPES)
     controller = ApplicationController(
         application,
@@ -1776,6 +1874,8 @@ def run_ui(
         pet_directory=active_pet_directory,
         catalog_loader=lambda: discover_pet_choices(config_path.parent),
         global_hotkey=global_hotkey,
+        startup_manager=startup_manager,
+        position_store=position_store,
     )
     controller.start()
     try:

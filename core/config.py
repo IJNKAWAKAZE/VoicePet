@@ -95,6 +95,7 @@ class LlmConfig:
 @dataclass(frozen=True, slots=True)
 class TtsConfig:
     enabled: bool = True
+    manual_input_enabled: bool = False
     online: str = "edge-tts"
     offline: str = "windows-sapi"
     voice: str = "zh-CN-XiaoxiaoNeural"
@@ -105,6 +106,7 @@ class UiConfig:
     active_skin: str = "dpsk-girl"
     always_on_top: bool = True
     hot_reload_skin: bool = True
+    start_at_login: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,8 +165,10 @@ class AppConfig:
             self.asr.use_vad,
             self.llm.store,
             self.tts.enabled,
+            self.tts.manual_input_enabled,
             self.ui.always_on_top,
             self.ui.hot_reload_skin,
+            self.ui.start_at_login,
             self.privacy.memory_enabled,
             self.privacy.diagnostic_recording,
         ):
@@ -225,9 +229,20 @@ class AppConfig:
                 "tts",
                 TtsConfig,
                 defaults.tts,
-                allowed_missing={"enabled": defaults.tts.enabled},
+                allowed_missing={
+                    "enabled": defaults.tts.enabled,
+                    "manual_input_enabled": defaults.tts.manual_input_enabled,
+                },
             ),
-            ui=_section(data, "ui", UiConfig, defaults.ui),
+            ui=_section(
+                data,
+                "ui",
+                UiConfig,
+                defaults.ui,
+                allowed_missing={
+                    "start_at_login": defaults.ui.start_at_login,
+                },
+            ),
             privacy=_section(
                 data,
                 "privacy",

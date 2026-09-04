@@ -184,6 +184,7 @@ class Coordinator:
         speech_synthesizer: SpeechSynthesizer | None = None,
         audio_player: AudioPlayer | None = None,
         speech_enabled: bool = True,
+        manual_input_speech_enabled: bool = False,
         wake_keyword: str = "你好，小蓝",
         policy_engine: PolicyEngine | None = None,
         authorization_issuer: AuthorizationIssuer | None = None,
@@ -208,6 +209,8 @@ class Coordinator:
         validate_llm_model_name(llm_model)
         if type(speech_enabled) is not bool:
             raise TypeError("语音播报开关必须是布尔值")
+        if type(manual_input_speech_enabled) is not bool:
+            raise TypeError("手动输入语音播报开关必须是布尔值")
         normalize_wake_keyword(wake_keyword)
         self._audio_session = audio_session
         self._transcript_adapter = transcript_adapter
@@ -225,6 +228,8 @@ class Coordinator:
         self._speech_synthesizer = speech_synthesizer
         self._audio_player = audio_player
         self._speech_enabled = speech_enabled
+        self._manual_input_speech_enabled = manual_input_speech_enabled
+        self._active_input_is_manual = False
         self._wake_keyword = wake_keyword
         self._policy_engine = policy_engine
         self._authorization_issuer = authorization_issuer
@@ -264,6 +269,10 @@ class Coordinator:
         return self._speech_enabled
 
     @property
+    def manual_input_speech_enabled(self) -> bool:
+        return self._manual_input_speech_enabled
+
+    @property
     def pending_tool_call(self) -> LlmToolCall | None:
         return self._pending_tool_call
 
@@ -276,6 +285,7 @@ class Coordinator:
         activation_source = self._validate_activation_source(source)
         self._response_text = ""
         self._active_input_text = ""
+        self._active_input_is_manual = False
         self._active_session_id = (
             self._session_context.session_id
             if self._session_context is not None
@@ -318,6 +328,7 @@ class Coordinator:
         state_event = self._state_machine.start_text_turn(correlation_id)
         self._response_text = ""
         self._active_input_text = normalized
+        self._active_input_is_manual = True
         self._active_session_id = (
             self._session_context.session_id
             if self._session_context is not None
@@ -366,6 +377,7 @@ class Coordinator:
 
         self._response_text = normalized
         self._active_input_text = ""
+        self._active_input_is_manual = False
         self._active_session_id = None
         self._session_turn_archived = False
         self._persistent_turn_archived = False
@@ -453,6 +465,29 @@ class Coordinator:
             return
         if self._active_source is not None:
             self._active_source.cancel("speech_disabled")
+        finished = self._state_machine.reset(CorrelationId.new())
+        if finished is not None and not self._stopped:
+            await self._event_bus.publish(finished)
+
+    async def set_manual_input_speech_enabled(self, enabled: bool) -> None:
+        """即时更新手动输入语音播报状态"""
+
+        self._ensure_running()
+        if type(enabled) is not bool:
+            raise TypeError("手动输入语音播报开关必须是布尔值")
+        self._manual_input_speech_enabled = enabled
+        if (
+            enabled
+            or not self._active_input_is_manual
+            or self.phase
+            not in {
+                ConversationPhase.SYNTHESIZING,
+                ConversationPhase.SPEAKING,
+            }
+        ):
+            return
+        if self._active_source is not None:
+            self._active_source.cancel("manual_input_speech_disabled")
         finished = self._state_machine.reset(CorrelationId.new())
         if finished is not None and not self._stopped:
             await self._event_bus.publish(finished)
@@ -1095,7 +1130,7 @@ class Coordinator:
                 )
             if completed and self._response_text.strip():
                 if (
-                    self._speech_enabled
+                    self._speech_enabled_for_active_turn()
                     and self._speech_synthesizer is not None
                     and self._audio_player is not None
                 ):
@@ -1528,7 +1563,7 @@ class Coordinator:
         assert self._audio_player is not None
         correlation_id = CorrelationId.new()
         try:
-            if not self._speech_enabled:
+            if not self._speech_enabled_for_active_turn():
                 finished = self._state_machine.reset(correlation_id)
                 if finished is not None and not self._stopped:
                     await self._event_bus.publish(finished)
@@ -1589,6 +1624,12 @@ class Coordinator:
                 error,
                 enter_recovery=False,
             )
+
+    def _speech_enabled_for_active_turn(self) -> bool:
+        return self._speech_enabled and (
+            not self._active_input_is_manual
+            or self._manual_input_speech_enabled
+        )
 
     async def _handle_runtime_error(
         self,

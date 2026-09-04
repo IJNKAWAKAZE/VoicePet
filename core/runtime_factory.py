@@ -234,6 +234,7 @@ def build_default_runtime(
         llm_instructions=llm_instructions,
         llm_model=config.llm.model,
         speech_enabled=config.tts.enabled,
+        manual_input_speech_enabled=config.tts.manual_input_enabled,
         wake_keyword=config.wake_word.keyword,
         speech_synthesizer=speech,
         audio_player=audio_player,

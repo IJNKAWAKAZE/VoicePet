@@ -4,15 +4,23 @@ import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
+from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, QSize, Qt, QUrl
-from PySide6.QtGui import QEnterEvent, QPalette, QTextDocument
+from PySide6.QtGui import QCursor, QEnterEvent, QPalette, QTextDocument
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QToolButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QTextBrowser,
+    QToolButton,
+)
 
 from core.config import AppConfig
 from core.event_bus import EventBus
@@ -319,10 +327,76 @@ def test_settings_window_loads_and_saves_voice_toggle():
     window.save_requested.connect(saved.append)
 
     assert window.speech_enabled_checkbox.isChecked() is True
+    assert window.manual_speech_enabled_checkbox.isChecked() is False
     window.speech_enabled_checkbox.setChecked(False)
+    window.manual_speech_enabled_checkbox.setChecked(True)
     window.save_button.click()
 
     assert saved[-1].tts.enabled is False
+    assert saved[-1].tts.manual_input_enabled is True
+    window.close()
+
+
+def test_settings_window_loads_and_saves_startup_toggle():
+    app()
+    window = SettingsWindow(AppConfig())
+    saved = []
+    window.save_requested.connect(saved.append)
+
+    assert window.start_at_login_checkbox.isChecked() is False
+    window.start_at_login_checkbox.setChecked(True)
+    window.save_button.click()
+
+    assert saved[-1].ui.start_at_login is True
+    window.close()
+
+
+def test_chat_window_renders_safe_markdown_in_message_bodies():
+    app()
+    window = ManualInputDialog()
+    window.append_assistant_delta(
+        "**重点**\n\n- 第一项\n- 第二项\n\n<img src='https://example.com/a.png'>"
+    )
+
+    body = window.findChildren(QTextBrowser, "message_body")[-1]
+
+    assert "**" not in body.toPlainText()
+    assert "重点" in body.toPlainText()
+    assert "第一项" in body.toPlainText()
+    assert "<img" in body.toPlainText()
+    assert body.openExternalLinks() is False
+    assert body.openLinks() is False
+    assert (
+        body.loadResource(
+            QTextDocument.ResourceType.ImageResource,
+            QUrl("https://example.com/private.png"),
+        )
+        is None
+    )
+    window.close()
+
+
+def test_chat_window_expands_markdown_body_to_show_complete_long_reply():
+    application = app()
+    window = ManualInputDialog()
+    window.show()
+    reply = (
+        "这是一条较长的回复，用来确认聊天正文能够完整换行显示，"
+        "而不是只露出结尾的几个字。"
+    ) * 8
+
+    window.append_assistant_delta(reply[:120])
+    window.append_assistant_delta(reply[120:])
+    application.processEvents()
+    body = window.findChildren(QTextBrowser, "message_body")[-1]
+    spin_until(
+        lambda: body.viewport().height()
+        >= ceil(body.document().size().height())
+    )
+
+    assert body.toPlainText() == reply
+    assert body.verticalScrollBar().maximum() == 0
+    assert body.verticalScrollBar().value() == 0
     window.close()
 
 
@@ -652,6 +726,37 @@ def test_pet_shell_grows_upward_without_clipping_renderer():
     window.close()
 
 
+def test_chat_window_uses_consistent_minimum_width_for_both_roles():
+    app()
+    window = ManualInputDialog()
+
+    window.append_user_message("好")
+    window.append_assistant_delta("好")
+
+    user_bubble = window.findChildren(QFrame, "message_user")[-1]
+    assistant_bubble = window.findChildren(QFrame, "message_assistant")[-1]
+    assert user_bubble.width() == assistant_bubble.width()
+    assert user_bubble.width() >= 180
+    window.close()
+
+
+def test_pet_shell_keeps_renderer_fixed_when_bubble_opens_at_bottom_right():
+    app()
+    window = PetShellWindow()
+    screens = (QRect(0, 0, 1000, 800),)
+    window.show()
+    QCoreApplication.processEvents()
+    window.move_renderer_to(QPoint(808, 592), screens)
+    renderer_position = window.renderer_global_position()
+
+    window.show_message("右下角回复", screens)
+    QCoreApplication.processEvents()
+
+    assert window.renderer_global_position() == renderer_position
+    assert screens[0].contains(window.frameGeometry())
+    window.close()
+
+
 def test_pet_shell_hides_scheduled_message_without_moving_bottom():
     app()
     window = PetShellWindow()
@@ -675,6 +780,7 @@ def test_pet_shell_pauses_and_resumes_message_hide_while_hovered():
     window.schedule_message_hide(80)
     QTest.qWait(20)
 
+    QCursor.setPos(window.bubble.mapToGlobal(QPoint(1, 1)))
     window.bubble.enterEvent(
         QEnterEvent(QPoint(1, 1), QPoint(1, 1), QPoint(1, 1))
     )
@@ -682,6 +788,7 @@ def test_pet_shell_pauses_and_resumes_message_hide_while_hovered():
     QCoreApplication.processEvents()
     assert window.bubble.isVisible()
 
+    QCursor.setPos(QPoint(10, 10))
     window.bubble.leaveEvent(QEvent(QEvent.Type.Leave))
     spin_until(lambda: not window.bubble.isVisible())
     window.close()

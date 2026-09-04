@@ -30,11 +30,13 @@ def classify_config_change(
         tts=replace(
             current.tts,
             enabled=previous.tts.enabled,
+            manual_input_enabled=previous.tts.manual_input_enabled,
         ),
         ui=replace(
             current.ui,
             active_skin=previous.ui.active_skin,
             always_on_top=previous.ui.always_on_top,
+            start_at_login=previous.ui.start_at_login,
         ),
     )
     if without_immediate_changes == previous:

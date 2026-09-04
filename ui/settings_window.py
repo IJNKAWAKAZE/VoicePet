@@ -430,6 +430,10 @@ class SettingsWindow(QWidget):
         voice_panel_layout.addWidget(self.voice_catalog_status)
         self.speech_enabled_checkbox = QCheckBox("语音播报")
         self.speech_enabled_checkbox.setChecked(config.tts.enabled)
+        self.manual_speech_enabled_checkbox = QCheckBox("手动输入时播报回复")
+        self.manual_speech_enabled_checkbox.setChecked(
+            config.tts.manual_input_enabled
+        )
         voice = self._page(
             "语音",
             "管理唤醒、语音识别与回复播报",
@@ -454,6 +458,8 @@ class SettingsWindow(QWidget):
                 "控制回复是否朗读以及使用的声音",
                 "播报开关",
                 self.speech_enabled_checkbox,
+                "手动输入",
+                self.manual_speech_enabled_checkbox,
                 "播报声音",
                 voice_panel,
             ),
@@ -610,6 +616,8 @@ class SettingsWindow(QWidget):
         self.pet_control = self._select_control(self.pet_combo)
         self.always_on_top_checkbox = QCheckBox("让桌宠保持在其他窗口上方")
         self.always_on_top_checkbox.setChecked(config.ui.always_on_top)
+        self.start_at_login_checkbox = QCheckBox("开机启动 VoicePet")
+        self.start_at_login_checkbox.setChecked(config.ui.start_at_login)
         self.hot_reload_checkbox = QCheckBox("形象文件变化时自动刷新")
         self.hot_reload_checkbox.setChecked(config.ui.hot_reload_skin)
         self.pet_file_import_button = QPushButton("导入形象包")
@@ -646,6 +654,8 @@ class SettingsWindow(QWidget):
                 "控制桌宠的显示层级与开发预览",
                 "窗口层级",
                 self.always_on_top_checkbox,
+                "开机启动",
+                self.start_at_login_checkbox,
                 "开发预览",
                 self.hot_reload_checkbox,
             ),
@@ -914,6 +924,9 @@ class SettingsWindow(QWidget):
                 tts=replace(
                     self._config.tts,
                     enabled=self.speech_enabled_checkbox.isChecked(),
+                    manual_input_enabled=(
+                        self.manual_speech_enabled_checkbox.isChecked()
+                    ),
                     voice=self.selected_voice_name(),
                 ),
                 ui=replace(
@@ -921,6 +934,7 @@ class SettingsWindow(QWidget):
                     active_skin=self.selected_pet_id(),
                     always_on_top=self.always_on_top_checkbox.isChecked(),
                     hot_reload_skin=self.hot_reload_checkbox.isChecked(),
+                    start_at_login=self.start_at_login_checkbox.isChecked(),
                 ),
                 privacy=replace(
                     self._config.privacy,

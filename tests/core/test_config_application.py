@@ -16,9 +16,17 @@ def test_classifier_distinguishes_unchanged_and_topmost_only_changes():
         current,
         ui=replace(current.ui, always_on_top=False),
     )
+    startup = replace(
+        current,
+        ui=replace(current.ui, start_at_login=True),
+    )
     voice = replace(
         current,
         tts=replace(current.tts, enabled=False),
+    )
+    manual_voice = replace(
+        current,
+        tts=replace(current.tts, manual_input_enabled=True),
     )
     skin = replace(
         current,
@@ -43,7 +51,15 @@ def test_classifier_distinguishes_unchanged_and_topmost_only_changes():
         classify_config_change(current, topmost)
         is ConfigApplicationMode.IMMEDIATE_ONLY
     )
+    assert (
+        classify_config_change(current, startup)
+        is ConfigApplicationMode.IMMEDIATE_ONLY
+    )
     assert classify_config_change(current, voice) is ConfigApplicationMode.IMMEDIATE_ONLY
+    assert (
+        classify_config_change(current, manual_voice)
+        is ConfigApplicationMode.IMMEDIATE_ONLY
+    )
     assert classify_config_change(current, skin) is ConfigApplicationMode.IMMEDIATE_ONLY
     assert (
         classify_config_change(current, immediate_changes)

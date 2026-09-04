@@ -29,8 +29,10 @@ def test_default_config_matches_product_defaults_and_is_immutable():
     assert config.llm.system_prompt == ""
     assert config.llm.store is False
     assert config.tts.enabled is True
+    assert config.tts.manual_input_enabled is False
     assert config.tts.voice == "zh-CN-XiaoxiaoNeural"
     assert config.ui.active_skin == "dpsk-girl"
+    assert config.ui.start_at_login is False
     assert config.privacy.memory_enabled is True
     assert config.privacy.short_term_retention_days == 7
     with pytest.raises(FrozenInstanceError):
@@ -72,6 +74,13 @@ def test_v1_config_without_tts_enabled_keeps_voice_on():
     assert AppConfig.from_dict(data).tts.enabled is True
 
 
+def test_v1_config_without_manual_input_tts_uses_quiet_default():
+    data = AppConfig().to_dict()
+    del data["tts"]["manual_input_enabled"]
+
+    assert AppConfig.from_dict(data).tts.manual_input_enabled is False
+
+
 def test_v1_config_without_wake_fields_uses_chinese_defaults():
     data = AppConfig().to_dict()
     del data["wake_word"]["enabled"]
@@ -81,6 +90,13 @@ def test_v1_config_without_wake_fields_uses_chinese_defaults():
 
     assert loaded.wake_word.enabled is True
     assert loaded.wake_word.keyword == "你好，小蓝"
+
+
+def test_v1_config_without_startup_setting_uses_disabled_default():
+    data = AppConfig().to_dict()
+    del data["ui"]["start_at_login"]
+
+    assert AppConfig.from_dict(data).ui.start_at_login is False
 
 
 def test_wake_word_fields_round_trip_in_config(tmp_path):
@@ -140,6 +156,31 @@ def test_tts_enabled_rejects_non_boolean_value():
         replace(
             AppConfig(),
             tts=replace(AppConfig().tts, enabled=1),
+        )
+
+
+def test_start_at_login_rejects_non_boolean_value():
+    with pytest.raises(ConfigError):
+        replace(
+            AppConfig(),
+            ui=replace(AppConfig().ui, start_at_login=1),
+        )
+
+
+def test_manual_input_tts_round_trips_and_rejects_non_boolean_value(tmp_path):
+    store = ConfigStore(tmp_path / "config.json")
+    config = replace(
+        AppConfig(),
+        tts=replace(AppConfig().tts, manual_input_enabled=True),
+    )
+
+    store.save(config)
+
+    assert store.load().config.tts.manual_input_enabled is True
+    with pytest.raises(ConfigError):
+        replace(
+            AppConfig(),
+            tts=replace(AppConfig().tts, manual_input_enabled=1),
         )
 
 

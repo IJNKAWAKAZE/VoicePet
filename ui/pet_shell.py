@@ -11,7 +11,14 @@ from math import ceil
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QTextDocument
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QGuiApplication,
+    QPainter,
+    QPen,
+    QTextDocument,
+)
 from PySide6.QtWidgets import QSizePolicy, QTextBrowser, QVBoxLayout, QWidget
 
 from core.events import ConversationPhase
@@ -232,7 +239,8 @@ class ConversationBubble(QTextBrowser):
         return super().loadResource(resource_type, name)
 
     def enterEvent(self, event) -> None:
-        self.hover_changed.emit(True)
+        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+            self.hover_changed.emit(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -264,6 +272,7 @@ class PetShellWindow(QWidget):
     """承载桌宠渲染器和气泡的透明置顶窗口"""
 
     activation_requested = Signal()
+    position_changed = Signal(QPoint)
 
     def __init__(
         self,
@@ -304,6 +313,7 @@ class PetShellWindow(QWidget):
         )
         self._renderer = renderer
         self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.addWidget(self.bubble)
         self._layout.addWidget(renderer, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.bubble.hide()
@@ -333,16 +343,10 @@ class PetShellWindow(QWidget):
         """显示消息并向上扩展窗口以保持桌宠底部位置"""
 
         self.cancel_message_hide()
-        was_visible = self.isVisible()
-        previous_bottom = self.frameGeometry().bottom()
+        renderer_position = self.renderer_global_position()
         self.bubble.set_message(text)
         self.bubble.show()
-        self._layout.invalidate()
-        self._layout.activate()
-        self.adjustSize()
-        if was_visible:
-            self.move(self.x(), previous_bottom - self.height() + 1)
-        self.ensure_visible(screen_geometries)
+        self._relayout_preserving_renderer(renderer_position, screen_geometries)
 
     def schedule_message_hide(self, delay_ms: int = 8000) -> None:
         """安排当前气泡在指定延迟后隐藏"""
@@ -378,14 +382,9 @@ class PetShellWindow(QWidget):
         self._message_hide_remaining_ms = None
         if not self.bubble.isVisible():
             return
-        was_visible = self.isVisible()
-        previous_bottom = self.frameGeometry().bottom()
+        renderer_position = self.renderer_global_position()
         self.bubble.hide()
-        self._layout.invalidate()
-        self._layout.activate()
-        self.adjustSize()
-        if was_visible:
-            self.move(self.x(), previous_bottom - self.height() + 1)
+        self._relayout_preserving_renderer(renderer_position)
 
     def load_pet_directory(self, directory: str | Path) -> bool:
         """完整加载新图集成功后才替换当前渲染器"""
@@ -430,6 +429,23 @@ class PetShellWindow(QWidget):
         )
         self.move(clamp_window_top_left(proposed, self.size(), geometries))
 
+    def renderer_global_position(self) -> QPoint:
+        """返回桌宠渲染器左上角的屏幕坐标"""
+
+        return self._renderer.mapToGlobal(QPoint(0, 0))
+
+    def move_renderer_to(
+        self,
+        proposed: QPoint,
+        screen_geometries: Sequence[QRect] | None = None,
+    ) -> None:
+        """按桌宠本体坐标恢复位置并适配当前屏幕"""
+
+        geometries = self._available_geometries(screen_geometries)
+        target = clamp_window_top_left(proposed, self._renderer.size(), geometries)
+        current = self.renderer_global_position()
+        self.move(self.pos() + target - current)
+
     def ensure_visible(
         self,
         screen_geometries: Sequence[QRect] | None = None,
@@ -437,6 +453,58 @@ class PetShellWindow(QWidget):
         """在屏幕布局变化后把窗口重新放回可用区域"""
 
         self.move_within_screens(self.pos(), screen_geometries)
+
+    def _available_geometries(
+        self,
+        screen_geometries: Sequence[QRect] | None,
+    ) -> tuple[QRect, ...]:
+        if screen_geometries is not None:
+            return tuple(screen_geometries)
+        return tuple(
+            screen.availableGeometry() for screen in QGuiApplication.screens()
+        )
+
+    def _relayout_preserving_renderer(
+        self,
+        renderer_position: QPoint,
+        screen_geometries: Sequence[QRect] | None = None,
+    ) -> None:
+        """调整气泡布局但保持桌宠本体的屏幕锚点"""
+
+        self._layout.invalidate()
+        self._layout.activate()
+        self.adjustSize()
+        geometries = self._available_geometries(screen_geometries)
+        if geometries:
+            center = renderer_position + QPoint(
+                self._renderer.width() // 2,
+                self._renderer.height() // 2,
+            )
+            target = min(
+                geometries,
+                key=lambda geometry: self._distance_to_geometry(center, geometry),
+            )
+            centered_left = renderer_position.x() - (
+                self.width() - self._renderer.width()
+            ) // 2
+            if centered_left < target.left():
+                alignment = Qt.AlignmentFlag.AlignLeft
+            elif centered_left + self.width() > target.right() + 1:
+                alignment = Qt.AlignmentFlag.AlignRight
+            else:
+                alignment = Qt.AlignmentFlag.AlignHCenter
+            self._layout.setAlignment(self._renderer, alignment)
+            self._layout.invalidate()
+            self._layout.activate()
+            self.adjustSize()
+        current = self.renderer_global_position()
+        self.move(self.pos() + renderer_position - current)
+
+    @staticmethod
+    def _distance_to_geometry(point: QPoint, geometry: QRect) -> int:
+        nearest_x = min(max(point.x(), geometry.left()), geometry.right())
+        nearest_y = min(max(point.y(), geometry.top()), geometry.bottom())
+        return (point.x() - nearest_x) ** 2 + (point.y() - nearest_y) ** 2
 
     def _observe_screen(self, screen) -> None:
         identity = id(screen)
@@ -489,12 +557,15 @@ class PetShellWindow(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() is Qt.MouseButton.LeftButton:
             activate = not self._dragged
+            moved = self._dragged
             self._drag_offset = None
             self._press_global_position = None
             self._dragged = False
             event.accept()
             if activate:
                 self.activation_requested.emit()
+            elif moved:
+                self.position_changed.emit(self.renderer_global_position())
             return
         super().mouseReleaseEvent(event)
 
