@@ -58,3 +58,26 @@ def test_release_build_contains_only_the_main_application():
     assert "update-channel.json" not in combined
     assert "cryptography" not in spec
     assert script.count("PyInstaller") == 1
+
+
+def test_pyinstaller_spec_bundles_qml_theme_assets_and_qt_quick_runtime():
+    spec = Path("VoicePet.spec").read_text(encoding="utf-8")
+
+    assert 'root / "ui" / "qml"' in spec
+    assert 'root / "assets" / "ui"' in spec
+    assert 'root / "assets" / "ui" / "brand" / "voicepet.ico"' in spec
+    for module in (
+        "PySide6.QtQml",
+        "PySide6.QtQuick",
+        "PySide6.QtQuickControls2",
+    ):
+        assert module in spec
+
+
+def test_python_package_data_includes_qml_and_brand_svg():
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert '[tool.setuptools.package-data]' in pyproject
+    assert '"qml/**/*.qml"' in pyproject
+    assert '"qml/**/*.svg"' in pyproject
+    assert '"assets/ui/brand/*.svg"' in pyproject

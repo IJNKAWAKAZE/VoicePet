@@ -48,5 +48,14 @@ build = [
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.setuptools.package-data]
+ui = ["qml/**/*.qml", "qml/**/*.svg", "qml/**/*.txt"]
+
+[tool.setuptools.data-files]
+"assets/ui/brand" = ["assets/ui/brand/*.svg", "assets/ui/brand/*.ico"]
+"assets/ui/themes/sunny_sea" = ["assets/ui/themes/sunny_sea/*.webp"]
+"assets/ui/themes/deep_night" = ["assets/ui/themes/deep_night/*.webp"]
+"assets/ui/themes/sakura_coral" = ["assets/ui/themes/sakura_coral/*.webp"]
+
 [tool.ruff.lint.per-file-ignores]
 "VoicePet.spec" = ["F821"]

@@ -74,7 +74,10 @@ class PetPackageInstaller:
             prepared = staging / pet_id
             prepared.mkdir()
             shutil.copy2(package_root / "pet.json", prepared / "pet.json")
-            shutil.copy2(sheet_path, prepared / sheet_path.name)
+            # 保留清单声明的相对目录，避免安装后找不到嵌套图集
+            prepared_sheet = prepared / sheet_path.relative_to(package_root.resolve())
+            prepared_sheet.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(sheet_path, prepared_sheet)
             os.replace(prepared, target)
             return target
         except PetPackageError:
@@ -83,6 +86,51 @@ class PetPackageInstaller:
             raise PetPackageError("桌宠包安装失败") from error
         finally:
             self._remove_staging(staging)
+
+    def remove(self, pet_id: str) -> bool:
+        """只删除用户桌宠根目录下经过完整验证的直属包"""
+
+        if (
+            not isinstance(pet_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", pet_id) is None
+        ):
+            raise PetPackageError("桌宠 ID 格式无效")
+        target = self._pets_directory / pet_id
+        if target.parent != self._pets_directory:
+            raise PetPackageError("桌宠删除路径无效")
+        if not target.exists() and not target.is_symlink():
+            # 仅在用户目录直属且非链接的形象中按清单寻找改名后的目录
+            matches = []
+            if self._pets_directory.is_dir():
+                for candidate in self._pets_directory.iterdir():
+                    if (candidate.is_symlink() or not candidate.is_dir()
+                            or candidate.resolve().parent != self._pets_directory):
+                        continue
+                    try:
+                        manifest_id, _ = self._validate_package(candidate)
+                    except PetPackageError:
+                        continue
+                    if manifest_id == pet_id:
+                        matches.append(candidate)
+            if not matches:
+                return False
+            if len(matches) != 1:
+                raise PetPackageError("发现多个同 ID 桌宠，无法确定删除目标")
+            target = matches[0]
+        if target.is_symlink() or not target.is_dir():
+            raise PetPackageError("桌宠删除目标类型无效")
+        try:
+            if target.resolve().parent != self._pets_directory:
+                raise PetPackageError("桌宠删除路径超出用户目录")
+            manifest_id, _ = self._validate_package(target)
+            if manifest_id != pet_id:
+                raise PetPackageError("桌宠清单 ID 与目录不一致")
+            shutil.rmtree(target)
+        except PetPackageError:
+            raise
+        except OSError as error:
+            raise PetPackageError("桌宠删除失败") from error
+        return True
 
     def _copy_directory(self, source: Path, destination: Path) -> None:
         files = [path for path in source.rglob("*") if path.is_file()]
@@ -149,16 +197,16 @@ class PetPackageInstaller:
             "id",
             "displayName",
             "description",
-            "spriteVersionNumber",
             "spritesheetPath",
         }
-        if not isinstance(data, dict) or not required.issubset(data):
-            raise PetPackageError("桌宠清单缺少必要字段")
+        if not isinstance(data, dict):
+            raise PetPackageError("桌宠清单顶层必须是对象")
+        missing = required.difference(data)
+        if missing:
+            raise PetPackageError("桌宠清单缺少必要字段：" + "、".join(sorted(missing)))
         pet_id = data["id"]
         if not isinstance(pet_id, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", pet_id) is None:
             raise PetPackageError("桌宠 ID 格式无效")
-        if data["spriteVersionNumber"] != 2:
-            raise PetPackageError("桌宠图集版本必须为 2")
         for field in ("displayName", "description", "spritesheetPath"):
             if not isinstance(data[field], str) or not data[field].strip():
                 raise PetPackageError("桌宠清单文本字段无效")
@@ -179,8 +227,9 @@ class PetPackageInstaller:
             raise PetPackageError("缺少桌宠图像校验依赖") from error
         try:
             with Image.open(path) as image:
-                if image.size != (1536, 2288):
-                    raise PetPackageError("桌宠图集尺寸必须为 1536x2288")
+                # 以实际九行或十一行图集布局判断兼容，不依赖清单版本字段
+                if image.size not in {(1536, 1872), (1536, 2288)}:
+                    raise PetPackageError("桌宠图集尺寸必须为 1536x1872 或 1536x2288")
                 if image.width * image.height > self._max_pixels:
                     raise PetPackageError("桌宠图集像素数量过大")
                 rgba = image.convert("RGBA")

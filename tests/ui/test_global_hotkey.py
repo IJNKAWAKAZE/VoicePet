@@ -9,10 +9,12 @@ from ui.global_hotkey import (
     MOD_NOREPEAT,
     VK_SPACE,
     WM_HOTKEY,
+    GlobalHotkeyService,
     GlobalHotkeyWidget,
     HotkeyRegistrationError,
     WindowsHotkeyBackend,
     create_global_hotkey,
+    parse_shortcut,
 )
 
 
@@ -87,7 +89,8 @@ def test_hidden_widget_emits_matching_hotkey_and_releases_backend_once():
         def matches(self, message):
             return message == "hotkey"
 
-        def unregister(self):
+        def unregister(self, hotkey_id=HOTKEY_ID):
+            _ = hotkey_id
             self.unregistered += 1
 
     backend = Backend()
@@ -108,6 +111,36 @@ def test_hidden_widget_emits_matching_hotkey_and_releases_backend_once():
     assert widget.isVisible() is False
 
 
+def test_hidden_widget_replaces_and_disables_configurable_shortcut():
+    app_instance()
+
+    class Backend:
+        def __init__(self):
+            self.registered = []
+            self.unregistered = []
+
+        def register(self, *args):
+            self.registered.append(args)
+
+        def matches(self, message):
+            return False
+
+        def unregister(self, hotkey_id=HOTKEY_ID):
+            self.unregistered.append(hotkey_id)
+
+    backend = Backend()
+    widget = GlobalHotkeyWidget(backend=backend)
+
+    widget.try_replace("Ctrl+Shift+Space")
+    widget.set_enabled(False)
+    widget.set_enabled(True)
+
+    assert len(backend.registered) == 3
+    assert backend.unregistered == [HOTKEY_ID, HOTKEY_ID + 1]
+    assert widget.current_shortcut == "Ctrl+Shift+Space"
+    widget.close()
+
+
 def test_hotkey_factory_returns_none_when_registration_is_unavailable(monkeypatch):
     def unavailable():
         raise HotkeyRegistrationError("unsupported")
@@ -115,3 +148,47 @@ def test_hotkey_factory_returns_none_when_registration_is_unavailable(monkeypatc
     monkeypatch.setattr("ui.global_hotkey.GlobalHotkeyWidget", unavailable)
 
     assert create_global_hotkey() is None
+
+
+def test_parse_shortcut_supports_safe_keyboard_subset():
+    shortcut = parse_shortcut("Ctrl+Shift+Space")
+
+    assert shortcut.modifiers == MOD_CONTROL | 0x0004 | MOD_NOREPEAT
+    assert shortcut.virtual_key == VK_SPACE
+    assert shortcut.normalized == "Ctrl+Shift+Space"
+
+
+def test_parse_shortcut_rejects_missing_modifier_or_unsupported_key():
+    import pytest
+
+    with pytest.raises(HotkeyRegistrationError):
+        parse_shortcut("Space")
+    with pytest.raises(HotkeyRegistrationError):
+        parse_shortcut("Ctrl+Escape")
+
+
+def test_hotkey_service_keeps_old_registration_when_candidate_fails():
+    class Backend:
+        def __init__(self):
+            self.registered = []
+            self.unregistered = []
+
+        def register(self, window_id, modifiers, virtual_key, hotkey_id=HOTKEY_ID):
+            self.registered.append((window_id, modifiers, virtual_key, hotkey_id))
+            if virtual_key == ord("B"):
+                raise HotkeyRegistrationError("occupied")
+
+        def unregister(self, hotkey_id=HOTKEY_ID):
+            self.unregistered.append(hotkey_id)
+
+        def matches(self, message):
+            return False
+
+    backend = Backend()
+    service = GlobalHotkeyService(456, backend=backend)
+    service.start("Ctrl+Alt+Space")
+
+    service.try_replace("Ctrl+Alt+B")
+
+    assert service.current_shortcut == "Ctrl+Alt+Space"
+    assert backend.unregistered == []

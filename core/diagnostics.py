@@ -96,6 +96,13 @@ class DiagnosticRunner:
         )
         return DiagnosticReport(datetime.now(UTC), tuple(results))
 
+    async def run_component(self, component: str) -> DiagnosticResult:
+        """仅运行指定组件并保留独立超时和失败隔离"""
+        for check in self._checks:
+            if check.component == component:
+                return await self._run_one(check)
+        raise DiagnosticError("诊断组件未注册")
+
     @staticmethod
     async def _run_one(check: DiagnosticCheck) -> DiagnosticResult:
         started = time.monotonic()
@@ -230,6 +237,10 @@ class DiagnosticService:
         report = await self._runner.run()
         self._last_report = report
         return report
+
+    async def run_component(self, component: str) -> DiagnosticResult:
+        """单项检查不替换供导出使用的完整报告"""
+        return await self._runner.run_component(component)
 
     async def export(self, destination: str | Path) -> None:
         report = self._last_report

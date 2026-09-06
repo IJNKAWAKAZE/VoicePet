@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QGuiApplication,
+    QImageReader,
     QPainter,
     QPen,
     QTextDocument,
@@ -101,12 +102,10 @@ def _read_pet_choice(directory: Path, *, built_in: bool) -> PetChoice | None:
     if (
         not isinstance(pet_id, str)
         or _PET_ID_PATTERN.fullmatch(pet_id) is None
-        or root.name != pet_id
         or not isinstance(display_name, str)
         or not display_name.strip()
         or not isinstance(sprite_path, str)
         or not sprite_path.strip()
-        or data.get("spriteVersionNumber") != 2
     ):
         return None
     sheet = (root / sprite_path).resolve()
@@ -115,6 +114,11 @@ def _read_pet_choice(directory: Path, *, built_in: bool) -> PetChoice | None:
     except ValueError:
         return None
     if not sheet.is_file():
+        return None
+    # 发现列表与加载器使用相同布局门槛，不再依赖可缺省的版本号
+    reader = QImageReader(str(sheet))
+    size = reader.size()
+    if (size.width(), size.height()) not in {(1536, 1872), (1536, 2288)}:
         return None
     return PetChoice(pet_id, display_name.strip(), root, built_in)
 
@@ -166,6 +170,10 @@ def resolve_active_pet_directory(
     built_in = (fallback.parent / active_skin).resolve()
     if built_in.parent == fallback.parent and built_in.is_dir():
         return built_in
+    # 手动解压的外层目录可能带版本后缀，按清单标识恢复形象
+    for choice in discover_pet_choices(data_root):
+        if choice.pet_id == active_skin:
+            return choice.directory
     return fallback
 
 

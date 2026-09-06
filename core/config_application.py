@@ -27,6 +27,7 @@ def classify_config_change(
     without_immediate_changes = replace(
         current,
         wake_word=previous.wake_word,
+        privacy=previous.privacy,
         tts=replace(
             current.tts,
             enabled=previous.tts.enabled,
@@ -37,6 +38,13 @@ def classify_config_change(
             active_skin=previous.ui.active_skin,
             always_on_top=previous.ui.always_on_top,
             start_at_login=previous.ui.start_at_login,
+            theme_id=previous.ui.theme_id,
+            reduce_motion=previous.ui.reduce_motion,
+            pet_scale=previous.ui.pet_scale,
+            pet_click_through=previous.ui.pet_click_through,
+            preferred_screen=previous.ui.preferred_screen,
+            global_hotkey_enabled=previous.ui.global_hotkey_enabled,
+            global_hotkey=previous.ui.global_hotkey,
         ),
     )
     if without_immediate_changes == previous:

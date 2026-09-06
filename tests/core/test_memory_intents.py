@@ -1,7 +1,10 @@
 import asyncio
 import threading
 from datetime import date
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
 
 from core.cancellation import CancellationToken
 from core.coordinator import Coordinator
@@ -62,6 +65,47 @@ def test_memory_operation_service_executes_only_explicit_plan(tmp_path):
     assert forgotten.affected == 1
     assert store.list_all() == ()
     store.close()
+
+
+@pytest.mark.parametrize(
+    ("command", "fact_key", "value", "explicit_update"),
+    [
+        ("记住我叫小王", "user.name", "小王", False),
+        ("记住我改名叫小李", "user.name", "小李", True),
+        ("记住回答简短一点", "response.length", "concise", False),
+        ("记住从现在起请用英文回答", "response.language", "english", True),
+        ("记住语气正式", "response.style", "formal", False),
+    ],
+)
+def test_explicit_remember_forwards_controlled_fact_identity(
+    command,
+    fact_key,
+    value,
+    explicit_update,
+):
+    class RecordingStore:
+        def __init__(self):
+            self.kwargs = None
+
+        def create_confirmed(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(content=kwargs["content"])
+
+    store = RecordingStore()
+    service = MemoryOperationService(store)
+    source_turn_id = str(uuid4())
+
+    result = service.execute(service.plan(command, source_turn_id))
+
+    assert result.records[0].content == command.removeprefix("记住")
+    assert store.kwargs == {
+        "category": "user_requested",
+        "content": command.removeprefix("记住"),
+        "source_turn_id": source_turn_id,
+        "fact_key": fact_key,
+        "value": value,
+        "explicit_update": explicit_update,
+    }
 
 
 def test_clear_today_removes_session_layer_without_deleting_long_term_memory(

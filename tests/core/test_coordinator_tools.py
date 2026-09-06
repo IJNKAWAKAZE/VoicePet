@@ -119,6 +119,7 @@ class SummaryLlm:
                 "update_daily_summary",
                 {
                     "topic": "工具执行",
+                    "decisions": [],
                     "unfinished_items": ["查看结果"],
                 },
             )

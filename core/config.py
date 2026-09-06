@@ -12,6 +12,8 @@ from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 SUPPORTED_LLM_APIS = frozenset({"responses", "chat_completions"})
+CURRENT_CONFIG_VERSION = 2
+SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
 MAX_SYSTEM_PROMPT_CHARS = 4000
 _LOCAL_LLM_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _WAKE_PUNCTUATION = frozenset(
@@ -107,20 +109,30 @@ class UiConfig:
     always_on_top: bool = True
     hot_reload_skin: bool = True
     start_at_login: bool = False
+    theme_id: str = "sunny_sea"
+    reduce_motion: bool = False
+    pet_scale: float = 1.0
+    pet_click_through: bool = False
+    preferred_screen: str = ""
+    global_hotkey_enabled: bool = True
+    global_hotkey: str = "Ctrl+Alt+Space"
 
 
 @dataclass(frozen=True, slots=True)
 class PrivacyConfig:
     memory_enabled: bool = True
     diagnostic_recording: bool = False
-    short_term_retention_days: int = 7
+    chat_history_enabled: bool = True
+    auto_memory_enabled: bool = True
+    chat_retention_days: int = 7
+    summary_retention_days: int = 7
 
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     """不包含凭据的完整不可变应用配置"""
 
-    config_version: int = 1
+    config_version: int = CURRENT_CONFIG_VERSION
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
@@ -143,8 +155,11 @@ class AppConfig:
     )
 
     def __post_init__(self) -> None:
-        if type(self.config_version) is not int or self.config_version != 1:
-            raise ConfigError("只支持 config_version 1")
+        if (
+            type(self.config_version) is not int
+            or self.config_version != CURRENT_CONFIG_VERSION
+        ):
+            raise ConfigError(f"只支持 config_version {CURRENT_CONFIG_VERSION}")
         if type(self.audio.sample_rate) is not int or self.audio.sample_rate <= 0:
             raise ConfigError("音频采样率必须大于零")
         if type(self.audio.channels) is not int or self.audio.channels != 1:
@@ -154,11 +169,26 @@ class AppConfig:
         if self.wake_word.debounce_sec <= 0:
             raise ConfigError("唤醒防抖时间必须大于零")
         normalize_wake_keyword(self.wake_word.keyword)
-        if (
-            type(self.privacy.short_term_retention_days) is not int
-            or not 1 <= self.privacy.short_term_retention_days <= 365
+        for retention in (
+            self.privacy.chat_retention_days,
+            self.privacy.summary_retention_days,
         ):
-            raise ConfigError("短期摘要保留天数必须在一到三百六十五之间")
+            if type(retention) is not int or not 1 <= retention <= 365:
+                raise ConfigError("聊天和摘要保留天数必须在一到三百六十五之间")
+        if self.ui.theme_id not in SUPPORTED_THEME_IDS:
+            raise ConfigError("界面主题不受支持")
+        if (
+            type(self.ui.pet_scale) not in (int, float)
+            or not 0.5 <= self.ui.pet_scale <= 2.0
+        ):
+            raise ConfigError("桌宠缩放必须在 0.5 到 2.0 之间")
+        if not isinstance(self.ui.preferred_screen, str):
+            raise ConfigError("首选显示器必须是文本")
+        if (
+            not isinstance(self.ui.global_hotkey, str)
+            or not self.ui.global_hotkey.strip()
+        ):
+            raise ConfigError("全局快捷键不能为空")
         self._validate_strings()
         for value in (
             self.wake_word.enabled,
@@ -169,8 +199,13 @@ class AppConfig:
             self.ui.always_on_top,
             self.ui.hot_reload_skin,
             self.ui.start_at_login,
+            self.ui.reduce_motion,
+            self.ui.pet_click_through,
+            self.ui.global_hotkey_enabled,
             self.privacy.memory_enabled,
             self.privacy.diagnostic_recording,
+            self.privacy.chat_history_enabled,
+            self.privacy.auto_memory_enabled,
         ):
             if type(value) is not bool:
                 raise ConfigError("配置布尔字段类型无效")
@@ -197,6 +232,14 @@ class AppConfig:
     def from_dict(cls, data: Any) -> AppConfig:
         if not isinstance(data, dict):
             raise ConfigError("配置顶层必须是对象")
+        data = _migrate_config_data(data)
+        # 只丢弃废弃配置键，其他设置和既有历史保存关闭意图保持不变
+        raw_privacy = data.get("privacy")
+        if isinstance(raw_privacy, dict):
+            privacy = dict(raw_privacy)
+            privacy.pop("short_term_retention_days", None)
+            privacy.setdefault("chat_history_enabled", privacy.get("memory_enabled", True))
+            data = {**data, "privacy": privacy}
         if unknown := set(data) - cls._FIELDS:
             raise ConfigError(f"配置包含未知字段: {len(unknown)}")
         defaults = cls()
@@ -248,11 +291,50 @@ class AppConfig:
                 "privacy",
                 PrivacyConfig,
                 defaults.privacy,
+                allowed_missing={
+                    "chat_history_enabled": defaults.privacy.chat_history_enabled,
+                    "auto_memory_enabled": defaults.privacy.auto_memory_enabled,
+                    "chat_retention_days": defaults.privacy.chat_retention_days,
+                    "summary_retention_days": defaults.privacy.summary_retention_days,
+                },
             ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
+    """把受支持的旧配置迁移为当前内存结构"""
+
+    version = data.get("config_version", CURRENT_CONFIG_VERSION)
+    if type(version) is not int:
+        raise ConfigError("配置版本类型无效")
+    if version == CURRENT_CONFIG_VERSION:
+        return data
+    if version != 1:
+        raise ConfigError(f"只支持 config_version {CURRENT_CONFIG_VERSION}")
+
+    migrated = dict(data)
+    migrated["config_version"] = CURRENT_CONFIG_VERSION
+    raw_ui = migrated.get("ui")
+    if raw_ui is not None and not isinstance(raw_ui, dict):
+        raise ConfigError("配置分区 ui 必须是对象")
+    ui = dict(raw_ui or {})
+    defaults = UiConfig()
+    for field_name in (
+        "theme_id",
+        "reduce_motion",
+        "pet_scale",
+        "pet_click_through",
+        "preferred_screen",
+        "global_hotkey_enabled",
+        "global_hotkey",
+    ):
+        ui.setdefault(field_name, getattr(defaults, field_name))
+    if raw_ui is not None:
+        migrated["ui"] = ui
+    return migrated
 
 
 def _section[ConfigSection](

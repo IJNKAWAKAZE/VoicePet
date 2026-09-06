@@ -545,6 +545,42 @@ class WindowsMciAudioPlayer:
             thread_name_prefix="voicepet-mci",
         )
         self._closed = False
+        self._muted = False
+        self._playback_generation = 0
+        self._active_aliases: set[str] = set()
+        self._command_lock = asyncio.Lock()
+        self._mute_lock = asyncio.Lock()
+
+    async def set_muted(self, muted: bool) -> None:
+        """临时静音并等待当前音频停止，恢复时不重播旧音频"""
+
+        async with self._mute_lock:
+            if self._closed:
+                raise TtsConfigurationError("Windows MCI 播放器已关闭")
+            previous_muted = self._muted
+            self._muted = muted
+            if not muted:
+                return
+            self._playback_generation += 1
+            try:
+                await self._wait_for_completion(
+                    asyncio.create_task(self._stop_active_audio())
+                )
+            except (Exception, asyncio.CancelledError):
+                # 失败时回滚开关，保留代际变化以阻止旧音频重新开始
+                self._muted = previous_muted
+                raise
+
+    async def _stop_active_audio(self) -> None:
+        errors: list[Exception] = []
+        async with self._command_lock:
+            for alias in tuple(self._active_aliases):
+                try:
+                    await self._command(f"stop {alias}")
+                except Exception as error:  # noqa: BLE001 仍需尝试停止其他音频
+                    errors.append(error)
+        if errors:
+            raise TtsPlaybackError("Windows MCI 静音失败") from errors[0]
 
     async def play(
         self,
@@ -554,26 +590,38 @@ class WindowsMciAudioPlayer:
         if self._closed:
             raise TtsConfigurationError("Windows MCI 播放器已关闭")
         token.throw_if_cancelled()
+        if self._muted:
+            return
+        generation = self._playback_generation
         alias = f"voicepet_{uuid4().hex}"
         path = self._write_temporary_audio(audio)
-        opened = False
+        cancelled = False
         try:
-            await self._command(f'open "{path}" alias {alias}')
-            opened = True
-            token.throw_if_cancelled()
-            await self._command(f"play {alias}")
+            async with self._command_lock:
+                if self._muted or generation != self._playback_generation:
+                    return
+                # 提前登记以覆盖 open 执行中取消或静音的清理
+                self._active_aliases.add(alias)
+                await self._command(f'open "{path}" alias {alias}')
+            async with self._command_lock:
+                token.throw_if_cancelled()
+                if self._muted or generation != self._playback_generation:
+                    return
+                await self._command(f"play {alias}")
             deadline = asyncio.get_running_loop().time() + self._playback_timeout
             while True:
                 token.throw_if_cancelled()
-                mode = (await self._command(f"status {alias} mode")).casefold()
+                async with self._command_lock:
+                    if self._muted or generation != self._playback_generation:
+                        return
+                    mode = (await self._command(f"status {alias} mode")).casefold()
                 if mode in {"stopped", "not ready"}:
                     return
                 if asyncio.get_running_loop().time() >= deadline:
                     raise TtsPlaybackError("Windows MCI 播放超时")
                 await asyncio.sleep(self._poll_interval)
         except (CancelledError, asyncio.CancelledError):
-            if opened:
-                await self._ignore_command_error(f"stop {alias}")
+            cancelled = True
             raise
         except TtsError:
             raise
@@ -582,8 +630,19 @@ class WindowsMciAudioPlayer:
                 f"Windows MCI 播放失败: {type(error).__name__}"
             ) from error
         finally:
-            if opened:
-                await self._ignore_command_error(f"close {alias}")
+            await self._wait_for_completion(
+                asyncio.create_task(self._cleanup_playback(alias, path, cancelled))
+            )
+
+    async def _cleanup_playback(self, alias: str, path: str, cancelled: bool) -> None:
+        try:
+            async with self._command_lock:
+                if alias in self._active_aliases:
+                    if cancelled:
+                        await self._ignore_command_error(f"stop {alias}")
+                    await self._ignore_command_error(f"close {alias}")
+                    self._active_aliases.discard(alias)
+        finally:
             if os.path.exists(path):
                 os.remove(path)
 
@@ -608,12 +667,25 @@ class WindowsMciAudioPlayer:
 
     async def _command(self, command: str) -> str:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            self._executor,
-            self._command_runner,
-            command,
+        result = await self._wait_for_completion(
+            loop.run_in_executor(self._executor, self._command_runner, command)
         )
         return "" if result is None else str(result).strip()
+
+    @staticmethod
+    async def _wait_for_completion(operation: asyncio.Future[Any]) -> Any:
+        """取消不能让线程中的命令逃离锁或打断资源清理"""
+
+        cancellation: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        result = operation.result()
+        if cancellation is not None:
+            raise cancellation
+        return result
 
     async def _ignore_command_error(self, command: str) -> None:
         try:

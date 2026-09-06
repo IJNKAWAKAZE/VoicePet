@@ -44,6 +44,7 @@ class PetSpriteAtlas:
     pet_id: str
     display_name: str
     description: str
+    sheet_path: Path
     _pixmap: QPixmap
 
     @classmethod
@@ -60,13 +61,11 @@ class PetSpriteAtlas:
             "id",
             "displayName",
             "description",
-            "spriteVersionNumber",
             "spritesheetPath",
         }
-        if not required.issubset(data):
-            raise PetAssetError("桌宠清单缺少必要字段")
-        if data["spriteVersionNumber"] != 2:
-            raise PetAssetError("桌宠图集版本必须为 2")
+        missing = required.difference(data)
+        if missing:
+            raise PetAssetError("桌宠清单缺少必要字段：" + "、".join(sorted(missing)))
         text_values = (
             data["id"],
             data["displayName"],
@@ -85,21 +84,23 @@ class PetSpriteAtlas:
         image = QImage(str(sheet_path))
         if image.isNull():
             raise PetAssetError("桌宠图集无法解码")
-        if image.width() != ATLAS_WIDTH or image.height() != ATLAS_HEIGHT:
-            raise PetAssetError("桌宠图集尺寸必须为 1536x2288")
+        if image.width() != ATLAS_WIDTH or image.height() not in {CELL_HEIGHT * 9, ATLAS_HEIGHT}:
+            raise PetAssetError("桌宠图集尺寸必须为 1536x1872 或 1536x2288")
         if not image.hasAlphaChannel():
             raise PetAssetError("桌宠图集必须包含透明通道")
         return cls(
             data["id"],
             data["displayName"],
             data["description"],
+            sheet_path,
             QPixmap.fromImage(image),
         )
 
     def frame(self, row: int, column: int) -> QPixmap:
         """返回指定 v2 行列的独立 192x208 帧"""
 
-        if row not in range(ATLAS_ROWS) or column not in range(ATLAS_COLUMNS):
+        # 按当前图集的实际行数裁切，九行包不能读取不存在的尾部行
+        if row not in range(self._pixmap.height() // CELL_HEIGHT) or column not in range(ATLAS_COLUMNS):
             raise PetAssetError("桌宠帧索引超出图集范围")
         return self._pixmap.copy(
             QRect(

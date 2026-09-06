@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .session_archive import SessionArchiveStore, SessionRecord, SessionTurnRecord
+from .session_archive import (
+    SessionArchiveStore,
+    SessionRecord,
+    SessionTurnRecord,
+    ShortTermSummaryRecord,
+)
 from .session_context import SessionContext
 
 
@@ -39,11 +44,31 @@ class SessionDataManager:
 
         return self._archive.list_session_turns(session_id)
 
+    def list_summaries(
+        self,
+        session_id: str | None = None,
+    ) -> tuple[ShortTermSummaryRecord, ...]:
+        """返回全部或指定会话的有效短期摘要"""
+
+        return self._archive.list_summaries(session_id)
+
+    def delete_summary(self, summary_id: str) -> bool:
+        """删除一个短期摘要并阻止同来源重建"""
+
+        return self._archive.delete_summary(summary_id)
+
+    def source_label(self, turn_id: str) -> dict[str, object]:
+        """返回摘要来源的最小元数据标签"""
+
+        return self._archive.source_label(turn_id)
+
     def activate(self, session_id: str) -> tuple[SessionTurnRecord, ...]:
         """切换当前会话并恢复可用的最近上下文"""
 
         turns = self._archive.list_session_turns(session_id)
-        if not turns:
+        if not turns and all(
+            record.id != session_id for record in self._archive.list_sessions()
+        ):
             raise ValueError("会话不存在")
         self._context.activate(
             session_id,

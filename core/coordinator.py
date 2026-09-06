@@ -39,6 +39,7 @@ from .llm import (
     LlmToolCall,
     ToolDefinition,
 )
+from .memory import MemoryConfigurationError
 from .memory_candidates import MEMORY_CANDIDATE_TOOL_NAME, MemoryCandidateService
 from .memory_intents import MemoryOperation, MemoryOperationService
 from .policy import (
@@ -177,6 +178,7 @@ class Coordinator:
         memory_context: MemoryContextProvider | None = None,
         session_context: SessionContextProvider | None = None,
         session_archive: SessionArchiveProvider | None = None,
+        archive_completion: Callable[[str, str], None] | None = None,
         memory_candidates: MemoryCandidateService | None = None,
         short_term_summaries: ShortTermSummaryService | None = None,
         memory_operations: MemoryOperationService | None = None,
@@ -221,6 +223,7 @@ class Coordinator:
         self._memory_context = memory_context
         self._session_context = session_context
         self._session_archive = session_archive
+        self._archive_completion = archive_completion
         self._memory_candidates = memory_candidates
         self._short_term_summaries = short_term_summaries
         self._memory_operations = memory_operations
@@ -362,6 +365,24 @@ class Coordinator:
                     source,
                 )
         return state_event.turn_id
+
+    async def cancel_active_turn(self) -> None:
+        """取消当前轮次并立即把对话状态恢复为空闲"""
+
+        self._ensure_running()
+        if self.phase is ConversationPhase.IDLE:
+            return
+        if self._active_source is not None:
+            self._active_source.cancel("user_cancelled")
+        finished = self._state_machine.reset(CorrelationId.new())
+        self._active_source = None
+        self._pending_tool_call = None
+        self._pending_approval = None
+        self._pending_memory = None
+        self._pending_summary = None
+        self._turn_budget = None
+        if finished is not None:
+            await self._event_bus.publish(finished)
 
     async def speak_notice(self, text: str) -> TurnId:
         """不经过录音和模型地播放固定提示"""
@@ -576,12 +597,13 @@ class Coordinator:
                         0,
                     )
                 )
-                recovering = self._state_machine.transition(
-                    ConversationPhase.RECOVERING,
+                # 用户拒绝不是执行失败，结束原轮次后恢复待机
+                if not self._accept_result(
                     memory_pending.turn_id,
-                    memory_pending.correlation_id,
-                )
-                await self._event_bus.publish(recovering)
+                    memory_pending.source.token,
+                ):
+                    return
+                await self.cancel_active_turn()
                 return
             assert pending is not None
             self._pending_approval = None
@@ -960,15 +982,20 @@ class Coordinator:
                 pending.operation,
             )
         except Exception as error:  # noqa: BLE001 记忆存储属于本地持久化边界
-            _ = error
             if not self._accept_result(pending.turn_id, pending.source.token):
                 return
+            message = (
+                "记忆功能未启用，未保存这条内容"
+                if isinstance(error, MemoryConfigurationError)
+                and str(error) == "记忆写入已关闭"
+                else "记忆操作失败"
+            )
             await self._event_bus.publish(
                 MemoryResultReady(
                     pending.turn_id,
                     pending.correlation_id,
                     "failed",
-                    "记忆操作失败",
+                    message,
                     0,
                 )
             )
@@ -1243,6 +1270,15 @@ class Coordinator:
                 return
             budget.ensure_available()
         self._persistent_turn_archived = True
+        if (
+            session_id is not None
+            and self._archive_completion is not None
+            and self._accept_result(turn_id, token)
+        ):
+            try:
+                self._archive_completion(session_id, str(turn_id))
+            except Exception as error:  # noqa: BLE001 后台入队失败不能阻断前台回复
+                _ = error
 
     async def _handle_short_term_summary(
         self,

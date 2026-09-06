@@ -663,15 +663,21 @@ class SettingsWindow(QWidget):
 
         self.memory_checkbox = QCheckBox("保存已确认的偏好与长期记忆")
         self.memory_checkbox.setChecked(config.privacy.memory_enabled)
-        self.short_term_retention_spin = QSpinBox()
-        self.short_term_retention_spin.setRange(1, 365)
-        self.short_term_retention_spin.setSuffix(" 天")
-        self.short_term_retention_spin.setValue(
-            config.privacy.short_term_retention_days
-        )
-        self.short_term_retention_control = self._spin_control(
-            self.short_term_retention_spin
-        )
+        self.auto_memory_checkbox = QCheckBox("自动整理摘要与稳定偏好")
+        self.auto_memory_checkbox.setChecked(config.privacy.auto_memory_enabled)
+        self.chat_history_checkbox = QCheckBox("保存聊天历史")
+        self.chat_history_checkbox.setChecked(config.privacy.chat_history_enabled)
+        self.summary_retention_spin = QSpinBox()
+        self.chat_retention_spin = QSpinBox()
+        for spin, value in (
+            (self.summary_retention_spin, config.privacy.summary_retention_days),
+            (self.chat_retention_spin, config.privacy.chat_retention_days),
+        ):
+            spin.setRange(1, 365)
+            spin.setSuffix(" 天")
+            spin.setValue(value)
+        self.summary_retention_control = self._spin_control(self.summary_retention_spin)
+        self.chat_retention_control = self._spin_control(self.chat_retention_spin)
         self.diagnostic_recording_checkbox = QCheckBox(
             "仅在主动诊断时保留录音"
         )
@@ -719,11 +725,17 @@ class SettingsWindow(QWidget):
             "管理本地记忆、保留时间与诊断数据",
             self._card(
                 "数据保留",
-                "所有长期记忆由你确认后才会保存",
+                "本机保存；自动整理会使用所配置的 AI 服务并产生额外用量",
                 "记忆",
                 self.memory_checkbox,
-                "短期摘要保留",
-                self.short_term_retention_control,
+                "保存聊天历史",
+                self.chat_history_checkbox,
+                "自动整理",
+                self.auto_memory_checkbox,
+                "聊天记录保留",
+                self.chat_retention_control,
+                "近期摘要保留",
+                self.summary_retention_control,
                 "诊断录音",
                 self.diagnostic_recording_checkbox,
             ),
@@ -939,9 +951,10 @@ class SettingsWindow(QWidget):
                 privacy=replace(
                     self._config.privacy,
                     memory_enabled=self.memory_checkbox.isChecked(),
-                    short_term_retention_days=(
-                        self.short_term_retention_spin.value()
-                    ),
+                    auto_memory_enabled=self.auto_memory_checkbox.isChecked(),
+                    chat_history_enabled=self.chat_history_checkbox.isChecked(),
+                    summary_retention_days=self.summary_retention_spin.value(),
+                    chat_retention_days=self.chat_retention_spin.value(),
                     diagnostic_recording=(
                         self.diagnostic_recording_checkbox.isChecked()
                     ),

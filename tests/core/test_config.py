@@ -13,10 +13,71 @@ from core.config import (
 )
 
 
+def legacy_config_dict():
+    data = AppConfig().to_dict()
+    data["config_version"] = 1
+    for field in (
+        "theme_id",
+        "reduce_motion",
+        "pet_scale",
+        "pet_click_through",
+        "preferred_screen",
+        "global_hotkey_enabled",
+        "global_hotkey",
+    ):
+        data["ui"].pop(field, None)
+    return data
+
+
+def test_memory_settings_have_independent_defaults_and_round_trip():
+    privacy = AppConfig().privacy
+    assert privacy.chat_history_enabled is True
+    assert privacy.auto_memory_enabled is True
+    assert privacy.chat_retention_days == 7
+    assert privacy.summary_retention_days == 7
+    updated = replace(AppConfig(), privacy=replace(
+        privacy, chat_history_enabled=False, auto_memory_enabled=False,
+        chat_retention_days=2, summary_retention_days=30))
+    assert AppConfig.from_dict(updated.to_dict()) == updated
+    assert "short_term_retention_days" not in updated.to_dict()["privacy"]
+
+
+def test_old_memory_settings_preserve_disabled_history_and_unrelated_config():
+    data = AppConfig().to_dict()
+    data["privacy"] = {"memory_enabled": False, "diagnostic_recording": True,
+                       "short_term_retention_days": 100}
+    data["llm"]["model"] = "synthetic-local-model"
+    loaded = AppConfig.from_dict(data)
+    assert loaded.privacy.memory_enabled is False
+    assert loaded.privacy.chat_history_enabled is False
+    assert loaded.privacy.chat_retention_days == 7
+    assert loaded.privacy.summary_retention_days == 7
+    assert loaded.privacy.diagnostic_recording is True
+    assert loaded.llm.model == "synthetic-local-model"
+    assert data["privacy"]["short_term_retention_days"] == 100
+
+
+@pytest.mark.parametrize("field", ["chat_retention_days", "summary_retention_days"])
+@pytest.mark.parametrize("value", [True, 1.5, "7", 0, 366])
+def test_memory_retention_requires_bounded_integer(field, value):
+    data = AppConfig().to_dict()
+    data["privacy"][field] = value
+    with pytest.raises(ConfigError):
+        AppConfig.from_dict(data)
+
+
+@pytest.mark.parametrize("field", ["chat_history_enabled", "auto_memory_enabled"])
+def test_new_memory_flags_require_real_booleans(field):
+    data = AppConfig().to_dict()
+    data["privacy"][field] = 1
+    with pytest.raises(ConfigError):
+        AppConfig.from_dict(data)
+
+
 def test_default_config_matches_product_defaults_and_is_immutable():
     config = AppConfig()
 
-    assert config.config_version == 1
+    assert config.config_version == 2
     assert config.audio.sample_rate == 16000
     assert config.audio.channels == 1
     assert config.wake_word.enabled is True
@@ -33,8 +94,16 @@ def test_default_config_matches_product_defaults_and_is_immutable():
     assert config.tts.voice == "zh-CN-XiaoxiaoNeural"
     assert config.ui.active_skin == "dpsk-girl"
     assert config.ui.start_at_login is False
+    assert config.ui.theme_id == "sunny_sea"
+    assert config.ui.reduce_motion is False
+    assert config.ui.pet_scale == 1.0
+    assert config.ui.pet_click_through is False
+    assert config.ui.preferred_screen == ""
+    assert config.ui.global_hotkey_enabled is True
+    assert config.ui.global_hotkey == "Ctrl+Alt+Space"
     assert config.privacy.memory_enabled is True
-    assert config.privacy.short_term_retention_days == 7
+    assert config.privacy.chat_retention_days == 7
+    assert config.privacy.summary_retention_days == 7
     with pytest.raises(FrozenInstanceError):
         config.config_version = 2
 
@@ -54,35 +123,35 @@ def test_llm_config_accepts_chat_protocol_and_loopback_endpoint():
 
 
 def test_v1_config_without_llm_base_url_uses_official_default():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["llm"]["base_url"]
 
     assert AppConfig.from_dict(data).llm.base_url == ""
 
 
 def test_v1_config_without_system_prompt_uses_blank_persona():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["llm"]["system_prompt"]
 
     assert AppConfig.from_dict(data).llm.system_prompt == ""
 
 
 def test_v1_config_without_tts_enabled_keeps_voice_on():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["tts"]["enabled"]
 
     assert AppConfig.from_dict(data).tts.enabled is True
 
 
 def test_v1_config_without_manual_input_tts_uses_quiet_default():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["tts"]["manual_input_enabled"]
 
     assert AppConfig.from_dict(data).tts.manual_input_enabled is False
 
 
 def test_v1_config_without_wake_fields_uses_chinese_defaults():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["wake_word"]["enabled"]
     del data["wake_word"]["keyword"]
 
@@ -93,10 +162,24 @@ def test_v1_config_without_wake_fields_uses_chinese_defaults():
 
 
 def test_v1_config_without_startup_setting_uses_disabled_default():
-    data = AppConfig().to_dict()
+    data = legacy_config_dict()
     del data["ui"]["start_at_login"]
 
     assert AppConfig.from_dict(data).ui.start_at_login is False
+
+
+def test_version_one_config_migrates_ui_defaults_without_rewriting_file(tmp_path):
+    path = tmp_path / "config.json"
+    legacy = legacy_config_dict()
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    result = ConfigStore(path).load()
+
+    assert result.status is ConfigLoadStatus.LOADED
+    assert result.config.config_version == 2
+    assert result.config.ui.theme_id == "sunny_sea"
+    assert result.config.ui.pet_scale == 1.0
+    assert json.loads(path.read_text(encoding="utf-8"))["config_version"] == 1
 
 
 def test_wake_word_fields_round_trip_in_config(tmp_path):
@@ -164,6 +247,28 @@ def test_start_at_login_rejects_non_boolean_value():
         replace(
             AppConfig(),
             ui=replace(AppConfig().ui, start_at_login=1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("theme_id", "unknown"),
+        ("reduce_motion", 1),
+        ("pet_scale", 0.49),
+        ("pet_scale", 2.01),
+        ("pet_scale", True),
+        ("pet_click_through", 1),
+        ("preferred_screen", 123),
+        ("global_hotkey_enabled", 1),
+        ("global_hotkey", ""),
+    ],
+)
+def test_ui_config_rejects_invalid_theme_behavior_and_hotkey(field, value):
+    with pytest.raises(ConfigError):
+        replace(
+            AppConfig(),
+            ui=replace(AppConfig().ui, **{field: value}),
         )
 
 
@@ -295,7 +400,7 @@ def test_corrupt_or_invalid_config_returns_defaults_and_preserves_source(tmp_pat
 @pytest.mark.parametrize(
     "data",
     [
-        {"config_version": 2},
+        {"config_version": 3},
         {"config_version": True},
         {"audio": {"sample_rate": 0, "channels": 1}},
         {"wake_word": {"sensitivity": 2, "debounce_sec": 1.5}},
@@ -305,7 +410,7 @@ def test_corrupt_or_invalid_config_returns_defaults_and_preserves_source(tmp_pat
             "privacy": {
                 "memory_enabled": True,
                 "diagnostic_recording": False,
-                "short_term_retention_days": 0,
+                "summary_retention_days": 0,
             }
         },
     ],

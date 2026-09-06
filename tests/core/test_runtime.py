@@ -59,6 +59,9 @@ class FakeCoordinator:
         self.events.append((f"text:{text}", threading.get_ident()))
         return TurnId.new()
 
+    async def cancel_active_turn(self):
+        self.events.append(("cancel:turn", threading.get_ident()))
+
     async def set_speech_enabled(self, enabled):
         self.events.append((f"speech:{enabled}", threading.get_ident()))
 
@@ -91,6 +94,17 @@ class FakeMemory:
     def resolve_conflict(self, memory_id):
         self.events.append((f"memory:resolve:{memory_id}", threading.get_ident()))
         return "resolved"
+
+    def edit(self, memory_id, content, expected_version):
+        self.events.append((f"memory:edit:{memory_id}", threading.get_ident()))
+        return "edited"
+
+    def undo(self, change_id):
+        self.events.append((f"memory:undo:{change_id}", threading.get_ident()))
+        return True
+
+    def list_changes(self, session_id=None):
+        return ()
 
     def export_json(self, destination):
         self.events.append((f"memory:export:{destination}", threading.get_ident()))
@@ -136,6 +150,10 @@ class FakePetInstaller:
     def install(self, source):
         self.events.append((f"pet:install:{source}", threading.get_ident()))
         return "pets/new-pet"
+
+    def remove(self, pet_id):
+        self.events.append((f"pet:remove:{pet_id}", threading.get_ident()))
+        return True
 
 
 class FakeAsrPreparer:
@@ -244,6 +262,71 @@ def test_runtime_host_dispatches_speech_toggle_off_ui_thread():
     speech_event = next(item for item in events if item[0].startswith("speech:"))
     assert speech_event[0] == "speech:False"
     assert speech_event[1] != caller_thread
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_runtime_host_audio_mute_is_independent_and_reports_completion(fails):
+    events = []
+    error = RuntimeError("audio output failed")
+
+    class AudioOutput:
+        async def set_muted(self, muted):
+            events.append((f"muted:{muted}", threading.get_ident()))
+            if fails:
+                raise error
+
+    services = RuntimeServices(
+        EventBus(), FakeCoordinator(events), FakeActivation(events),
+        FakeLifecycle("capture", events), audio_output=AudioOutput(),
+    )
+    host = RuntimeHost(services)
+    host.start()
+    try:
+        future = host.set_audio_muted(True)
+        if fails:
+            with pytest.raises(RuntimeError) as captured:
+                future.result(timeout=1)
+            assert captured.value is error
+        else:
+            assert future.result(timeout=1) is None
+        assert ("muted:True", host.thread_id) in events
+        assert not any(name.startswith("speech:") for name, _ in events)
+    finally:
+        host.close()
+
+
+def test_runtime_host_audio_mute_requires_audio_output():
+    events = []
+    host = RuntimeHost(RuntimeServices(
+        EventBus(), FakeCoordinator(events), FakeActivation(events),
+        FakeLifecycle("capture", events),
+    ))
+    try:
+        with pytest.raises(RuntimeHostError, match="音频"):
+            host.set_audio_muted(True)
+    finally:
+        host.close()
+
+
+def test_runtime_host_dispatches_active_turn_cancellation_off_ui_thread():
+    events = []
+    services = RuntimeServices(
+        EventBus(),
+        FakeCoordinator(events),
+        FakeActivation(events),
+        FakeLifecycle("capture", events),
+    )
+    host = RuntimeHost(services)
+    caller_thread = threading.get_ident()
+
+    host.start()
+    try:
+        host.cancel_active_turn().result(timeout=1)
+    finally:
+        host.close()
+
+    cancellation = next(item for item in events if item[0] == "cancel:turn")
+    assert cancellation[1] != caller_thread
 
 
 def test_runtime_host_dispatches_voice_catalog_and_preview_off_ui_thread():
@@ -422,7 +505,7 @@ def test_runtime_host_dispatches_memory_data_operations_off_ui_thread():
     host.close()
 
     memory_events = [item for item in events if item[0].startswith("memory:")]
-    assert len(memory_events) == 5
+    assert len(memory_events) == 6
     assert all(thread_id != caller_thread for _, thread_id in memory_events)
 
 
@@ -458,7 +541,7 @@ def test_runtime_host_dispatches_text_and_session_operations_off_ui_thread():
     assert all(thread_id != caller_thread for _, thread_id in operation_events)
 
 
-def test_runtime_host_dispatches_pet_install_off_ui_thread():
+def test_runtime_host_dispatches_pet_install_and_remove_off_ui_thread():
     events = []
     services = RuntimeServices(
         EventBus(),
@@ -472,11 +555,14 @@ def test_runtime_host_dispatches_pet_install_off_ui_thread():
 
     host.start()
     result = host.install_pet("source.codex-pet").result(timeout=1)
+    removed = host.remove_pet("new-pet").result(timeout=1)
     host.close()
 
     assert result == "pets/new-pet"
-    pet_event = next(item for item in events if item[0].startswith("pet:"))
-    assert pet_event[1] != caller_thread
+    assert removed is True
+    pet_events = [item for item in events if item[0].startswith("pet:")]
+    assert len(pet_events) == 2
+    assert all(item[1] != caller_thread for item in pet_events)
 
 
 def test_runtime_host_dispatches_managed_wake_operations_off_ui_thread():

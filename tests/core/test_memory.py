@@ -24,7 +24,7 @@ def test_memory_schema_is_idempotent_and_records_are_immutable(tmp_path):
         confidence=0.8,
     )
 
-    assert store.diagnostics()["schema_version"] == 1
+    assert store.diagnostics()["schema_version"] == 2
     assert store.diagnostics()["fts5"] is True
     assert record.status is MemoryStatus.CANDIDATE
     with pytest.raises(FrozenInstanceError):
@@ -70,7 +70,7 @@ def test_memory_store_never_writes_prohibited_or_disabled_memory(tmp_path):
     store.close()
 
 
-def test_candidate_confirmation_and_conflict_do_not_silently_overwrite(tmp_path):
+def test_candidate_confirmation_allows_distinct_freeform_preferences(tmp_path):
     store = MemoryStore(tmp_path / "memory.db", clock=lambda: NOW)
     candidate = store.create_candidate(
         category="preferred_color",
@@ -86,23 +86,25 @@ def test_candidate_confirmation_and_conflict_do_not_silently_overwrite(tmp_path)
     )
 
     assert confirmed.status is MemoryStatus.CONFIRMED
-    assert conflict.status is MemoryStatus.CONFLICTED
+    assert conflict.status is MemoryStatus.CONFIRMED
     assert store.get(confirmed.id).content == "蓝色"
     store.close()
 
 
-def test_explicit_conflict_resolution_atomically_replaces_same_category(tmp_path):
+def test_explicit_conflict_resolution_atomically_replaces_same_fact(tmp_path):
     store = MemoryStore(tmp_path / "memory.db", clock=lambda: NOW)
     existing = store.create_confirmed(
         category="preferred_color",
         content="蓝色",
         source_turn_id=str(uuid4()),
+        fact_key="response.style",
     )
     candidate = store.create_candidate(
         category="preferred_color",
         content="红色",
         source_turn_id=str(uuid4()),
         confidence=0.8,
+        fact_key="response.style",
     )
     conflicted = store.confirm(candidate.id)
 
@@ -196,3 +198,4 @@ def test_memory_validates_uuid_confidence_and_text_limits(tmp_path):
     with pytest.raises(MemoryConfigurationError):
         store.create_candidate("category", "x" * 4097, str(uuid4()), 0.5)
     store.close()
+

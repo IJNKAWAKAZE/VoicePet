@@ -1518,6 +1518,34 @@ def test_run_ui_normal_mode_builds_starts_and_closes_runtime(tmp_path, monkeypat
     assert startup.calls == [False]
 
 
+def test_run_ui_closes_resources_when_qml_controller_start_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    runtime = FakeRuntimeHost()
+    hotkey = FakeHotkey()
+    monkeypatch.setattr(
+        application_module.QmlApplicationController,
+        "start",
+        lambda self: (_ for _ in ()).throw(RuntimeError("qml failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="qml failed"):
+        run_ui(
+            runtime_builder=lambda *args, **kwargs: object(),
+            runtime_host_factory=lambda services: runtime,
+            credential_store_factory=lambda path: type(
+                "Credentials",
+                (),
+                {"get": lambda self, name: None},
+            )(),
+            hotkey_factory=lambda: hotkey,
+            startup_manager_factory=FakeStartupManager,
+            event_loop=lambda: 0,
+        )
+
+    assert runtime.closed == 1
+    assert hotkey.closed == 1
+
+
 def test_settings_has_only_personal_runtime_pages():
     app_instance()
     settings = SettingsWindow(AppConfig())

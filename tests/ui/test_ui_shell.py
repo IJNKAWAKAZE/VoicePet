@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import threading
 import time
 from dataclasses import replace
@@ -78,7 +79,7 @@ def write_pet_choice(
         encoding="utf-8",
     )
     if sprite_path == "spritesheet.webp":
-        (directory / sprite_path).write_bytes(b"sprite")
+        shutil.copyfile("assets/pet/dpsk-girl/spritesheet.webp", directory / sprite_path)
     return directory
 
 
@@ -142,8 +143,8 @@ def test_settings_window_shows_explicit_select_and_spin_controls():
     assert len(select_buttons) == 4
     assert all(button.accessibleName() == "展开选项" for button in select_buttons)
     assert all(not button.toolTip() for button in select_buttons)
-    assert len(up_buttons) == 2
-    assert len(down_buttons) == 2
+    assert len(up_buttons) == 3
+    assert len(down_buttons) == 3
     voice_toggle = window.voice_control.findChild(QToolButton, "select_toggle")
     QCoreApplication.sendEvent(voice_toggle, QEvent(QEvent.Type.Enter))
     assert window.voice_control.property("interactionActive") is True
@@ -229,7 +230,10 @@ def test_settings_window_builds_new_config_from_edited_controls():
     window.always_on_top_checkbox.setChecked(False)
     window.hot_reload_checkbox.setChecked(False)
     window.memory_checkbox.setChecked(False)
-    window.short_term_retention_spin.setValue(14)
+    window.summary_retention_spin.setValue(14)
+    window.chat_retention_spin.setValue(21)
+    window.auto_memory_checkbox.setChecked(False)
+    window.chat_history_checkbox.setChecked(False)
     window.diagnostic_recording_checkbox.setChecked(True)
     window.save_button.click()
 
@@ -248,7 +252,10 @@ def test_settings_window_builds_new_config_from_edited_controls():
     assert config.ui.always_on_top is False
     assert config.ui.hot_reload_skin is False
     assert config.privacy.memory_enabled is False
-    assert config.privacy.short_term_retention_days == 14
+    assert config.privacy.summary_retention_days == 14
+    assert config.privacy.chat_retention_days == 21
+    assert config.privacy.auto_memory_enabled is False
+    assert config.privacy.chat_history_enabled is False
     assert config.privacy.diagnostic_recording is True
     assert window.sensitivity_value.text() == "72%"
     window.close()
@@ -933,6 +940,7 @@ def test_pet_discovery_returns_safe_built_in_first_choices(tmp_path):
         user_root,
         "wrong-directory",
         pet_id="different-id",
+        display_name="改名形象",
     )
     write_pet_choice(user_root, "old-version", version=1)
     escaping = write_pet_choice(
@@ -953,15 +961,21 @@ def test_pet_discovery_returns_safe_built_in_first_choices(tmp_path):
     assert choices == (
         PetChoice("ocean-girl", "海洋少女", built_in.resolve(), True),
         PetChoice(
+            "different-id", "改名形象", (user_root / "wrong-directory").resolve(), False,
+        ),
+        PetChoice(
             "forest-cat",
             "森林猫",
             (user_root / "forest-cat").resolve(),
             False,
         ),
+        PetChoice("old-version", "测试形象", (user_root / "old-version").resolve(), False),
     )
     assert [choice.label for choice in choices] == [
         "海洋少女（ocean-girl）",
+        "改名形象（different-id）",
         "森林猫（forest-cat）",
+        "测试形象（old-version）",
     ]
 
 

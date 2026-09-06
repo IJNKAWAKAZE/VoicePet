@@ -56,3 +56,35 @@ def test_session_data_switches_context_and_new_session_breaks_only_chat_history(
     assert new_session not in {first_session, second_session}
     assert context.build_history() == ()
     archive.close()
+
+
+def test_session_data_exposes_summary_deletion_and_minimal_source_labels(tmp_path):
+    current = [datetime(2026, 9, 4, 10, tzinfo=UTC)]
+    archive = SessionArchiveStore(
+        tmp_path / "assistant.db",
+        retention_days=1,
+        summary_retention_days=7,
+        clock=lambda: current[0],
+    )
+    manager = SessionDataManager(archive, SessionContext())
+    turn = archive.archive_turn(str(uuid4()), "发布计划", "先测试", str(uuid4()))
+    summary = archive.save_summary(turn.turn_id, "发布", ())
+
+    assert manager.list_summaries(turn.session_id) == (summary,)
+    assert manager.source_label(turn.turn_id) == {
+        "title": "发布计划",
+        "status": "available",
+        "created_at": turn.created_at,
+        "session_id": turn.session_id,
+    }
+    current[0] += timedelta(days=2)
+    assert manager.source_label(turn.turn_id)["status"] == "expired"
+    assert manager.source_label(str(uuid4())) == {
+        "title": "",
+        "status": "missing",
+        "created_at": None,
+        "session_id": "",
+    }
+    assert manager.delete_summary(summary.id) is True
+    assert manager.delete_summary(summary.id) is False
+    archive.close()

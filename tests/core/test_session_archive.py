@@ -153,7 +153,7 @@ def test_multiple_turns_are_grouped_into_one_session_with_details(tmp_path):
     store.close()
 
 
-def test_legacy_turn_rows_are_migrated_into_daily_sessions(tmp_path):
+def test_legacy_turn_rows_are_rejected_without_modifying_database(tmp_path):
     database = tmp_path / "assistant.db"
     connection = sqlite3.connect(database)
     connection.execute(
@@ -179,14 +179,17 @@ def test_legacy_turn_rows_are_migrated_into_daily_sessions(tmp_path):
         )
     connection.commit()
     connection.close()
+    original_bytes = database.read_bytes()
 
-    store = SessionArchiveStore(database, clock=lambda: NOW)
+    with pytest.raises(SessionArchiveError, match="结构"):
+        SessionArchiveStore(database, clock=lambda: NOW)
 
-    sessions = store.list_sessions()
-    assert len(sessions) == 1
-    assert sessions[0].turn_count == 2
-    assert all(turn.session_id == sessions[0].id for turn in store.list_turns())
-    store.close()
+    assert database.read_bytes() == original_bytes
+    connection = sqlite3.connect(database)
+    assert connection.execute(
+        "SELECT user_text, assistant_text FROM session_turns ORDER BY rowid"
+    ).fetchall() == [("问题0", "回答0"), ("问题1", "回答1")]
+    connection.close()
 
 
 @pytest.mark.parametrize(
@@ -194,6 +197,10 @@ def test_legacy_turn_rows_are_migrated_into_daily_sessions(tmp_path):
     [
         {"retention_days": 0},
         {"retention_days": 366},
+        {"retention_days": True},
+        {"summary_retention_days": 0},
+        {"summary_retention_days": 366},
+        {"summary_retention_days": False},
     ],
 )
 def test_archive_rejects_invalid_retention(tmp_path, kwargs):

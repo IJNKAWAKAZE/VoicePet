@@ -218,6 +218,22 @@ class MemoryResultReady:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryChanged:
+    """后台记忆变更只归属于真实来源会话"""
+
+    session_id: str
+    change_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMaintenanceChanged:
+    """记忆页专用的轻量后台状态，不改变前台语音阶段"""
+
+    status: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class SpeakRequested:
     turn_id: TurnId
     correlation_id: CorrelationId

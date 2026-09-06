@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Protocol
 
 from .memory import MemoryRecord, MemoryStatus, MemoryStore
+from .memory_facts import infer_explicit_fact, is_explicit_correction
 
 
 class SessionArchiveData(Protocol):
@@ -122,10 +123,21 @@ class MemoryOperationService:
             raise TypeError("记忆操作计划无效")
         if operation.action is MemoryIntentAction.REMEMBER:
             assert operation.content is not None
+            inferred = infer_explicit_fact(operation.content)
+            fact_options = (
+                {}
+                if inferred is None
+                else {
+                    "fact_key": inferred[0],
+                    "value": inferred[1],
+                    "explicit_update": is_explicit_correction(operation.content),
+                }
+            )
             record = self._store.create_confirmed(
                 category="user_requested",
                 content=operation.content,
                 source_turn_id=operation.source_turn_id,
+                **fact_options,
             )
             return MemoryOperationResult(
                 operation.action,

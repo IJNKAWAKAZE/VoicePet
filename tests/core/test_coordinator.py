@@ -634,6 +634,33 @@ def test_interrupt_starts_replacement_before_old_transcript_finishes():
     asyncio.run(scenario())
 
 
+def test_cancel_active_turn_cancels_token_and_returns_to_idle():
+    async def scenario():
+        audio = ImmediateAudio()
+        transcript = ControlledTranscript(["stale"])
+        bus = EventBus()
+        machine = ConversationStateMachine()
+        states = []
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(audio, transcript, bus, machine)
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        token = transcript.calls[0][1]
+
+        await coordinator.cancel_active_turn()
+        await coordinator.cancel_active_turn()
+
+        assert token.is_cancelled
+        assert machine.phase is ConversationPhase.IDLE
+        assert states[-1].current is ConversationPhase.IDLE
+        assert sum(event.current is ConversationPhase.IDLE for event in states) == 1
+        transcript.releases[0].set()
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
 def test_blank_transcript_returns_to_idle_without_transcript_event():
     async def scenario():
         audio = ImmediateAudio()

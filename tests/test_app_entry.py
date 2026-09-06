@@ -59,6 +59,15 @@ def test_frozen_smoke_checks_bundled_pet_and_user_data_directory(
     pet.mkdir(parents=True)
     (pet / "pet.json").write_text("{}", encoding="utf-8")
     (pet / "spritesheet.webp").write_bytes(b"webp")
+    qml = bundle / "ui" / "qml"
+    qml.mkdir(parents=True)
+    (qml / "Main.qml").write_text("import QtQuick", encoding="utf-8")
+    brand = bundle / "assets" / "ui" / "brand"
+    brand.mkdir(parents=True)
+    (brand / "voicepet-mark.svg").write_text("<svg/>", encoding="utf-8")
+    theme = bundle / "assets" / "ui" / "themes" / "sunny_sea"
+    theme.mkdir(parents=True)
+    (theme / "welcome.webp").write_bytes(b"webp")
     local = tmp_path / "local"
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
     monkeypatch.setattr(sys, "executable", str(bundle / "VoicePet.exe"))
@@ -66,6 +75,36 @@ def test_frozen_smoke_checks_bundled_pet_and_user_data_directory(
 
     assert app._run_frozen_smoke() == 0
     assert (local / "VoicePet").is_dir()
+
+
+def test_frozen_smoke_rejects_bundle_without_qml_and_theme_assets(
+    monkeypatch,
+    tmp_path,
+):
+    bundle = tmp_path / "bundle"
+    pet = bundle / "assets" / "pet" / "dpsk-girl"
+    pet.mkdir(parents=True)
+    (pet / "pet.json").write_text("{}", encoding="utf-8")
+    (pet / "spritesheet.webp").write_bytes(b"webp")
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setattr(sys, "executable", str(bundle / "VoicePet.exe"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+
+    assert app._run_frozen_smoke() == 4
+
+
+def test_frozen_smoke_loads_qml_after_resource_validation(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr("core.config.default_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app, "_run_frozen_smoke", lambda: calls.append("files") or 0)
+    monkeypatch.setattr(
+        "ui.application.run_ui",
+        lambda *, smoke_test: calls.append(("qml", smoke_test)) or 0,
+    )
+
+    assert app._run_ui(True) == 0
+    assert calls == ["files", ("qml", True)]
 
 
 def test_worker_rejection_handles_windowed_build_without_stderr(monkeypatch):

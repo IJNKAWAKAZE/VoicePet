@@ -18,6 +18,7 @@ class ShortTermSummaryDraft:
 
     topic: str
     unfinished_items: tuple[str, ...]
+    decisions: tuple[str, ...] = ()
 
 
 def short_term_summary_tool_definition() -> ToolDefinition:
@@ -30,13 +31,18 @@ def short_term_summary_tool_definition() -> ToolDefinition:
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "maxLength": 500},
+                "decisions": {
+                    "type": "array",
+                    "maxItems": 10,
+                    "items": {"type": "string", "maxLength": 200},
+                },
                 "unfinished_items": {
                     "type": "array",
                     "maxItems": 10,
                     "items": {"type": "string", "maxLength": 200},
                 },
             },
-            "required": ["topic", "unfinished_items"],
+            "required": ["topic", "decisions", "unfinished_items"],
             "additionalProperties": False,
         },
     )
@@ -57,30 +63,37 @@ class ShortTermSummaryService:
     def prepare(self, arguments: Mapping[str, object]) -> ShortTermSummaryDraft:
         """把模型参数转换为有界不可变摘要草稿"""
 
-        if set(arguments) != {"topic", "unfinished_items"}:
+        if set(arguments) != {"topic", "decisions", "unfinished_items"}:
             raise ValueError("短期摘要参数字段无效")
         topic = arguments["topic"]
+        raw_decisions = arguments["decisions"]
         raw_items = arguments["unfinished_items"]
         if not isinstance(topic, str) or not topic.strip() or len(topic) > 500:
             raise ValueError("短期摘要话题无效")
-        if not isinstance(raw_items, Sequence) or isinstance(
-            raw_items,
-            (str, bytes, bytearray),
-        ):
-            raise TypeError("短期摘要未完成事项无效")
-        if len(raw_items) > 10 or any(
-            not isinstance(item, str) or not item.strip() or len(item) > 200
-            for item in raw_items
-        ):
-            raise ValueError("短期摘要未完成事项无效")
+        decisions = self._items(raw_decisions, "决定")
+        unfinished = self._items(raw_items, "未完成事项")
         if self._policy.is_prohibited(topic) or any(
-            self._policy.is_prohibited(item) for item in raw_items
+            self._policy.is_prohibited(item) for item in (*decisions, *unfinished)
         ):
             raise ValueError("短期摘要包含禁止保存的敏感信息")
         return ShortTermSummaryDraft(
             topic.strip(),
-            tuple(item.strip() for item in raw_items),
+            unfinished,
+            decisions,
         )
+
+    @staticmethod
+    def _items(value: object, label: str) -> tuple[str, ...]:
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            raise TypeError(f"短期摘要{label}无效")
+        if len(value) > 10 or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 200
+            for item in value
+        ):
+            raise ValueError(f"短期摘要{label}无效")
+        return tuple(item.strip() for item in value)
 
     def save(
         self,
@@ -95,4 +108,5 @@ class ShortTermSummaryService:
             source_turn_id,
             draft.topic,
             draft.unfinished_items,
+            decisions=draft.decisions,
         )

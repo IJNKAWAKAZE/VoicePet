@@ -6,10 +6,13 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .memory import MemoryRecord, MemoryStore
+from .memory_facts import MemoryChange
+from .session_archive import SessionArchiveStore
 
 
 class MemoryDataError(RuntimeError):
@@ -25,13 +28,15 @@ class MemoryDataManager:
         self,
         store: MemoryStore,
         *,
+        archive: SessionArchiveStore | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._store = store
+        self._archive = archive
         self._clock = clock
 
     def list_records(self) -> tuple[MemoryRecord, ...]:
-        return self._store.list_all()
+        return tuple(self._with_source(record) for record in self._store.list_all())
 
     def delete(self, memory_id: str) -> bool:
         return self._store.delete(memory_id)
@@ -42,13 +47,57 @@ class MemoryDataManager:
     def resolve_conflict(self, memory_id: str) -> MemoryRecord:
         return self._store.resolve_conflict(memory_id)
 
+    def edit(
+        self,
+        memory_id: str,
+        content: str,
+        expected_version: int,
+    ) -> MemoryRecord:
+        return self._store.edit(memory_id, content, expected_version)
+
+    def undo(self, change_id: str) -> bool:
+        return self._store.undo(change_id)
+
+    def list_changes(
+        self,
+        session_id: str | None = None,
+    ) -> tuple[MemoryChange, ...]:
+        return self._store.list_changes(session_id)
+
+    def _with_source(self, record: MemoryRecord) -> MemoryRecord:
+        if self._archive is None:
+            state = "manual" if not record.session_id else "unavailable"
+            return replace(
+                record,
+                source_state=state,
+                source_time=record.created_at if state == "manual" else None,
+            )
+        label = self._archive.source_label(record.source_turn_id)
+        state = str(label["status"])
+        if state == "missing" and not record.session_id and record.origin in {
+            "explicit",
+            "manual",
+        }:
+            state = "manual"
+        source_session = str(label["session_id"] or record.session_id)
+        source_time = label["created_at"]
+        if state == "manual" and source_time is None:
+            source_time = record.created_at
+        return replace(
+            record,
+            source_title=str(label["title"]),
+            source_state=state,
+            source_time=source_time,
+            session_id=source_session,
+        )
+
     def export_json(self, destination: str | Path) -> int:
         """把当前可见记忆原子导出到用户指定的本地文件"""
 
         records = self._store.list_all()
         payload = {
             "format": "voicepet-memory-export",
-            "version": 1,
+            "version": 2,
             "exported_at": self._clock().astimezone(UTC).isoformat(),
             "memories": [self._serialize(record) for record in records],
         }
@@ -96,4 +145,12 @@ class MemoryDataManager:
                 None if record.expires_at is None else record.expires_at.isoformat()
             ),
             "status": record.status.value,
+            "fact_key": record.fact_key,
+            "value": record.value,
+            "cardinality": record.cardinality,
+            "origin": record.origin,
+            "version": record.version,
+            "conflict_id": record.conflict_id,
+            "keywords": list(record.keywords),
+            "session_id": record.session_id,
         }

@@ -26,6 +26,7 @@ def test_summary_tool_definition_is_strict_and_bounded():
     assert definition.input_schema["additionalProperties"] is False
     assert definition.input_schema["required"] == (
         "topic",
+        "decisions",
         "unfinished_items",
     )
     assert definition.input_schema["properties"]["unfinished_items"][
@@ -43,11 +44,17 @@ def test_summary_service_validates_draft_then_saves_for_archived_turn(tmp_path):
     archive.archive_turn(turn_id, "规划发布", "先跑测试")
 
     draft = service.prepare(
-        {"topic": "发布准备", "unfinished_items": ["完成测试", "打包"]}
+        {
+            "topic": "发布准备",
+            "decisions": ["使用 QML"],
+            "unfinished_items": ["完成测试", "打包"],
+        }
     )
     record = service.save(turn_id, draft)
 
-    assert draft == ShortTermSummaryDraft("发布准备", ("完成测试", "打包"))
+    assert draft == ShortTermSummaryDraft(
+        "发布准备", ("完成测试", "打包"), ("使用 QML",)
+    )
     with pytest.raises(FrozenInstanceError):
         draft.topic = "changed"
     assert record.source_turn_id == turn_id
@@ -59,11 +66,13 @@ def test_summary_service_validates_draft_then_saves_for_archived_turn(tmp_path):
     "arguments",
     [
         {"topic": "话题"},
-        {"topic": "", "unfinished_items": []},
-        {"topic": "话题", "unfinished_items": "事项"},
-        {"topic": "话题", "unfinished_items": ["x"] * 11},
-        {"topic": "话题", "unfinished_items": [""]},
-        {"topic": "话题", "unfinished_items": [], "extra": True},
+        {"topic": "", "decisions": [], "unfinished_items": []},
+        {"topic": "话题", "decisions": [], "unfinished_items": "事项"},
+        {"topic": "话题", "decisions": "决定", "unfinished_items": []},
+        {"topic": "话题", "decisions": [], "unfinished_items": ["x"] * 11},
+        {"topic": "话题", "decisions": [""] , "unfinished_items": []},
+        {"topic": "话题", "decisions": [], "unfinished_items": [""]},
+        {"topic": "话题", "decisions": [], "unfinished_items": [], "extra": True},
     ],
 )
 def test_summary_service_rejects_invalid_model_arguments(tmp_path, arguments):
@@ -84,7 +93,17 @@ def test_summary_service_rejects_sensitive_topic_or_unfinished_item(tmp_path):
         service.prepare(
             {
                 "topic": "账户设置",
+                "decisions": [],
                 "unfinished_items": ["保存 password=secret123"],
+            }
+        )
+
+    with pytest.raises(ValueError, match="敏感"):
+        service.prepare(
+            {
+                "topic": "账户设置",
+                "decisions": ["我的密码是 synthetic-secret-123"],
+                "unfinished_items": [],
             }
         )
 

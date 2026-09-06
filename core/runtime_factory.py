@@ -25,6 +25,7 @@ from .diagnostics import (
     DiagnosticStatus,
 )
 from .event_bus import EventBus
+from .events import ConversationPhase
 from .llm import (
     OpenAIChatCompletionsProvider,
     OpenAIResponsesProvider,
@@ -32,20 +33,18 @@ from .llm import (
     ToolDefinition,
 )
 from .memory import MemoryStore
-from .memory_candidates import MemoryCandidateService, memory_candidate_tool_definition
 from .memory_context import MemoryContextAssembler
 from .memory_data import MemoryDataManager
+from .memory_extraction import MemoryExtractor
 from .memory_intents import MemoryOperationService
+from .memory_jobs import MemoryJobStore
+from .memory_scheduler import MemoryScheduler
 from .pet_packages import PetPackageInstaller
 from .policy import AuthorizationIssuer, PolicyEngine, PolicySettings
 from .runtime import RuntimeServices
 from .session_archive import SessionArchiveStore
 from .session_context import SessionContext
 from .session_data import SessionDataManager
-from .short_term_summary import (
-    ShortTermSummaryService,
-    short_term_summary_tool_definition,
-)
 from .structured_logging import (
     RuntimeEventLogger,
     StructuredLogError,
@@ -90,6 +89,10 @@ def build_default_runtime(
     data_directory.mkdir(parents=True, exist_ok=True)
     cache_directory.mkdir(parents=True, exist_ok=True)
     wake_model_directory.mkdir(parents=True, exist_ok=True)
+    memory_store = MemoryStore(
+        data_directory / "assistant.db",
+        enabled=config.privacy.memory_enabled,
+    )
     log_store = StructuredLogStore(root / "logs")
     event_logger = RuntimeEventLogger(event_bus, log_store)
     roots = (
@@ -98,14 +101,11 @@ def build_default_runtime(
         else tuple(Path(path).expanduser().resolve() for path in allowed_roots)
     )
     audit_store = AuditStore(data_directory / "assistant.db")
-    memory_store = MemoryStore(
-        data_directory / "assistant.db",
-        enabled=config.privacy.memory_enabled,
-    )
     session_archive = SessionArchiveStore(
         data_directory / "assistant.db",
-        retention_days=config.privacy.short_term_retention_days,
-        enabled=config.privacy.memory_enabled,
+        retention_days=config.privacy.chat_retention_days,
+        summary_retention_days=config.privacy.summary_retention_days,
+        enabled=config.privacy.chat_history_enabled,
     )
     session_archive.purge_expired()
     pet_installer = PetPackageInstaller(root / "pets")
@@ -128,23 +128,10 @@ def build_default_runtime(
         for manifest in manifests
         if manifest is not None
     )
-    memory_candidates = None
-    short_term_summaries = None
     llm_instructions = (
         "你是 VoicePet 桌面助手。默认用 1～3 句话直接回答，避免重复和不必要的铺垫；"
         "只有用户明确要求详细说明、步骤、清单或代码时才展开"
     )
-    if config.privacy.memory_enabled:
-        memory_candidates = MemoryCandidateService(memory_store)
-        short_term_summaries = ShortTermSummaryService(session_archive)
-        tool_definitions += (
-            memory_candidate_tool_definition(),
-            short_term_summary_tool_definition(),
-        )
-        llm_instructions += (
-            "。只有稳定且不敏感的用户事实才可调用 propose_memory，结果只能作为 candidate"
-            "。每轮形成有意义话题时，在最终回复前调用 update_daily_summary，记录简短话题与未完成事项"
-        )
     if config.llm.system_prompt:
         llm_instructions += (
             "\n\n以下是用户角色设定，只控制角色、语气、称呼和表达偏好，"
@@ -189,19 +176,18 @@ def build_default_runtime(
         if config.llm.api == "responses"
         else OpenAIChatCompletionsProvider
     )
-    llm = (
-        ResilientLlmProvider(
-            provider_type(
-                api_key=credential or "voicepet-local",
-                base_url=config.llm.base_url or None,
-                model=config.llm.model,
-                reasoning_effort=config.llm.reasoning_effort,
-                max_retries=0,
-            )
+    raw_llm = (
+        provider_type(
+            api_key=credential or "voicepet-local",
+            base_url=config.llm.base_url or None,
+            model=config.llm.model,
+            reasoning_effort=config.llm.reasoning_effort,
+            max_retries=0,
         )
         if llm_configured
         else None
     )
+    llm = ResilientLlmProvider(raw_llm) if raw_llm is not None else None
     sapi = WindowsSapiSynthesizer()
     speech = FallbackSpeechSynthesizer(
         ResilientSpeechSynthesizer(
@@ -216,17 +202,27 @@ def build_default_runtime(
     session_context = SessionContext()
     session_manager = SessionDataManager(session_archive, session_context)
     session_manager.resume_latest()
+    memory_context = MemoryContextAssembler(
+        memory_store,
+        archive=session_archive,
+        session_context=session_context,
+    )
+    scheduler: MemoryScheduler | None = None
+
+    def enqueue_archived_turn(session_id: str, turn_id: str) -> None:
+        if scheduler is not None:
+            scheduler.enqueue(session_id, turn_id)
+
     coordinator = Coordinator(
         audio_session,
         transcript,
         event_bus,
         llm_provider=llm,
         llm_tools=tool_definitions,
-        memory_context=MemoryContextAssembler(memory_store),
+        memory_context=memory_context,
         session_context=session_context,
         session_archive=session_archive,
-        memory_candidates=memory_candidates,
-        short_term_summaries=short_term_summaries,
+        archive_completion=enqueue_archived_turn,
         memory_operations=MemoryOperationService(
             memory_store,
             session_archive=session_archive,
@@ -241,6 +237,20 @@ def build_default_runtime(
         policy_engine=policy,
         authorization_issuer=AuthorizationIssuer(secret),
         tool_executor=worker,
+    )
+    memory_jobs = MemoryJobStore(data_directory / "assistant.db")
+    scheduler = MemoryScheduler(
+        None if raw_llm is None else MemoryExtractor(raw_llm),
+        memory_store,
+        session_archive,
+        memory_jobs,
+        event_bus,
+        foreground_busy=lambda: coordinator.phase is not ConversationPhase.IDLE,
+        enabled=(
+            config.privacy.memory_enabled
+            and config.privacy.auto_memory_enabled
+            and config.privacy.chat_history_enabled
+        ),
     )
     activation = ActivationController(coordinator)
     wake_model_store = WakeModelStore(wake_model_directory)
@@ -339,20 +349,30 @@ def build_default_runtime(
         capture,
         worker,
         wake_service,
-        (
-            event_logger.close,
-            transcript.close,
-            sapi.close,
-            audio_player.close,
-            session_archive.close,
-            memory_store.close,
-            audit_store.close,
+        tuple(
+            closer
+            for closer in (
+                event_logger.close,
+                transcript.close,
+                sapi.close,
+                audio_player.close,
+                memory_jobs.close,
+                session_archive.close,
+                memory_store.close,
+                audit_store.close,
+            )
+            if closer is not None
         ),
-        memory=MemoryDataManager(memory_store),
+        memory=MemoryDataManager(memory_store, archive=session_archive),
         sessions=session_manager,
         pet_installer=pet_installer,
         diagnostics=diagnostics,
         asr_preparer=transcript,
         tts_voice_service=tts_voice_service,
         llm_configured=llm_configured,
+        audio_output=audio_player,
+        scheduler=scheduler,
+        memory_context=memory_context,
+        memory_store=memory_store,
+        session_archive=session_archive,
     )

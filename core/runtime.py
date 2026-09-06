@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from .asr import AsrModelState
-from .config import WakeWordConfig
+from .config import PrivacyConfig, WakeWordConfig
+from .diagnostics import DiagnosticResult
 from .event_bus import EventBus
-from .events import TurnId
+from .events import MemoryChanged, TurnId
 from .policy import ConfirmationMode
 from .wake import WakeRuntimeStatus
 from .wake_models import WakeDownloadProgress, WakeModelState
@@ -48,6 +49,8 @@ class CoordinatorService(Protocol):
 
     async def submit_text(self, text: str) -> TurnId: ...
 
+    async def cancel_active_turn(self) -> None: ...
+
     async def set_speech_enabled(self, enabled: bool) -> None: ...
 
     async def set_manual_input_speech_enabled(self, enabled: bool) -> None: ...
@@ -70,6 +73,12 @@ class MemoryDataService(Protocol):
 
     def resolve_conflict(self, memory_id: str) -> Any: ...
 
+    def edit(self, memory_id: str, content: str, expected_version: int) -> Any: ...
+
+    def undo(self, change_id: str) -> bool: ...
+
+    def list_changes(self, session_id: str | None = None) -> tuple[Any, ...]: ...
+
     def export_json(self, destination: str) -> int: ...
 
 
@@ -91,17 +100,53 @@ class SessionDataService(Protocol):
 
     def clear(self) -> int: ...
 
+    def list_summaries(self, session_id: str | None = None) -> tuple[Any, ...]: ...
+
+    def delete_summary(self, summary_id: str) -> bool: ...
+
+
+class MemorySchedulerService(AsyncLifecycle, Protocol):
+    """Runtime 持有的后台记忆调度器边界"""
+
+    def configure(self, enabled: bool) -> None: ...
+
+    def invalidate(self) -> None: ...
+
+    def status(self) -> dict[str, object]: ...
+
+
+class MemoryContextConfiguration(Protocol):
+    def configure(self, enabled: bool) -> None: ...
+
+
+class MemoryStoreConfiguration(Protocol):
+    def set_enabled(self, enabled: bool) -> None: ...
+
+
+class SessionArchiveConfiguration(Protocol):
+    def configure(
+        self,
+        *,
+        enabled: bool,
+        retention_days: int,
+        summary_retention_days: int,
+    ) -> None: ...
+
 
 class PetInstallerService(Protocol):
     """RuntimeHost 使用的同步桌宠包安装边界"""
 
     def install(self, source: str) -> Path: ...
 
+    def remove(self, pet_id: str) -> bool: ...
+
 
 class DiagnosticServiceProtocol(Protocol):
     """RuntimeHost 使用的异步诊断边界"""
 
     async def run(self) -> Any: ...
+
+    async def run_component(self, component: str) -> DiagnosticResult: ...
 
     async def export(self, destination: str) -> None: ...
 
@@ -112,6 +157,12 @@ class TtsVoiceServiceProtocol(Protocol):
     async def list_chinese_voices(self) -> tuple[Any, ...]: ...
 
     async def preview(self, voice_name: str) -> None: ...
+
+
+class AudioOutputServiceProtocol(Protocol):
+    """RuntimeHost 使用的临时全局声音开关"""
+
+    async def set_muted(self, muted: bool) -> None: ...
 
 
 class AsrPreparationService(Protocol):
@@ -164,6 +215,11 @@ class RuntimeServices:
     asr_preparer: AsrPreparationService | None = None
     tts_voice_service: TtsVoiceServiceProtocol | None = None
     llm_configured: bool = False
+    audio_output: AudioOutputServiceProtocol | None = None
+    scheduler: MemorySchedulerService | None = None
+    memory_context: MemoryContextConfiguration | None = None
+    memory_store: MemoryStoreConfiguration | None = None
+    session_archive: SessionArchiveConfiguration | None = None
 
 
 class RuntimeHost:
@@ -187,6 +243,7 @@ class RuntimeHost:
         self._thread_id: int | None = None
         self._startup_error: BaseException | None = None
         self._started: list[AsyncLifecycle] = []
+        self._memory_invalidated = False
         self._closed = False
         self._shutdown_complete = False
 
@@ -245,10 +302,19 @@ class RuntimeHost:
     def submit_text(self, text: str) -> Future[TurnId]:
         return self._submit(self._services.coordinator.submit_text(text))
 
+    def cancel_active_turn(self) -> Future[None]:
+        return self._submit(self._services.coordinator.cancel_active_turn())
+
     def set_speech_enabled(self, enabled: bool) -> Future[None]:
         return self._submit(
             self._services.coordinator.set_speech_enabled(enabled)
         )
+
+    def set_audio_muted(self, muted: bool) -> Future[None]:
+        service = self._services.audio_output
+        if service is None:
+            raise RuntimeHostError("音频输出控制当前不可用")
+        return self._submit(service.set_muted(muted))
 
     def set_manual_input_speech_enabled(self, enabled: bool) -> Future[None]:
         return self._submit(
@@ -287,17 +353,37 @@ class RuntimeHost:
 
     def delete_memory(self, memory_id: str) -> Future[bool]:
         memory = self._require_memory()
-        return self._submit(asyncio.to_thread(memory.delete, memory_id))
+        return self._submit(self._delete_memory(memory, memory_id))
 
     def confirm_memory(self, memory_id: str) -> Future[Any]:
         memory = self._require_memory()
-        return self._submit(asyncio.to_thread(memory.confirm, memory_id))
+        return self._submit(self._mutate_memory(memory, memory.confirm, memory_id))
 
     def resolve_memory_conflict(self, memory_id: str) -> Future[Any]:
         memory = self._require_memory()
+        return self._submit(self._mutate_memory(memory, memory.resolve_conflict, memory_id))
+
+    def edit_memory(
+        self,
+        memory_id: str,
+        content: str,
+        expected_version: int,
+    ) -> Future[Any]:
+        memory = self._require_memory()
         return self._submit(
-            asyncio.to_thread(memory.resolve_conflict, memory_id)
+            self._mutate_memory(memory, memory.edit, memory_id, content, expected_version)
         )
+
+    def undo_memory(self, change_id: str) -> Future[bool]:
+        memory = self._require_memory()
+        return self._submit(self._undo_memory(memory, change_id))
+
+    def list_memory_changes(
+        self,
+        session_id: str | None = None,
+    ) -> Future[tuple[Any, ...]]:
+        memory = self._require_memory()
+        return self._submit(asyncio.to_thread(memory.list_changes, session_id))
 
     def export_memories(self, destination: str) -> Future[int]:
         memory = self._require_memory()
@@ -341,11 +427,75 @@ class RuntimeHost:
         sessions = self._require_sessions()
         return self._submit(asyncio.to_thread(sessions.clear))
 
+    def list_summaries(
+        self,
+        session_id: str | None = None,
+    ) -> Future[tuple[Any, ...]]:
+        sessions = self._require_sessions()
+        return self._submit(asyncio.to_thread(sessions.list_summaries, session_id))
+
+    def delete_summary(self, summary_id: str) -> Future[bool]:
+        sessions = self._require_sessions()
+        return self._submit(self._delete_summary(sessions, summary_id))
+
+    def memory_status(self) -> Future[dict[str, object]]:
+        async def read_status() -> dict[str, object]:
+            scheduler = self._services.scheduler
+            if scheduler is None:
+                return {"status": "disabled", "message": "自动整理未启用"}
+            return scheduler.status()
+
+        return self._submit(read_status())
+
+    def configure_memory(self, privacy: PrivacyConfig) -> Future[None]:
+        if not isinstance(privacy, PrivacyConfig):
+            raise TypeError("记忆隐私配置无效")
+
+        async def configure() -> None:
+            context = self._services.memory_context
+            if context is not None:
+                context.configure(privacy.memory_enabled)
+            store = self._services.memory_store
+            if store is not None:
+                store.set_enabled(privacy.memory_enabled)
+            archive = self._services.session_archive
+            if archive is not None:
+                archive.configure(
+                    enabled=privacy.chat_history_enabled,
+                    retention_days=privacy.chat_retention_days,
+                    summary_retention_days=privacy.summary_retention_days,
+                )
+            scheduler = self._services.scheduler
+            if scheduler is not None:
+                scheduler.configure(
+                    not self._memory_invalidated
+                    and privacy.memory_enabled
+                    and privacy.auto_memory_enabled
+                    and privacy.chat_history_enabled
+                )
+
+        return self._submit(configure())
+
+    def invalidate_memory(self) -> Future[None]:
+        async def invalidate() -> None:
+            self._memory_invalidated = True
+            scheduler = self._services.scheduler
+            if scheduler is not None:
+                scheduler.configure(False)
+
+        return self._submit(invalidate())
+
     def install_pet(self, source: str) -> Future[Path]:
         installer = self._services.pet_installer
         if installer is None:
             raise RuntimeHostError("桌宠导入当前不可用")
         return self._submit(asyncio.to_thread(installer.install, source))
+
+    def remove_pet(self, pet_id: str) -> Future[bool]:
+        installer = self._services.pet_installer
+        if installer is None:
+            raise RuntimeHostError("桌宠删除当前不可用")
+        return self._submit(asyncio.to_thread(installer.remove, pet_id))
 
     def wake_model_state(self) -> Future[WakeModelState]:
         service = self._require_wake_service()
@@ -384,6 +534,11 @@ class RuntimeHost:
     def run_diagnostics(self) -> Future[Any]:
         diagnostics = self._require_diagnostics()
         return self._submit(diagnostics.run())
+
+    def test_llm_connection(self) -> Future[DiagnosticResult]:
+        """在 Runtime 线程检查当前运行配置的 LLM 连接"""
+        diagnostics = self._require_diagnostics()
+        return self._submit(diagnostics.run_component("llm"))
 
     def export_diagnostics(self, destination: str) -> Future[None]:
         diagnostics = self._require_diagnostics()
@@ -427,6 +582,43 @@ class RuntimeHost:
         if memory is None:
             raise RuntimeHostError("记忆数据管理当前不可用")
         return memory
+
+    async def _mutate_memory(self, memory, callback, *arguments):
+        result = await asyncio.to_thread(callback, *arguments)
+        await self._services.event_bus.publish(
+            MemoryChanged(getattr(result, "session_id", ""), ())
+        )
+        return result
+
+    async def _delete_memory(self, memory, memory_id: str) -> bool:
+        records = await asyncio.to_thread(memory.list_records)
+        source = next((item for item in records if getattr(item, "id", None) == memory_id), None)
+        deleted = await asyncio.to_thread(memory.delete, memory_id)
+        if deleted:
+            await self._services.event_bus.publish(
+                MemoryChanged(getattr(source, "session_id", ""), ())
+            )
+        return deleted
+
+    async def _undo_memory(self, memory, change_id: str) -> bool:
+        changes = await asyncio.to_thread(memory.list_changes)
+        change = next((item for item in changes if item.id == change_id), None)
+        undone = await asyncio.to_thread(memory.undo, change_id)
+        if undone:
+            await self._services.event_bus.publish(
+                MemoryChanged(getattr(change, "session_id", ""), (change_id,))
+            )
+        return undone
+
+    async def _delete_summary(self, sessions, summary_id: str) -> bool:
+        summaries = await asyncio.to_thread(sessions.list_summaries, None)
+        summary = next((item for item in summaries if getattr(item, "id", None) == summary_id), None)
+        deleted = await asyncio.to_thread(sessions.delete_summary, summary_id)
+        if deleted:
+            await self._services.event_bus.publish(
+                MemoryChanged(getattr(summary, "session_id", ""), ())
+            )
+        return deleted
 
     def _require_sessions(self) -> SessionDataService:
         sessions = self._services.sessions
@@ -493,6 +685,7 @@ class RuntimeHost:
                 self._services.capture,
                 self._services.worker,
                 self._services.wake_service,
+                self._services.scheduler,
             ):
                 if service is None:
                     continue
@@ -523,6 +716,9 @@ class RuntimeHost:
             await self._services.coordinator.stop()
         except BaseException as error:  # noqa: BLE001 关闭必须继续释放其余资源
             errors.append(error)
+        scheduler = self._services.scheduler
+        if scheduler is not None and scheduler in self._started:
+            await self._stop_service(scheduler, errors)
         for service in (self._services.worker, self._services.capture):
             if service is not None and service in self._started:
                 await self._stop_service(service, errors)

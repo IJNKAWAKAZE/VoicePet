@@ -5,11 +5,18 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 root = Path(SPEC).resolve().parent
-datas = [(str(root / "assets" / "pet"), "assets/pet")]
+datas = [
+    (str(root / "assets" / "pet"), "assets/pet"),
+    (str(root / "assets" / "ui"), "assets/ui"),
+    (str(root / "ui" / "qml"), "ui/qml"),
+]
 datas += collect_data_files("faster_whisper", includes=["assets/*.onnx"])
 binaries = collect_dynamic_libs("sherpa_onnx")
 hiddenimports = [
     "PySide6",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickControls2",
     "edge_tts",
     "openai",
     "sounddevice",
@@ -49,6 +56,7 @@ executable = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=str(root / "assets" / "ui" / "brand" / "voicepet.ico"),
 )
 distribution = COLLECT(
     executable,

@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 import core
 from core.config import AppConfig
 from core.config_application import ConfigApplicationMode, classify_config_change
@@ -85,4 +87,29 @@ def test_classifier_requires_restart_for_runtime_or_mixed_changes():
     assert (
         classify_config_change(current, mixed)
         is ConfigApplicationMode.RESTART_REQUIRED
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("theme_id", "deep_night"),
+        ("reduce_motion", True),
+        ("pet_scale", 1.5),
+        ("pet_click_through", True),
+        ("preferred_screen", "screen-2"),
+        ("global_hotkey_enabled", False),
+        ("global_hotkey", "Ctrl+Shift+Space"),
+    ],
+)
+def test_classifier_treats_new_ui_fields_as_immediate(field, value):
+    current = AppConfig()
+    changed = replace(
+        current,
+        ui=replace(current.ui, **{field: value}),
+    )
+
+    assert (
+        classify_config_change(current, changed)
+        is ConfigApplicationMode.IMMEDIATE_ONLY
     )

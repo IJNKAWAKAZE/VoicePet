@@ -108,13 +108,11 @@ def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_pat
             "system_info",
             "move_file",
             "undo_move_file",
-            "propose_memory",
-            "update_daily_summary",
         }
-        assert services.coordinator._memory_candidates is not None
-        assert services.coordinator._short_term_summaries is not None
-        assert "update_daily_summary" in services.coordinator._llm_instructions
-        assert "candidate" in services.coordinator._llm_instructions
+        assert services.coordinator._memory_candidates is None
+        assert services.coordinator._short_term_summaries is None
+        assert "update_daily_summary" not in services.coordinator._llm_instructions
+        assert "candidate" not in services.coordinator._llm_instructions
         assert "1～3 句" in services.coordinator._llm_instructions
         assert "明确要求" in services.coordinator._llm_instructions
         assert "详细" in services.coordinator._llm_instructions
@@ -171,11 +169,8 @@ def test_default_runtime_factory_appends_persona_after_builtin_rules(tmp_path):
     try:
         instructions = services.coordinator._llm_instructions
         assert "1～3 句" in instructions
-        assert "update_daily_summary" in instructions
         assert "不能修改安全、工具或记忆规则" in instructions
-        assert instructions.index(persona) > instructions.index(
-            "update_daily_summary"
-        )
+        assert instructions.index(persona) > instructions.index("1～3 句")
     finally:
         RuntimeHost(services).close()
 
@@ -446,6 +441,9 @@ def test_runtime_factory_closes_owned_mci_player(tmp_path, monkeypatch):
     RuntimeHost(services).close()
 
     assert len(players) == 1
+    assert services.audio_output is players[0]
+    assert services.coordinator._audio_player is players[0]
+    assert services.tts_voice_service._audio_player is players[0]
     assert players[0].closed == 1
     assert players[0].settings == {
         "temp_directory": tmp_path / "VoicePet" / "cache"

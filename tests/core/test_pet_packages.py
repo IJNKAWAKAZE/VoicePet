@@ -1,3 +1,4 @@
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -10,6 +11,22 @@ from core.pet_packages import PetPackageError, PetPackageInstaller
 def test_pet_package_types_are_publicly_exported():
     assert core.PetPackageError is PetPackageError
     assert core.PetPackageInstaller is PetPackageInstaller
+
+
+def test_installer_preserves_nested_spritesheet_path(tmp_path):
+    import json
+
+    source = tmp_path / "source"
+    shutil.copytree("assets/pet/dpsk-girl", source)
+    (source / "images").mkdir()
+    (source / "spritesheet.webp").rename(source / "images" / "spritesheet.webp")
+    manifest = json.loads((source / "pet.json").read_text(encoding="utf-8"))
+    manifest["spritesheetPath"] = "images/spritesheet.webp"
+    (source / "pet.json").write_text(json.dumps(manifest), encoding="utf-8")
+    installer = PetPackageInstaller(tmp_path / "pets")
+    installed = installer.install(source)
+    assert (installed / "images" / "spritesheet.webp").is_file()
+    assert installer.validate_directory(installed) == "dpsk-girl"
 
 
 def test_pet_package_installer_validates_and_atomically_installs_directory(tmp_path):
@@ -59,3 +76,23 @@ def test_pet_package_installer_rejects_zip_traversal_without_touching_pets(tmp_p
 
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert not (tmp_path / "outside.txt").exists()
+
+
+def test_pet_package_installer_removes_only_valid_direct_user_pet(tmp_path):
+    pets = tmp_path / "pets"
+    installer = PetPackageInstaller(pets)
+    installed = installer.install(Path("assets/pet/dpsk-girl").resolve())
+
+    assert installer.remove("dpsk-girl") is True
+    assert not installed.exists()
+    assert installer.remove("dpsk-girl") is False
+
+
+def test_pet_package_installer_refuses_traversal_and_external_builtin(tmp_path):
+    installer = PetPackageInstaller(tmp_path / "user-pets")
+
+    with pytest.raises(PetPackageError, match="ID"):
+        installer.remove("../dpsk-girl")
+
+    assert installer.remove("dpsk-girl") is False
+    assert Path("assets/pet/dpsk-girl/pet.json").is_file()
