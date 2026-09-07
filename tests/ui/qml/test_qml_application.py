@@ -506,7 +506,7 @@ def test_hotkey_settings_replace_then_disable_registration(qapp):
     controller.close()
 
 
-def test_runtime_text_and_tool_result_are_visible_in_pet_and_chat(qapp):
+def test_tool_result_does_not_create_a_chat_or_pet_message(qapp):
     controller, _runtime, _tray, qml, _shell, chat, *_ = build_controller(qapp)
     controller.start()
     turn_id = TurnId.new()
@@ -524,10 +524,8 @@ def test_runtime_text_and_tool_result_are_visible_in_pet_and_chat(qapp):
         )
     )
 
-    assert pet.property("speech") == "已经完成"
-    assert chat.message_model.rowCount() == 2
-    tool_index = chat.message_model.index(1)
-    assert chat.message_model.data(tool_index, Qt.UserRole + 2) == "tool"
+    assert pet.property("speech") == "正在处理"
+    assert chat.message_model.rowCount() == 1
     assert pet.findChild(QObject, "petSpeechBubble") is not None
     controller.close()
 

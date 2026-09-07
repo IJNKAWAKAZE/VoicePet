@@ -41,6 +41,9 @@ def memory_window(qapp, tmp_path):
     runtime.resolve_memory_conflict = lambda memory_id: completed(
         manager.resolve_conflict(memory_id)
     )
+    runtime.edit_memory = lambda memory_id, content, expected_version: completed(
+        manager.edit(memory_id, content, expected_version)
+    )
     runtime.delete_memory = lambda memory_id: completed(manager.delete(memory_id))
     controller.start()
     window = qml.root_objects[0]
@@ -143,3 +146,35 @@ def test_memory_loading_error_and_empty_states_are_visible(memory_window):
     runtime.list_memories = lambda: completed(())
     click(window, visual_item(window.contentItem(), "memoryRefreshButton"))
     assert "暂无" in status.property("text")
+
+
+def test_memory_edit_dialog_uses_themed_buttons_and_preserves_edit_actions(
+    memory_window,
+):
+    window, shell, _dialogs, _runtime, store = memory_window
+    record = store.create_candidate("称呼", "希望叫小蓝", str(uuid4()), 0.9)
+
+    shell.navigate("memories")
+    QTest.qWait(30)
+    click(window, visual_item(window.contentItem(), "memoryCard-" + record.id))
+    click(window, visual_item(window.contentItem(), "memoryEditButton-" + record.id))
+
+    dialog = window.findChild(QObject, "memoryEditDialog")
+    editor = window.findChild(QObject, "memoryEditor")
+    cancel = window.findChild(QObject, "memoryEditCancel")
+    save = window.findChild(QObject, "memoryEditSave")
+    assert dialog is not None and dialog.property("visible") is True
+    assert editor is not None and editor.property("text") == "希望叫小蓝"
+    assert cancel is not None and cancel.property("text") == "取消"
+    assert save is not None and save.property("text") == "保存"
+
+    click(window, cancel)
+    assert dialog.property("visible") is False
+    assert store.get(record.id).content == "希望叫小蓝"
+
+    click(window, visual_item(window.contentItem(), "memoryEditButton-" + record.id))
+    editor = window.findChild(QObject, "memoryEditor")
+    editor.setProperty("text", "希望叫鲸鱼娘")
+    click(window, window.findChild(QObject, "memoryEditSave"))
+    QTest.qWait(30)
+    assert store.get(record.id).content == "希望叫鲸鱼娘"

@@ -70,7 +70,8 @@ Item {
             required property string markdown
             required property string status
             width: messages.width
-            height: bubble.implicitHeight
+            height: role !== "tool" && markdown.length > 0
+                ? bubble.implicitHeight : 0
             MessageBubble {
                 id: bubble
                 width: Math.min(720, messages.width * 0.78)
@@ -78,6 +79,7 @@ Item {
                 role: parent.role
                 markdown: parent.markdown
                 status: parent.status
+                visible: parent.role !== "tool" && parent.markdown.length > 0
                 viewportWidth: messages.width
                 anchors.right: parent.role === "user" ? parent.right : undefined
                 anchors.left: parent.role === "user" ? undefined : parent.left

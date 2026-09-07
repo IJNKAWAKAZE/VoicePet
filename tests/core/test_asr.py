@@ -520,3 +520,148 @@ def test_missing_dependencies_report_actionable_error(monkeypatch):
 
     with pytest.raises(AsrConfigurationError, match=r"voicepet\[asr\]"):
         FasterWhisperTranscriptAdapter()
+
+
+def test_project_model_directory_is_used_for_detection_and_loading(monkeypatch, tmp_path):
+    model_directory = tmp_path / "models" / "asr" / "small"
+    model_directory.mkdir(parents=True)
+    for name in ("config.json", "model.bin", "tokenizer.json"):
+        (model_directory / name).write_bytes(b"model")
+    created = []
+
+    class FakeModel:
+        def __init__(self, model_name, **kwargs):
+            created.append((model_name, kwargs))
+
+    install_fake_modules(
+        monkeypatch,
+        FakeModel,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("缓存目录中的模型不应调用下载器")
+        ),
+    )
+    adapter = FasterWhisperTranscriptAdapter(
+        model_directory.name,
+        model_directory=model_directory,
+        device="cpu",
+    )
+
+    assert adapter.model_state() is asr_module.AsrModelState.CACHED
+    asyncio.run(adapter.preload())
+    assert created[0][0] == str(model_directory)
+    adapter.close()
+
+
+def test_project_model_download_writes_to_model_directory_without_deleting_shared_cache(
+    monkeypatch, tmp_path
+):
+    model_directory = tmp_path / "models" / "asr" / "small"
+    legacy_cache = tmp_path / "huggingface" / "models--Systran--faster-whisper-small"
+    legacy_cache.mkdir(parents=True)
+    (legacy_cache / "old.bin").write_bytes(b"old")
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_CACHE", str(legacy_cache.parent)
+    )
+    calls = []
+
+    def download(model_name, *, output_dir, local_files_only):
+        calls.append((model_name, output_dir, local_files_only))
+        if local_files_only:
+            raise CacheMissError
+        model_directory.mkdir(parents=True, exist_ok=True)
+        for name in ("config.json", "model.bin", "tokenizer.json"):
+            (model_directory / name).write_bytes(b"model")
+        return str(model_directory)
+
+    class FakeModel:
+        def __init__(self, model_name, **kwargs):
+            pass
+
+    install_fake_modules(monkeypatch, FakeModel, download)
+    adapter = FasterWhisperTranscriptAdapter(
+        "small",
+        model_directory=model_directory,
+        cache_miss_errors=(CacheMissError,),
+        device="cpu",
+    )
+
+    asyncio.run(adapter.download_model())
+
+    assert calls == [("small", str(model_directory), False)]
+    assert (legacy_cache / "old.bin").read_bytes() == b"old"
+    assert adapter.model_state() is asr_module.AsrModelState.CACHED
+    adapter.close()
+
+
+def test_managed_partial_model_can_resume_download(monkeypatch, tmp_path):
+    directory = tmp_path / "small"
+    directory.mkdir()
+    (directory / "config.json").write_bytes(b"config")
+
+    def download(model_name, *, output_dir, local_files_only):
+        assert not local_files_only
+        assert output_dir == str(directory)
+        for name in ("model.bin", "tokenizer.json"):
+            (directory / name).write_bytes(b"model")
+
+    install_fake_modules(monkeypatch, object, download)
+    adapter = FasterWhisperTranscriptAdapter(model_directory=directory)
+    try:
+        assert adapter.model_state() is asr_module.AsrModelState.MISSING
+        asyncio.run(adapter.download_model())
+        assert adapter.model_state() is asr_module.AsrModelState.CACHED
+    finally:
+        adapter.close()
+
+
+def test_managed_state_checks_do_not_create_directories_or_use_global_cache(
+    monkeypatch, tmp_path
+):
+    directory = tmp_path / "small"
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("must not use the backend")
+
+    install_fake_modules(monkeypatch, unexpected, unexpected)
+    adapter = FasterWhisperTranscriptAdapter(model_directory=directory, device="cpu")
+    try:
+        assert adapter.model_state() is asr_module.AsrModelState.MISSING
+        assert adapter.model_state() is asr_module.AsrModelState.MISSING
+        assert not directory.exists()
+        with pytest.raises(AsrModelError):
+            asyncio.run(adapter.preload())
+    finally:
+        adapter.close()
+
+
+def test_managed_download_requires_complete_nonempty_files(monkeypatch, tmp_path):
+    directory = tmp_path / "small"
+    directory.mkdir()
+    for name in ("config.json", "model.bin", "tokenizer.json"):
+        (directory / name).touch()
+    install_fake_modules(monkeypatch, object)
+    adapter = FasterWhisperTranscriptAdapter(model_directory=directory)
+    try:
+        with pytest.raises(AsrModelError, match="不完整"):
+            asyncio.run(adapter.download_model())
+        assert adapter.model_state() is asr_module.AsrModelState.MISSING
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("name", ["../outside", "org/../../outside", "C:/outside"])
+def test_project_directory_rejects_model_names_escaping_root(tmp_path, name):
+    with pytest.raises(AsrConfigurationError):
+        asr_module.project_asr_directory(tmp_path, name)
+
+
+def test_project_directory_preserves_explicit_local_model(tmp_path):
+    directory = tmp_path / "local-model"
+    directory.mkdir()
+    assert asr_module.project_asr_directory(tmp_path, str(directory)) is None
+
+
+def test_project_directory_supports_hub_repository_names(tmp_path):
+    assert asr_module.project_asr_directory(tmp_path, "Systran/faster-whisper-small") == (
+        tmp_path / "models" / "asr" / "Systran" / "faster-whisper-small"
+    )

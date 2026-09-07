@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .asr import FasterWhisperTranscriptAdapter
+from .asr import FasterWhisperTranscriptAdapter, project_asr_directory
 from .audio_input import AudioCaptureService, SoundDeviceInputBackend
 from .audio_session import VadAudioSession
 from .audio_types import AudioFormat
@@ -88,7 +88,6 @@ def build_default_runtime(
     wake_model_directory = root / "models" / "wake"
     data_directory.mkdir(parents=True, exist_ok=True)
     cache_directory.mkdir(parents=True, exist_ok=True)
-    wake_model_directory.mkdir(parents=True, exist_ok=True)
     memory_store = MemoryStore(
         data_directory / "assistant.db",
         enabled=config.privacy.memory_enabled,
@@ -165,6 +164,7 @@ def build_default_runtime(
     transcript = FasterWhisperTranscriptAdapter(
         config.asr.model,
         language=config.asr.language,
+        model_directory=project_asr_directory(root, config.asr.model),
     )
     credential = api_key.strip() if isinstance(api_key, str) else ""
     local_without_key = bool(config.llm.base_url) and is_local_llm_base_url(

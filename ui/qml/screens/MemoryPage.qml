@@ -67,7 +67,7 @@ Item {
                 Flow { width: parent.width; visible: card.selected; spacing: 8
                     AppButton { objectName: "memoryConfirmButton-" + card.memoryId; theme: root.theme; text: "确认保存"; visible: root.memories.canConfirm; enabled: !root.memories.actionBusy; onClicked: root.memories.confirm_selected() }
                     AppButton { objectName: "memoryResolveButton-" + card.memoryId; theme: root.theme; text: "采用新内容"; visible: root.memories.canResolve; enabled: !root.memories.actionBusy; onClicked: root.memories.resolve_selected() }
-                    AppButton { theme: root.theme; text: "编辑"; enabled: !root.memories.actionBusy; onClicked: { root.memories.begin_edit_selected(); editor.text = card.content; editDialog.open() } }
+                    AppButton { objectName: "memoryEditButton-" + card.memoryId; theme: root.theme; text: "编辑"; enabled: !root.memories.actionBusy; onClicked: { root.memories.begin_edit_selected(); editor.text = card.content; editDialog.open() } }
                     AppButton { objectName: "memoryDeleteButton-" + card.memoryId; theme: root.theme; text: "删除"; kind: "danger"; enabled: !root.memories.actionBusy; onClicked: root.memories.delete_selected() }
                 }
             }
@@ -108,12 +108,21 @@ Item {
     }
 
     Dialog {
-        id: editDialog; title: "编辑记忆"; modal: true; anchors.centerIn: parent; width: Math.min(parent.width - 32, 520); standardButtons: Dialog.Save | Dialog.Cancel
+        id: editDialog; objectName: "memoryEditDialog"; title: "编辑记忆"; modal: true; anchors.centerIn: parent; width: Math.min(parent.width - 32, 520)
         palette.window: root.theme.surface
         palette.windowText: root.theme.text
-        palette.button: root.theme.primary
-        palette.buttonText: root.theme.inverseText
         onAccepted: root.memories.save_edit(editor.text)
-        contentItem: AppTextArea { id: editor; theme: root.theme; width: parent.width; implicitHeight: 120; wrapMode: TextEdit.Wrap }
+        contentItem: AppTextArea { id: editor; objectName: "memoryEditor"; theme: root.theme; width: parent.width; implicitHeight: 120; wrapMode: TextEdit.Wrap }
+        footer: Item {
+            implicitHeight: 64
+            Row {
+                anchors.right: parent.right
+                anchors.rightMargin: 20
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 10
+                AppButton { objectName: "memoryEditCancel"; theme: root.theme; text: "取消"; kind: "secondary"; onClicked: editDialog.reject() }
+                AppButton { objectName: "memoryEditSave"; theme: root.theme; text: "保存"; onClicked: editDialog.accept() }
+            }
+        }
     }
 }

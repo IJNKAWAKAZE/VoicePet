@@ -155,6 +155,23 @@ def test_streaming_reply_follows_tail_after_wrapping(history_window):
     QTest.qWait(100)
     messages = root.findChild(QQuickItem, "chatMessageList")
     assert messages.property("atYEnd")
+
+
+def test_empty_streaming_placeholder_does_not_render_a_blank_bubble(history_window):
+    root, chat, _, _ = history_window
+    chat.submit("只测试占位消息")
+    QTest.qWait(80)
+
+    messages = root.findChild(QQuickItem, "chatMessageList")
+    assert chat.messageModel.rowCount() == 2
+    rows = [
+        item for item in visual_items(messages)
+        if item.parentItem() == messages.property("contentItem")
+        and item.property("role") in ("user", "assistant")
+    ]
+    assert len(rows) == 2
+    assert rows[0].height() > 0
+    assert rows[1].height() == 0
     chat.append_assistant_delta("还有一段更长的补充。" * 150)
     QTest.qWait(100)
     assert messages.property("atYEnd")

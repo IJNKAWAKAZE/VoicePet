@@ -43,6 +43,24 @@ class AsrConfigurationError(AsrError):
     code = "asr.configuration"
 
 
+def project_asr_directory(data_root: str | Path, model_name: str) -> Path | None:
+    """将下载模型限制在项目目录内，保留显式本地模型路径。"""
+
+    if Path(model_name).expanduser().is_dir():
+        return None
+    parts = model_name.split("/")
+    if len(parts) not in {1, 2} or any(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", part) is None
+        for part in parts
+    ):
+        raise AsrConfigurationError("ASR 模型名称或本地路径无效")
+    root = (Path(data_root).expanduser().resolve() / "models" / "asr").resolve()
+    target = root.joinpath(*parts).resolve()
+    if not target.is_relative_to(root):
+        raise AsrConfigurationError("ASR 模型目录超出项目模型目录")
+    return target
+
+
 class AsrModelError(AsrError):
     """ASR 模型无法加载"""
 
@@ -88,6 +106,7 @@ class FasterWhisperTranscriptAdapter:
         cpu_compute_type: str = "int8",
         model_downloader: Any | None = None,
         cache_miss_errors: tuple[type[BaseException], ...] | None = None,
+        model_directory: str | Path | None = None,
     ) -> None:
         if not model_name.strip():
             raise AsrConfigurationError("ASR 模型名称不能为空")
@@ -112,6 +131,11 @@ class FasterWhisperTranscriptAdapter:
             LocalEntryNotFoundError,
         )
         self._model_name = model_name
+        self._model_directory = (
+            None
+            if model_directory is None
+            else Path(model_directory).expanduser().resolve()
+        )
         self._language = language
         self._requested_device = device
         self._cuda_compute_type = cuda_compute_type
@@ -144,17 +168,22 @@ class FasterWhisperTranscriptAdapter:
         self._ensure_open()
         if self._model is not None:
             return AsrModelState.READY
-        local_directory = Path(self._model_name).expanduser()
+        if self._model_directory is not None:
+            return (
+                AsrModelState.CACHED
+                if self._managed_model_complete()
+                else AsrModelState.MISSING
+            )
+        local_directory = self._model_directory
+        if local_directory is None:
+            local_directory = Path(self._model_name).expanduser()
         if local_directory.is_dir():
             required = ("config.json", "model.bin", "tokenizer.json")
             if not all((local_directory / name).is_file() for name in required):
                 raise AsrModelError("本地 ASR 模型文件不完整")
             return AsrModelState.CACHED
         try:
-            self._model_downloader(
-                self._model_name,
-                local_files_only=True,
-            )
+            self._download_from_backend(local_files_only=True)
         except self._cache_miss_errors:
             return AsrModelState.MISSING
         except Exception as error:
@@ -271,18 +300,37 @@ class FasterWhisperTranscriptAdapter:
         )
 
     def _create_model(self, device: str, compute_type: str) -> Any:
+        if self._model_directory is not None and not self._managed_model_complete():
+            raise AsrModelError("本地 ASR 模型文件不完整，请先下载模型")
         return self._model_factory(
-            self._model_name,
+            str(self._model_directory or self._model_name),
             device=device,
             compute_type=compute_type,
             local_files_only=True,
         )
 
     def _download_model_sync(self) -> None:
-        self._model_downloader(
-            self._model_name,
-            local_files_only=False,
-        )
+        self._download_from_backend(local_files_only=False)
+        if self._model_directory is not None and not self._managed_model_complete():
+            raise AsrModelError("下载的 ASR 模型文件不完整，请重试")
+
+    def _managed_model_complete(self) -> bool:
+        assert self._model_directory is not None
+        try:
+            return all(
+                (self._model_directory / name).is_file()
+                and (self._model_directory / name).stat().st_size > 0
+                for name in ("config.json", "model.bin", "tokenizer.json")
+            )
+        except OSError as error:
+            raise AsrModelError("本地 ASR 模型目录无法访问") from error
+
+    def _download_from_backend(self, *, local_files_only: bool) -> Any:
+        kwargs: dict[str, Any] = {"local_files_only": local_files_only}
+        if self._model_directory is not None:
+            self._model_directory.mkdir(parents=True, exist_ok=True)
+            kwargs["output_dir"] = str(self._model_directory)
+        return self._model_downloader(self._model_name, **kwargs)
 
     def _transcribe_sync(self, samples: Any) -> str:
         assert self._model is not None

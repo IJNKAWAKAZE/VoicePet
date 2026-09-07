@@ -46,9 +46,13 @@ def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_pat
         assert services.memory.list_records() == ()
         assert isinstance(services.wake_service, WakeWordRuntimeService)
         assert services.wake_service.status is WakeRuntimeStatus.MISSING
+        assert not (tmp_path / "VoicePet" / "models" / "wake").exists()
         assert services.coordinator._llm_provider is None
         assert services.llm_configured is False
         assert services.asr_preparer is services.coordinator._transcript_adapter
+        assert services.asr_preparer._model_directory == (
+            tmp_path / "VoicePet" / "models" / "asr" / "small"
+        )
         assert isinstance(services.coordinator._session_context, SessionContext)
         assert isinstance(
             services.coordinator._session_archive,

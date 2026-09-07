@@ -28,7 +28,7 @@ def test_default_v2_atlas_loads_manifest_and_exact_cells():
     atlas = PetSpriteAtlas.load(directory)
 
     assert atlas.pet_id == "dpsk-girl"
-    assert atlas.display_name == "迪普斯伊克"
+    assert atlas.display_name == "鲸鱼娘"
     assert atlas.frame(0, 0).size() == QSize(192, 208)
     assert atlas.frame(10, 7).size() == QSize(192, 208)
     with pytest.raises(PetAssetError):

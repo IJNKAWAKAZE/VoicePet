@@ -660,18 +660,6 @@ class QmlApplicationController(QObject):
                 self._memories.refresh_summaries()
             return
         if isinstance(event, ToolResultReady):
-            self._chat.append_tool_result(
-                event.tool_call_id,
-                event.status,
-                event.payload,
-            )
-            payload_message = event.payload.get("message")
-            message = (
-                payload_message
-                if isinstance(payload_message, str)
-                else f"工具执行状态：{event.status}"
-            )
-            self._set_pet_speech(message)
             return
         if isinstance(event, RuntimeErrorEvent):
             self._dialogs.set_page_error("chat", event.safe_message)

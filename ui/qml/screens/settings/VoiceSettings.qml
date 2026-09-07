@@ -30,12 +30,16 @@ ScrollView {
     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
     Component.onCompleted: {
         componentReady = true
-        if (visible)
+        if (visible) {
             root.settings.refresh_voices()
+            root.settings.refresh_wake_model()
+        }
     }
     onVisibleChanged: {
-        if (componentReady && visible)
+        if (componentReady && visible) {
             root.settings.refresh_voices()
+            root.settings.refresh_wake_model()
+        }
     }
 
     ColumnLayout {
@@ -44,10 +48,39 @@ ScrollView {
         Text { text: "语音与唤醒"; color: root.theme.text; font.pixelSize: 24; font.bold: true }
         AppToggle {
             id: wakeEnabled
+            objectName: "wakeEnabledToggle"
             theme: root.theme
             text: "启用中文唤醒"
             checked: root.settings.draft.wake_word.enabled
             onToggled: root.settings.set_field("wake_word", "enabled", checked)
+        }
+        Text {
+            objectName: "wakeModelNotice"
+            Layout.fillWidth: true
+            text: root.settings.wakeModelNotice
+            visible: text.length > 0
+            color: root.theme.text
+            wrapMode: Text.Wrap
+            Accessible.name: text
+        }
+        AppButton {
+            objectName: "wakeModelRetryButton"
+            theme: root.theme
+            text: "重新检查唤醒模型"
+            kind: "secondary"
+            visible: root.settings.draft.wake_word.enabled
+                && (root.settings.wakeModelStatus === "error"
+                    || root.settings.wakeModelStatus === "unknown")
+            enabled: !root.settings.operationBusy
+            onClicked: root.settings.refresh_wake_model()
+        }
+        AppButton {
+            objectName: "wakeModelDownloadButton"
+            theme: root.theme
+            text: "下载中文唤醒模型"
+            kind: "secondary"
+            enabled: !root.settings.operationBusy
+            onClicked: root.settings.download_wake_model()
         }
         FieldLabel { theme: root.theme; text: "唤醒词" }
         AppTextField {
@@ -98,13 +131,6 @@ ScrollView {
             kind: "secondary"
             enabled: !root.settings.operationBusy
             onClicked: root.settings.download_asr_model()
-        }
-        AppButton {
-            theme: root.theme
-            text: "下载中文唤醒模型"
-            kind: "secondary"
-            enabled: !root.settings.operationBusy
-            onClicked: root.settings.download_wake_model()
         }
         AppToggle {
             id: ttsEnabled

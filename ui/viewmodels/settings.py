@@ -58,6 +58,9 @@ class SettingsViewModel(QObject):
     voiceOptionsChanged = Signal()
     voicesLoadingChanged = Signal()
     voicesErrorChanged = Signal()
+    wakeModelStatusChanged = Signal()
+    wakeModelNoticeChanged = Signal()
+    _wakeModelCheckFinished = Signal(int, object, object)
     _voicesFinished = Signal(object, object)
     _operationFinished = Signal(str, object, object)
     _memoryInvalidationFinished = Signal(int, bool)
@@ -106,6 +109,8 @@ class SettingsViewModel(QObject):
         self._status_generation = 0
         self._operation_generation = 0
         self._voices_generation = 0
+        self._wake_model_status = "unknown"
+        self._wake_model_generation = 0
         self._status_timer = QTimer(self)
         self._status_timer.setSingleShot(True)
         self._status_timer.setInterval(6000)
@@ -114,6 +119,8 @@ class SettingsViewModel(QObject):
         self._voicesFinished.connect(self._handle_voices_finished)
         self._memoryInvalidationFinished.connect(self._handle_memory_invalidation)
         self.draftChanged.connect(self.voiceOptionsChanged.emit)
+        self.draftChanged.connect(self.wakeModelNoticeChanged.emit)
+        self._wakeModelCheckFinished.connect(self._handle_wake_model_check)
 
     @property
     def config(self) -> AppConfig:
@@ -225,6 +232,66 @@ class SettingsViewModel(QObject):
 
         future.add_done_callback(done)
 
+    @Property(str, notify=wakeModelStatusChanged)
+    def wakeModelStatus(self) -> str:
+        return self._wake_model_status
+
+    @Property(str, notify=wakeModelNoticeChanged)
+    def wakeModelNotice(self) -> str:
+        if not self.draft_value("wake_word", "enabled"):
+            return ""
+        return {
+            "unknown": "尚未检查中文唤醒模型，请检查模型状态",
+            "checking": "正在检查中文唤醒模型…",
+            "missing": "尚未下载中文唤醒模型，语音唤醒暂不可用，请点击下方按钮下载",
+            "cached": "中文唤醒模型包已下载，等待安装并加载",
+            "downloading": "正在下载中文唤醒模型，完成后将刷新状态…",
+            "error": "中文唤醒模型检查失败或下载失败，请重试",
+        }.get(self._wake_model_status, "")
+
+    def _set_wake_model_status(self, status: str) -> None:
+        self._wake_model_status = status
+        self.wakeModelStatusChanged.emit()
+        self.wakeModelNoticeChanged.emit()
+
+    @Slot()
+    def refresh_wake_model(self) -> None:
+        if self._wake_model_status in {"checking", "downloading"}:
+            return
+        self._wake_model_generation += 1
+        generation = self._wake_model_generation
+        self._set_wake_model_status("checking")
+        try:
+            future = self._runtime.wake_model_state()
+        except (AttributeError, OSError, RuntimeError, ValueError, TypeError) as error:
+            self._handle_wake_model_check(generation, None, error)
+            return
+
+        def done(completed: Future[Any]) -> None:
+            if completed.cancelled():
+                self._wakeModelCheckFinished.emit(
+                    generation, None, RuntimeError("模型检查已取消")
+                )
+                return
+            error = completed.exception()
+            result = completed.result() if error is None else None
+            self._wakeModelCheckFinished.emit(generation, result, error)
+
+        future.add_done_callback(done)
+
+    @Slot(int, object, object)
+    def _handle_wake_model_check(
+        self, generation: int, result: object, error: object
+    ) -> None:
+        if generation != self._wake_model_generation:
+            return
+        if error is not None or not isinstance(result, str) or result not in {
+            "missing", "cached", "ready",
+        }:
+            self._set_wake_model_status("error")
+            return
+        self._set_wake_model_status(result)
+
     @Slot(object, object)
     def _handle_voices_finished(self, result: object, error: object) -> None:
         self._voices_loading = False
@@ -255,6 +322,8 @@ class SettingsViewModel(QObject):
         self._credential_store = credential_store
         self._runtime = runtime
         self._running_asr_model = self._config.asr.model
+        self._wake_model_generation += 1
+        self._set_wake_model_status("unknown")
         self.draftChanged.emit()
 
     @Property("QVariantMap", notify=fieldErrorsChanged)
@@ -289,6 +358,8 @@ class SettingsViewModel(QObject):
         section_data[field] = value
         self._remove_error(self._last_field)
         self.draftChanged.emit()
+        if section == "wake_word" and field == "enabled" and value is True:
+            self.refresh_wake_model()
 
     @Slot(str, str, result="QVariant")
     def draft_value(self, section: str, field: str) -> object:
@@ -442,6 +513,11 @@ class SettingsViewModel(QObject):
         self._submit_operation(operation, starter)
 
     def _submit_operation(self, operation: str, starter: Callable[[], Future[Any]]) -> None:
+        if operation in {"wake_check", "wake"}:
+            self._wake_model_generation += 1
+            self._set_wake_model_status(
+                "checking" if operation == "wake_check" else "downloading"
+            )
         messages = {
             "preview": "正在试听声音…",
             "asr_check": f"正在检查语音识别模型 {self._running_asr_model}…",
@@ -453,6 +529,8 @@ class SettingsViewModel(QObject):
         try:
             future = starter()
         except (AttributeError, OSError, RuntimeError, ValueError, TypeError):
+            if operation in {"wake_check", "wake"}:
+                self._set_wake_model_status("error")
             self._set_operation_busy(False)
             self._set_operation_status("操作未能提交，请稍后重试")
             return
@@ -470,10 +548,14 @@ class SettingsViewModel(QObject):
     @Slot(str, object, object)
     def _handle_operation_finished(self, operation: str, result: object, error: object) -> None:
         if error is not None:
+            if operation in {"wake_check", "wake"}:
+                self._set_wake_model_status("error")
             self._set_operation_busy(False)
             self._set_operation_status("操作失败，请检查网络或模型状态")
             return
         if operation in {"asr_check", "wake_check"}:
+            if operation == "wake_check":
+                self._handle_wake_model_check(self._wake_model_generation, result, None)
             if result in {"cached", "ready"}:
                 self._set_operation_busy(False)
                 name = (
@@ -499,6 +581,9 @@ class SettingsViewModel(QObject):
             "wake": "唤醒模型已准备完成",
         }
         self._set_operation_status(messages.get(operation, "操作已完成"))
+        if operation == "wake":
+            self._set_wake_model_status("unknown")
+            self.refresh_wake_model()
 
     def _set_operation_busy(self, value: bool) -> None:
         if value != self._operation_busy:
