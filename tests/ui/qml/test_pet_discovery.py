@@ -4,7 +4,7 @@ import shutil
 import pytest
 
 from core.pet_packages import PetPackageInstaller
-from ui.pet_shell import discover_pet_choices, resolve_active_pet_directory
+from ui.pet_catalog import discover_pet_choices, resolve_active_pet_directory
 
 
 def copy_named_pet(parent, folder):

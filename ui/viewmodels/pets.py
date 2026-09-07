@@ -21,7 +21,7 @@ from PySide6.QtCore import (
 )
 
 from core.pet_packages import PetPackageError
-from ui.pet_shell import PetChoice
+from ui.pet_catalog import PetChoice
 from ui.qml_resources import QmlResourceError, validated_asset_url
 
 from .settings import SettingsViewModel

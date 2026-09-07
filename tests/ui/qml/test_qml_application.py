@@ -16,7 +16,7 @@ from core.events import (
 )
 from core.window_state import WindowPosition
 from ui.pet_animation_model import PetAnimationModel, PetInteractionController
-from ui.pet_shell import PetChoice
+from ui.pet_catalog import PetChoice
 from ui.qml_application import QmlApplicationController
 from ui.qml_resources import qml_root
 from ui.qml_runtime import QmlRuntime

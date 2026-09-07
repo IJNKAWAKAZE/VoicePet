@@ -82,6 +82,17 @@ VoicePet
 
 faster-whisper 下载的模型也可能使用 Hugging Face 的系统缓存目录。删除模型后再次启动相关功能，可以重新测试下载确认流程。
 
+## UI 结构
+
+界面统一使用 QML，不再保留旧 QWidget 窗口或旧界面切换入口：
+
+- `ui/application.py`：主进程装配与启动入口
+- `ui/qml_application.py`、`ui/qml/`、`ui/viewmodels/`：QML 窗口编排、页面和交互状态
+- `ui/pet_catalog.py`：宠物候选发现与资源目录解析
+- `ui/pet_animation.py`、`ui/pet_animation_model.py`：图集加载与 QML 动画状态
+
+托盘、事件桥、全局快捷键和 Markdown 清理继续复用独立模块。`QApplication`、托盘及文件对话框仍依赖 QtWidgets，不能因旧窗口移除而删掉该依赖。
+
 ## 测试
 
 ```powershell

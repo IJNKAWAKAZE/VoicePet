@@ -8,7 +8,7 @@ from test_pet_viewmodel import Runtime, Store
 from test_qml_application import build_controller
 
 from core.config import AppConfig
-from ui.pet_shell import PetChoice
+from ui.pet_catalog import PetChoice
 from ui.viewmodels.pets import PetViewModel
 from ui.viewmodels.settings import SettingsViewModel
 

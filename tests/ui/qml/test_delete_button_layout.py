@@ -3,7 +3,7 @@ from PySide6.QtTest import QTest
 from test_qml_application import build_controller
 from test_tray_menu import visual_items
 
-from ui.pet_shell import PetChoice
+from ui.pet_catalog import PetChoice
 
 
 def test_pet_delete_button_is_anchored_to_card_bottom_right(qapp):

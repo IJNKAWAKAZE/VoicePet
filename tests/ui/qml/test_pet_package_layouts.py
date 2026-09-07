@@ -8,7 +8,7 @@ from core.events import ConversationPhase
 from core.pet_packages import PetPackageError, PetPackageInstaller
 from ui.pet_animation import PetAssetError, PetSpriteAtlas
 from ui.pet_animation_model import PetAnimationModel
-from ui.pet_shell import discover_pet_choices
+from ui.pet_catalog import discover_pet_choices
 
 
 @pytest.fixture

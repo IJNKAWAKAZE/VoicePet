@@ -10,11 +10,11 @@ from PySide6.QtWidgets import QApplication
 import ui.pet_animation as pet_animation_module
 from core.events import ConversationPhase
 from ui.pet_animation import (
-    PetAnimationWidget,
     PetAssetError,
     PetSpriteAtlas,
     animation_row_for_phase,
 )
+from ui.pet_animation_model import PetAnimationModel
 
 
 def app():
@@ -81,38 +81,34 @@ def test_standard_animation_rows_publish_exact_v2_durations(row, durations):
         (ConversationPhase.RECOVERING, 8, 140),
     ],
 )
-def test_animation_widget_wraps_at_valid_frame_count(
+def test_animation_model_wraps_at_valid_frame_count(
     phase,
     frame_count,
     first_duration,
 ):
     app()
-    atlas = PetSpriteAtlas.load(Path("assets/pet/dpsk-girl").resolve())
-    widget = PetAnimationWidget(atlas)
+    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
 
-    widget.set_phase(phase)
-    assert widget._timer.interval() == first_duration
+    model.set_phase(phase)
+    assert model.frame_duration == first_duration
     for _ in range(frame_count):
-        widget.advance_frame()
+        model.advance_frame()
 
-    assert widget.current_column == 0
-    assert widget._timer.interval() == first_duration
-    widget.close()
+    assert model.column == 0
+    assert model.frame_duration == first_duration
 
 
-def test_animation_widget_resets_on_phase_and_runs_execution_reaction_once():
+def test_animation_model_resets_on_phase_and_runs_execution_reaction_once():
     app()
-    atlas = PetSpriteAtlas.load(Path("assets/pet/dpsk-girl").resolve())
-    widget = PetAnimationWidget(atlas)
+    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
 
-    widget.advance_frame()
-    assert (widget.current_row, widget.current_column) == (0, 1)
+    model.advance_frame()
+    assert (model.row, model.column) == (0, 1)
 
-    widget.set_phase(ConversationPhase.LISTENING)
-    assert (widget.current_row, widget.current_column) == (6, 0)
+    model.set_phase(ConversationPhase.LISTENING)
+    assert (model.row, model.column) == (6, 0)
 
-    widget.set_phase(ConversationPhase.EXECUTING_TOOL)
+    model.set_phase(ConversationPhase.EXECUTING_TOOL)
     for _ in range(5):
-        widget.advance_frame()
-    assert (widget.current_row, widget.current_column) == (7, 0)
-    widget.close()
+        model.advance_frame()
+    assert (model.row, model.column) == (7, 0)

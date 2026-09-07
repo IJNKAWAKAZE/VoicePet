@@ -6,7 +6,7 @@ from PySide6.QtTest import QSignalSpy
 
 from core.config import AppConfig
 from core.pet_packages import PetPackageError
-from ui.pet_shell import PetChoice
+from ui.pet_catalog import PetChoice
 from ui.viewmodels.pets import PetViewModel
 from ui.viewmodels.settings import SettingsViewModel
 

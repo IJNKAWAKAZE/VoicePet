@@ -13,7 +13,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from core.config import AppConfig, UiConfig
 from core.pet_packages import PetPackageInstaller
 from ui.pet_animation_model import PetAnimationModel
-from ui.pet_shell import discover_pet_choices
+from ui.pet_catalog import discover_pet_choices
 from ui.viewmodels.pets import PetViewModel
 from ui.viewmodels.settings import SettingsViewModel
 from ui.viewmodels.theme import ThemeViewModel

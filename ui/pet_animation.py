@@ -6,9 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QRect
+from PySide6.QtGui import QImage, QPixmap
 
 from core.events import ConversationPhase
 
@@ -126,75 +125,3 @@ def animation_row_for_phase(phase: ConversationPhase) -> int:
         ConversationPhase.SPEAKING: 0,
         ConversationPhase.RECOVERING: 5,
     }[phase]
-
-
-class PetAnimationWidget(QWidget):
-    """按固定帧率播放当前业务状态对应的桌宠动画行"""
-
-    def __init__(
-        self,
-        atlas: PetSpriteAtlas,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._atlas = atlas
-        self._phase = ConversationPhase.IDLE
-        self._current_row = 0
-        self._current_column = 0
-        self._followup_row: int | None = None
-        self._timer = QTimer(self)
-        self._timer.setInterval(STANDARD_ANIMATION_DURATIONS[0][0])
-        self._timer.timeout.connect(self.advance_frame)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(CELL_WIDTH, CELL_HEIGHT)
-
-    @property
-    def current_row(self) -> int:
-        return self._current_row
-
-    @property
-    def current_column(self) -> int:
-        return self._current_column
-
-    def set_phase(self, phase: ConversationPhase) -> None:
-        if phase is self._phase:
-            return
-        self._phase = phase
-        self._current_row = animation_row_for_phase(phase)
-        self._current_column = 0
-        self._followup_row = (
-            7 if phase is ConversationPhase.EXECUTING_TOOL else None
-        )
-        self._timer.setInterval(
-            STANDARD_ANIMATION_DURATIONS[self._current_row][0]
-        )
-        self.update()
-
-    def advance_frame(self) -> None:
-        durations = STANDARD_ANIMATION_DURATIONS[self._current_row]
-        self._current_column += 1
-        if self._current_column >= len(durations):
-            self._current_column = 0
-            if self._followup_row is not None:
-                self._current_row = self._followup_row
-                self._followup_row = None
-                durations = STANDARD_ANIMATION_DURATIONS[self._current_row]
-        self._timer.setInterval(durations[self._current_column])
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        _ = event
-        painter = QPainter(self)
-        painter.drawPixmap(
-            0,
-            0,
-            self._atlas.frame(self._current_row, self._current_column),
-        )
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._timer.start()
-
-    def hideEvent(self, event) -> None:
-        self._timer.stop()
-        super().hideEvent(event)
