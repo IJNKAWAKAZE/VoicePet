@@ -20,6 +20,7 @@ from core.events import (
     MemoryMaintenanceChanged,
     MemoryResultReady,
     RuntimeErrorEvent,
+    RecordingStarted,
     SpeakRequested,
     StateChanged,
     TextDelta,
@@ -55,6 +56,7 @@ from .window_coordinator import WindowCoordinator
 
 _RUNTIME_EVENT_TYPES = (
     StateChanged,
+    RecordingStarted,
     TranscriptReady,
     TextInputSubmitted,
     TextDelta,

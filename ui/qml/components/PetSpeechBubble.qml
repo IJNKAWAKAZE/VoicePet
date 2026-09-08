@@ -12,7 +12,7 @@ Rectangle {
 
     visible: message.length > 0
     implicitWidth: Math.min(320, availableScreenWidth - 32, Math.max(120, messageMetrics.advanceWidth + 28))
-    implicitHeight: Math.min(260, availableScreenHeight - 16, bubbleText.implicitHeight + 28)
+    implicitHeight: Math.min(260, availableScreenHeight - 16, bubbleText.contentHeight + 28)
     width: implicitWidth
     height: implicitHeight
     radius: 16
@@ -34,17 +34,36 @@ Rectangle {
         font.family: "Microsoft YaHei UI"
     }
 
-    TextEdit {
-        id: bubbleText
+    ScrollView {
+        id: speechScroll
+        objectName: "petSpeechScroll"
         anchors.fill: parent
-        anchors.margins: 14
-        text: root.message.length > 400 ? root.message.slice(0, 399) + "…" : root.message
-        readOnly: true
-        selectByMouse: true
-        wrapMode: TextEdit.Wrap
-        color: root.theme.text
-        font.pixelSize: 14
-        font.family: "Microsoft YaHei UI"
+        anchors.margins: 10
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical: ScrollBar {
+            objectName: "petSpeechScrollBar"
+            policy: ScrollBar.AsNeeded
+        }
+
+        TextArea {
+            id: bubbleText
+            objectName: "petSpeechText"
+            width: speechScroll.availableWidth
+            text: root.message
+            textFormat: TextEdit.MarkdownText
+            readOnly: true
+            selectByMouse: true
+            wrapMode: TextEdit.Wrap
+            color: root.theme.text
+            font.pixelSize: 14
+            font.family: "Microsoft YaHei UI"
+            leftPadding: 4
+            rightPadding: 4
+            topPadding: 4
+            bottomPadding: 4
+            background: null
+        }
     }
 
     HoverHandler {

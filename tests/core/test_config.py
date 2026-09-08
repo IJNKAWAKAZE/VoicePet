@@ -13,6 +13,20 @@ from core.config import (
 )
 
 
+@pytest.mark.parametrize("value", ["auto", "minimal", "low", "medium", "high", "xhigh"])
+def test_llm_reasoning_effort_accepts_all_ui_values(value):
+    data = AppConfig().to_dict()
+    data["llm"]["reasoning_effort"] = value
+    assert AppConfig.from_dict(data).llm.reasoning_effort == value
+
+
+def test_llm_reasoning_effort_rejects_unknown_value():
+    data = AppConfig().to_dict()
+    data["llm"]["reasoning_effort"] = "turbo"
+    with pytest.raises(ConfigError, match="思考强度"):
+        AppConfig.from_dict(data)
+
+
 def legacy_config_dict():
     data = AppConfig().to_dict()
     data["config_version"] = 1

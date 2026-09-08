@@ -3,9 +3,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 
+from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
 from ui.viewmodels.chat import ChatViewModel
+from ui.viewmodels.dialogs import DialogCoordinator
 
 
 def completed(value=None):
@@ -37,6 +40,8 @@ class FakeRuntime:
         self.cancelled = 0
         self.activated = []
         self.created = 0
+        self.spoken = []
+        self.voice_future = completed("语音结果")
         self.sessions = (
             Session("s1", "第一段对话", 2, datetime.now(UTC), True),
         )
@@ -44,13 +49,20 @@ class FakeRuntime:
             Turn("t1", "你好", "你好呀", datetime.now(UTC)),
         )
 
-    def submit_text(self, text):
-        self.submitted.append(text)
+    def submit_text(self, text, attachments=()):
+        self.submitted.append((text, tuple(attachments)))
         return completed("turn")
 
     def cancel_active_turn(self):
         self.cancelled += 1
         return completed()
+
+    def speak_notice(self, text):
+        self.spoken.append(text)
+        return completed("speech")
+
+    def capture_manual_transcript(self):
+        return self.voice_future
 
     def list_sessions(self):
         return completed(self.sessions)
@@ -88,11 +100,105 @@ def test_submit_rejects_blank_and_builds_streaming_pair():
     chat.submit("   ")
     chat.submit("  你好  ")
 
-    assert runtime.submitted == ["你好"]
+    assert runtime.submitted == [("你好", ())]
     assert chat.processing is True
     assert chat.message_model.rowCount() == 2
     assert chat.message_model.data(chat.message_model.index(0), Qt.UserRole + 2) == "user"
     assert chat.message_model.data(chat.message_model.index(1), Qt.UserRole + 4) == "streaming"
+
+
+def test_submit_passes_attachment_metadata_to_runtime():
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    attachment = LlmAttachment("C:/tmp/a.txt", "a.txt", "text/plain", 1, "a" * 64, "file")
+
+    chat.submit("请读取", [attachment])
+
+    assert runtime.submitted == [("请读取", (attachment,))]
+
+
+def test_submit_exposes_attachment_metadata_for_chat_history(tmp_path):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    image = tmp_path / "预览.png"
+    image.write_bytes(b"not-a-real-image")
+
+    chat.submit("请看看", [{"path": str(image), "kind": "image"}])
+
+    item = chat.message_model._items[0]
+    assert item["markdown"] == "请看看"
+    assert item["attachments"][0]["name"] == "预览.png"
+    assert item["attachments"][0]["kind"] == "image"
+    assert str(item["attachments"][0]["url"]).startswith("file:///")
+
+
+def test_submit_rejects_attachment_without_text(tmp_path):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    path = tmp_path / "a.txt"
+    path.write_text("内容", encoding="utf-8")
+
+    messages = []
+    chat.errorOccurred.connect(messages.append)
+    chat.submit("   ", [{"path": str(path), "kind": "file"}])
+
+    assert runtime.submitted == []
+    assert chat.message_model.rowCount() == 0
+    assert messages == ["请先输入文字后再发送附件"]
+
+
+def test_open_attachment_uses_system_default_handler(monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        "ui.viewmodels.chat.QDesktopServices.openUrl",
+        lambda url: opened.append(url.toLocalFile()) or True,
+    )
+    ChatViewModel(FakeRuntime()).open_attachment(r"C:\\tmp\\a.txt")
+
+    assert opened == ["C://tmp//a.txt"]
+
+
+def test_submit_rejects_unreadable_attachment_and_keeps_message_empty(tmp_path):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+
+    chat.submit("请读取", [{"path": str(tmp_path / "missing.txt"), "name": "missing.txt", "kind": "file"}])
+
+    assert runtime.submitted == []
+    assert chat.message_model.rowCount() == 0
+
+
+def test_copy_message_writes_plain_text_to_system_clipboard(qapp):
+    dialogs = DialogCoordinator()
+    chat = ChatViewModel(FakeRuntime(), dialogs=dialogs)
+
+    chat.copy_message("要复制的内容")
+
+    assert QGuiApplication.clipboard().text() == "要复制的内容"
+    assert dialogs.toastModel.rowCount() == 1
+    assert dialogs.toastModel.data(dialogs.toastModel.index(0), Qt.UserRole + 1) == "已复制"
+
+
+def test_play_message_delegates_to_runtime_speech(qapp):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+
+    chat.play_message("要播放的内容")
+
+    assert runtime.spoken == ["要播放的内容"]
+
+
+def test_start_voice_input_emits_transcript_without_submitting(qapp):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    received = []
+    chat.transcriptReady.connect(received.append)
+
+    chat.start_voice_input()
+    qapp.processEvents()
+
+    assert received == ["语音结果"]
+    assert runtime.submitted == []
 
 
 def test_deltas_only_update_last_streaming_assistant_message():

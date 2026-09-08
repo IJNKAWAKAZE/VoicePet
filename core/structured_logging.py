@@ -16,6 +16,7 @@ from .events import (
     ApprovalRequested,
     LlmUsageRecorded,
     MemoryResultReady,
+    RecordingStarted,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
@@ -189,6 +190,7 @@ RuntimeLogEvent = (
     | MemoryResultReady
     | SpeakRequested
     | RuntimeErrorEvent
+    | RecordingStarted
     | WakeCommandPending
 )
 
@@ -206,6 +208,7 @@ class RuntimeEventLogger:
         MemoryResultReady,
         SpeakRequested,
         RuntimeErrorEvent,
+        RecordingStarted,
         WakeCommandPending,
     )
 
@@ -255,6 +258,8 @@ class RuntimeEventLogger:
             return "info", "input", "手动文本已提交", {}
         if isinstance(event, WakeCommandPending):
             return "info", "wake", "唤醒后等待补充指令", {}
+        if isinstance(event, RecordingStarted):
+            return "info", "audio", "录音已开始", {}
         if isinstance(event, LlmUsageRecorded):
             return (
                 "info",

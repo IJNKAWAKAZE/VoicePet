@@ -86,6 +86,7 @@ from .events import (
     ErrorSeverity,
     LlmUsageRecorded,
     MemoryResultReady,
+    RecordingStarted,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
@@ -97,6 +98,7 @@ from .events import (
     WakeCommandPending,
 )
 from .llm import (
+    LlmAttachment,
     LlmCompleted,
     LlmConfigurationError,
     LlmError,
@@ -342,6 +344,7 @@ __all__ = [
     "FallbackSpeechSynthesizer",
     "FasterWhisperTranscriptAdapter",
     "InvalidTransition",
+    "LlmAttachment",
     "LlmCompleted",
     "LlmConfig",
     "LlmConfigurationError",
@@ -398,6 +401,7 @@ __all__ = [
     "ProcessStartError",
     "ProposalValidationError",
     "RegisteredTool",
+    "RecordingStarted",
     "ResilientLlmProvider",
     "ResilientSpeechSynthesizer",
     "RiskLevel",

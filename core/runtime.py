@@ -15,6 +15,7 @@ from .config import PrivacyConfig, WakeWordConfig
 from .diagnostics import DiagnosticResult
 from .event_bus import EventBus
 from .events import MemoryChanged, TurnId
+from .llm import LlmAttachment
 from .policy import ConfirmationMode
 from .wake import WakeRuntimeStatus
 from .wake_models import WakeDownloadProgress, WakeModelState
@@ -47,7 +48,11 @@ class CoordinatorService(Protocol):
 
     async def speak_notice(self, text: str) -> TurnId: ...
 
-    async def submit_text(self, text: str) -> TurnId: ...
+    async def submit_text(
+        self, text: str, attachments: tuple[LlmAttachment, ...] = ()
+    ) -> TurnId: ...
+
+    async def capture_manual_transcript(self) -> str: ...
 
     async def cancel_active_turn(self) -> None: ...
 
@@ -299,8 +304,17 @@ class RuntimeHost:
     def speak_notice(self, text: str) -> Future[TurnId]:
         return self._submit(self._services.coordinator.speak_notice(text))
 
-    def submit_text(self, text: str) -> Future[TurnId]:
-        return self._submit(self._services.coordinator.submit_text(text))
+    def submit_text(
+        self, text: str, attachments: tuple[LlmAttachment, ...] = ()
+    ) -> Future[TurnId]:
+        try:
+            future = self._services.coordinator.submit_text(text, attachments)
+        except TypeError:
+            future = self._services.coordinator.submit_text(text)
+        return self._submit(future)
+
+    def capture_manual_transcript(self) -> Future[str]:
+        return self._submit(self._services.coordinator.capture_manual_transcript())
 
     def cancel_active_turn(self) -> Future[None]:
         return self._submit(self._services.coordinator.cancel_active_turn())

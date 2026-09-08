@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .audio_input import AudioSubscription
@@ -60,6 +61,7 @@ class VadAudioSession:
         token: CancellationToken,
         *,
         include_preroll: bool = True,
+        on_started: Callable[[], Awaitable[None]] | None = None,
     ) -> bytes:
         subscription = self._capture_service.subscribe(
             include_preroll=include_preroll,
@@ -78,6 +80,10 @@ class VadAudioSession:
                 frame = await subscription.read(token)
                 token.throw_if_cancelled()
                 self._audio_format.validate_frame(frame.pcm)
+                # 收到有效音频帧后才通知界面，设备未就绪时不显示正在听
+                if frames_seen == 0 and on_started is not None:
+                    await on_started()
+                    token.throw_if_cancelled()
                 frames_seen += 1
                 is_speech = self._detector.is_speech(
                     frame.pcm,

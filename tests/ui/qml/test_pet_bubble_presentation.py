@@ -22,6 +22,29 @@ def test_pet_bubble_is_compact_and_adapts_to_short_reply(qapp):
         controller.close()
 
 
+def test_long_pet_reply_renders_markdown_and_exposes_scrollbar(qapp):
+    controller, _service, _tray, qml, *_ = build_controller(qapp)
+    controller.start()
+    try:
+        pet = qml.root_objects[0].findChild(QObject, "petWindow")
+        speech = pet.findChild(QObject, "petSpeechWindow")
+        text = pet.findChild(QObject, "petSpeechText")
+        scrollbar = pet.findChild(QObject, "petSpeechScrollBar")
+        markdown = "# 菜单初始化\n\n" + "- **父菜单**和 `route`\n" * 80
+
+        pet.setProperty("speech", markdown)
+        QTest.qWait(50)
+
+        rendered = text.property("text")
+        assert "父菜单" in rendered
+        assert "**" not in rendered
+        assert speech.height() <= 260
+        assert scrollbar.property("visible")
+        assert scrollbar.property("size") < 1
+    finally:
+        controller.close()
+
+
 def test_user_transcript_stays_in_chat_not_desktop_bubble(qapp):
     controller, _service, _tray, qml, _shell, chat, *_ = build_controller(qapp)
     controller.start()

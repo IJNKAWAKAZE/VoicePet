@@ -18,8 +18,8 @@ Button {
                 : hovered ? theme.surfaceAlt : theme.userBubble
         if (down)
             return theme.userBubble
-        if (hovered)
-            return theme.surfaceAlt
+        if (hovered && kind !== "ghost")
+            return theme.userBubble
         return kind === "ghost" ? "transparent" : theme.surface
     }
     property color foregroundColor: enabled
@@ -27,6 +27,8 @@ Button {
             : kind === "selected" ? (down ? theme.inverseText : theme.selectedText)
             : theme.text)
         : theme.disabledText
+    property color paintColor: kind === "selected" && hovered && !down
+        ? theme.userBubble : backgroundColor
     property int focusBorderWidth: activeFocus ? 2 : 0
 
     implicitHeight: 40
@@ -47,7 +49,7 @@ Button {
 
     background: Rectangle {
         radius: 10
-        color: control.backgroundColor
+        color: control.paintColor
         border.width: control.focusBorderWidth > 0 ? control.focusBorderWidth
             : control.kind === "ghost" && !control.hovered && !control.down ? 0 : 1
         border.color: control.activeFocus || control.hovered || control.down

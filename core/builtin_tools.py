@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import platform
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +22,90 @@ from .policy import (
     ToolManifest,
 )
 from .tool_types import ToolExecutionResult, ToolExecutionStatus
+
+
+class ReadFileTool:
+    """仅按当前消息授权路径分块读取本地附件"""
+
+    MAX_CHUNK_BYTES = 1024 * 1024
+
+    def __init__(
+        self,
+        *,
+        allowed_paths: set[str | Path] | frozenset[str | Path],
+        max_total_bytes: int = 8 * 1024 * 1024,
+    ) -> None:
+        if max_total_bytes <= 0:
+            raise ValueError("读取预算必须大于零")
+        self._allowed_paths = frozenset(
+            str(Path(path).expanduser().resolve(strict=True))
+            for path in allowed_paths
+        )
+        self._remaining_bytes = max_total_bytes
+        self.manifest = ToolManifest(
+            name="read_file",
+            description="按范围读取当前消息明确附加的本地文件",
+            input_schema={
+                "type": "object",
+                "maxProperties": 3,
+                "properties": {
+                    "path": {"type": "string", "maxLength": 32767},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "length": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": self.MAX_CHUNK_BYTES,
+                    },
+                },
+                "required": ["path", "offset", "length"],
+                "additionalProperties": False,
+            },
+            base_risk=RiskLevel.R0,
+            timeout=10.0,
+            concurrency_policy=ConcurrencyPolicy.PER_TOOL,
+            supports_cancel=True,
+        )
+
+    async def execute(
+        self,
+        arguments: Mapping[str, JsonValue],
+        token: CancellationToken,
+    ) -> ToolExecutionResult:
+        token.throw_if_cancelled()
+        raw_path = arguments.get("path")
+        offset = arguments.get("offset")
+        length = arguments.get("length")
+        if not isinstance(raw_path, str) or not isinstance(offset, int) or not isinstance(length, int):
+            return ToolExecutionResult(ToolExecutionStatus.DENIED, {}, "读取参数无效")
+        if offset < 0 or length <= 0:
+            return ToolExecutionResult(ToolExecutionStatus.DENIED, {}, "读取范围无效")
+        try:
+            resolved = Path(raw_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return ToolExecutionResult(ToolExecutionStatus.DENIED, {}, "附件路径无效")
+        if str(resolved) not in self._allowed_paths:
+            return ToolExecutionResult(ToolExecutionStatus.DENIED, {}, "只能读取当前消息附加的文件")
+        if length > self.MAX_CHUNK_BYTES or length > self._remaining_bytes:
+            return ToolExecutionResult(ToolExecutionStatus.DENIED, {}, "已达到文件读取预算")
+        try:
+            with resolved.open("rb") as stream:
+                stream.seek(offset)
+                data = stream.read(length)
+        except OSError:
+            return ToolExecutionResult(ToolExecutionStatus.FAILED, {}, "附件读取失败")
+        token.throw_if_cancelled()
+        self._remaining_bytes -= len(data)
+        return ToolExecutionResult(
+            ToolExecutionStatus.SUCCESS,
+            {
+                "path": str(resolved),
+                "offset": offset,
+                "bytes_read": len(data),
+                "eof": len(data) < length,
+                "data": base64.b64encode(data).decode("ascii"),
+            },
+            "已读取附件分块",
+        )
 
 
 class ApplicationLauncher(Protocol):

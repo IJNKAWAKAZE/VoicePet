@@ -12,6 +12,9 @@ from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 SUPPORTED_LLM_APIS = frozenset({"responses", "chat_completions"})
+SUPPORTED_REASONING_EFFORTS = frozenset(
+    {"auto", "minimal", "low", "medium", "high", "xhigh"}
+)
 CURRENT_CONFIG_VERSION = 2
 SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
 MAX_SYSTEM_PROMPT_CHARS = 4000
@@ -87,6 +90,8 @@ class LlmConfig:
     def __post_init__(self) -> None:
         if self.api not in SUPPORTED_LLM_APIS:
             raise ConfigError("LLM API 协议不受支持")
+        if self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise ConfigError("LLM 思考强度不受支持")
         validate_llm_base_url(self.base_url)
         if not isinstance(self.system_prompt, str):
             raise ConfigError("角色设定必须是文本")

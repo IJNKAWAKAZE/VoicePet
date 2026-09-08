@@ -141,6 +141,18 @@ def test_voice_dropdown_tracks_catalog_reorder_after_discard(qapp):
         assert settings.draft_value("tts", "voice") == saved_voice
 
 
+def test_ai_reasoning_effort_dropdown_tracks_draft_and_supports_six_levels(qapp):
+    settings = SettingsViewModel(AppConfig(), Store())
+    with page(qapp, "AiSettings", settings) as root:
+        combo = root.findChild(QObject, "reasoningEffortSelector")
+        assert combo is not None
+        assert combo.property("model") == ["自动", "最小", "低", "中", "高", "极高"]
+        assert combo.property("currentIndex") == 2
+        combo.setProperty("currentIndex", 4)
+        combo.activated.emit(4)
+        assert settings.draft_value("llm", "reasoning_effort") == "high"
+
+
 def test_asr_dropdown_tracks_changed_model_options_after_discard(qapp):
     settings = SettingsViewModel(AppConfig(), Store(), runtime=Runtime())
     with page(qapp, "VoiceSettings", settings) as root:

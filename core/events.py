@@ -156,6 +156,14 @@ class WakeCommandPending:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordingStarted:
+    """录音设备已开始接收本轮语音"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+
+
+@dataclass(frozen=True, slots=True)
 class LlmUsageRecorded:
     """不包含业务正文的单次 LLM 用量事件"""
 

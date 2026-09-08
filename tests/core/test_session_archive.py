@@ -13,6 +13,7 @@ from core.session_archive import (
     SessionTurnRecord,
     ShortTermSummaryRecord,
 )
+from core.memory_schema import ensure_memory_schema
 
 NOW = datetime(2026, 9, 2, 23, 30, tzinfo=timezone(timedelta(hours=8)))
 
@@ -44,6 +45,26 @@ def test_archive_is_immutable_idempotent_and_reopens_from_shared_database(tmp_pa
     reopened = SessionArchiveStore(database, clock=lambda: NOW)
     assert reopened.list_turns() == (first,)
     reopened.close()
+
+
+def test_existing_version_two_database_adds_attachment_table(tmp_path):
+    database = tmp_path / "assistant.db"
+    connection = sqlite3.connect(database)
+    ensure_memory_schema(connection)
+    connection.execute("DROP TABLE session_turn_attachments")
+    connection.close()
+
+    store = SessionArchiveStore(database, clock=lambda: NOW)
+    try:
+        columns = {
+            row[1]
+            for row in store._connection.execute(
+                "PRAGMA table_info(session_turn_attachments)"
+            )
+        }
+        assert columns == {"turn_id", "name", "path", "url", "media_type", "kind"}
+    finally:
+        store.close()
 
 
 def test_summary_is_structured_and_upserts_by_source_turn(tmp_path):

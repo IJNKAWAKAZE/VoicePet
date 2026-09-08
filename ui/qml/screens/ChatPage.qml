@@ -66,12 +66,14 @@ Item {
         }
 
         delegate: Item {
+            required property string messageId
             required property string role
             required property string markdown
             required property string status
+            required property var attachments
             width: messages.width
-            height: role !== "tool" && markdown.length > 0
-                ? bubble.implicitHeight : 0
+            height: role !== "tool" && (markdown.length > 0 || attachments.length > 0)
+                ? bubble.implicitHeight + 30 : 0
             MessageBubble {
                 id: bubble
                 width: Math.min(720, messages.width * 0.78)
@@ -79,11 +81,17 @@ Item {
                 role: parent.role
                 markdown: parent.markdown
                 status: parent.status
-                visible: parent.role !== "tool" && parent.markdown.length > 0
+                attachments: parent.attachments
+                playing: root.chat.messagePlaying
+                visible: parent.role !== "tool"
+                    && (parent.markdown.length > 0 || parent.attachments.length > 0)
                 viewportWidth: messages.width
                 anchors.right: parent.role === "user" ? parent.right : undefined
                 anchors.left: parent.role === "user" ? undefined : parent.left
                 onLinkRequested: link => root.linkRequested(link)
+                onCopyRequested: text => root.chat.copy_message(text)
+                onPlayRequested: text => root.chat.play_message(text)
+                onFileRequested: path => root.chat.open_attachment(path)
             }
         }
     }
@@ -166,6 +174,7 @@ Item {
 
     ChatComposer {
         id: composer
+        objectName: "chatComposer"
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -173,7 +182,17 @@ Item {
         theme: root.theme
         processing: root.chat.processing
         enabled: !root.chat.sessionLoading
-        onSubmitRequested: text => root.chat.submit(text)
+        onSubmitRequested: (text, attachments) => root.chat.submit(text, attachments)
         onStopRequested: root.chat.stop_generation()
+        onVoiceInputRequested: root.chat.start_voice_input()
+        recording: root.chat.voiceRecording
+        pasteAttachments: () => root.chat.paste_attachments()
+    }
+
+    Connections {
+        target: root.chat
+        function onTranscriptReady(text) { composer.appendDraftText(text) }
+        function onSubmissionAccepted() { composer.clearAttachments() }
+        function onAttachmentPasted(url, kind) { composer.addAttachment(url, kind) }
     }
 }

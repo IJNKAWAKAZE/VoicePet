@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import Future
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -17,7 +18,14 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
+from PySide6.QtQml import QJSValue
 
+from core.attachments import inspect_attachment
+from core.config import default_config_path
+from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
 
 from .dialogs import ConfirmationRequest, DialogCoordinator
@@ -26,7 +34,9 @@ _INVALID_INDEX = QModelIndex()
 
 
 class ChatRuntimeProtocol(Protocol):
-    def submit_text(self, text: str) -> Future[Any]: ...
+    def submit_text(
+        self, text: str, attachments: tuple[LlmAttachment, ...] = ()
+    ) -> Future[Any]: ...
 
     def cancel_active_turn(self) -> Future[None]: ...
 
@@ -95,7 +105,7 @@ class ChatMessageModel(_RoleListModel):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(
-            ("messageId", "role", "markdown", "status", "createdAt"), parent
+            ("messageId", "role", "markdown", "status", "createdAt", "attachments"), parent
         )
 
 
@@ -129,6 +139,11 @@ class ChatViewModel(QObject):
     memoryChangesChanged = Signal()
     memoryActionResultChanged = Signal()
     viewMemoryRequested = Signal()
+    transcriptReady = Signal(str)
+    voiceRecordingChanged = Signal()
+    messagePlayingChanged = Signal()
+    submissionAccepted = Signal()
+    attachmentPasted = Signal(str, str)
     _futureFinished = Signal(str, object, object)
 
     def __init__(
@@ -154,6 +169,8 @@ class ChatViewModel(QObject):
         self._memory_action_busy = False
         self._memory_undo_session = ""
         self._memory_action_result = ""
+        self._voice_recording = False
+        self._message_playing = False
         self._futureFinished.connect(self._handle_future)
 
     @Property(QObject, constant=True)
@@ -192,6 +209,121 @@ class ChatViewModel(QObject):
     def open_memory(self) -> None:
         self.viewMemoryRequested.emit()
 
+    @Property(bool, notify=voiceRecordingChanged)
+    def voiceRecording(self) -> bool:
+        return self._voice_recording
+
+    @Property(bool, notify=messagePlayingChanged)
+    def messagePlaying(self) -> bool:
+        return self._message_playing
+
+    @Slot()
+    def start_voice_input(self) -> None:
+        if self._voice_recording or self._processing or self._session_loading:
+            if self._processing or self._session_loading:
+                self.errorOccurred.emit("当前回复完成后才能录音")
+            return
+        starter = getattr(self._runtime, "capture_manual_transcript", None)
+        if not callable(starter):
+            self.errorOccurred.emit("语音输入当前不可用")
+            return
+        try:
+            self._voice_recording = True
+            self.voiceRecordingChanged.emit()
+            self._watch("voice_input", starter())
+        except (RuntimeError, ValueError, TypeError):
+            self._voice_recording = False
+            self.voiceRecordingChanged.emit()
+            self.errorOccurred.emit("语音输入启动失败，请稍后重试")
+
+    @Slot(str)
+    def copy_message(self, text: str) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            self.errorOccurred.emit("复制失败")
+            return
+        clipboard.setText(text)
+        if self._dialogs is not None:
+            self._dialogs.toast("已复制", "success")
+
+    @Slot(result=bool)
+    def paste_attachments(self) -> bool:
+        """接收剪贴板中的本地文件或截图，普通文字交回编辑器处理"""
+
+        clipboard = QGuiApplication.clipboard()
+        mime = clipboard.mimeData() if clipboard is not None else None
+        if mime is None:
+            return False
+        urls = [url for url in mime.urls() if url.isLocalFile()]
+        try:
+            if urls:
+                items = [inspect_attachment(url.toLocalFile()) for url in urls]
+                for item in items:
+                    self.attachmentPasted.emit(QUrl.fromLocalFile(item.path).toString(), item.kind)
+                return True
+            if not mime.hasImage():
+                return False
+            screenshot = clipboard.image()
+            if screenshot.isNull():
+                raise ValueError("剪贴板图片无效")
+            # 截图保存为独立文件，使发送和历史预览不依赖剪贴板后续内容
+            directory = default_config_path().parent / "cache" / "clipboard"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"粘贴图片-{uuid4().hex}.png"
+            if not screenshot.save(str(path), "PNG"):
+                raise OSError("剪贴板图片保存失败")
+            self.attachmentPasted.emit(QUrl.fromLocalFile(str(path)).toString(), "image")
+        except (OSError, ValueError, RuntimeError):
+            self.errorOccurred.emit("无法粘贴附件，请确认文件可读取或重新复制图片")
+        return True
+
+    @Slot(str)
+    def open_attachment(self, path: str) -> None:
+        """使用系统默认程序打开附件"""
+
+        if not isinstance(path, str) or not path.strip():
+            return
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except (OSError, RuntimeError, TypeError):
+            opened = False
+        if not opened:
+            self.errorOccurred.emit("文件打开失败，请确认文件仍然存在")
+
+    @Slot(str)
+    def play_message(self, text: str) -> None:
+        normalized = text.strip() if isinstance(text, str) else ""
+        if not normalized:
+            return
+        if self._message_playing:
+            self.stop_message_playback()
+            return
+        speaker = getattr(self._runtime, "speak_notice", None)
+        if not callable(speaker):
+            self.errorOccurred.emit("语音播放当前不可用")
+            return
+        try:
+            self._message_playing = True
+            self.messagePlayingChanged.emit()
+            self._watch("play_message", speaker(normalized))
+        except (RuntimeError, ValueError, TypeError):
+            self._message_playing = False
+            self.messagePlayingChanged.emit()
+            self.errorOccurred.emit("语音播放失败，请稍后重试")
+
+    @Slot()
+    def stop_message_playback(self) -> None:
+        if not self._message_playing:
+            return
+        try:
+            self._watch("stop_message_playback", self._runtime.cancel_active_turn())
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        self._message_playing = False
+        self.messagePlayingChanged.emit()
+
     @Property(bool, notify=processingChanged)
     def processing(self) -> bool:
         return self._processing
@@ -212,19 +344,57 @@ class ChatViewModel(QObject):
     def sessionLoading(self) -> bool:
         return self._session_loading
 
-    @Slot(str)
-    def submit(self, text: str) -> None:
+    @Slot(str, "QVariant")
+    def submit(self, text: str, attachments: object = ()) -> None:
         if self._session_loading or self._processing:
             self.errorOccurred.emit("请等待当前会话加载或回复完成")
             return
         normalized = text.strip() if isinstance(text, str) else ""
-        if not normalized:
+        normalized_attachments: list[LlmAttachment] = []
+        try:
+            for item in _attachment_items(attachments):
+                if isinstance(item, LlmAttachment):
+                    normalized_attachments.append(item)
+                    continue
+                if not isinstance(item, Mapping):
+                    raise TypeError("附件格式无效")
+                raw_path = item.get("path", "")
+                if hasattr(raw_path, "toLocalFile"):
+                    raw_path = raw_path.toLocalFile()
+                inspected = inspect_attachment(str(raw_path))
+                normalized_attachments.append(
+                    LlmAttachment(
+                        inspected.path,
+                        inspected.name,
+                        inspected.media_type,
+                        inspected.size,
+                        inspected.sha256,
+                        inspected.kind,
+                    )
+                )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self.errorOccurred.emit("附件不可读取，请重新选择文件")
             return
-        self._append_message("user", normalized, "complete")
+        normalized_attachments = tuple(normalized_attachments)
+        if not normalized and normalized_attachments:
+            self.errorOccurred.emit("请先输入文字后再发送附件")
+            return
+        if not normalized and not normalized_attachments:
+            return
+        self._append_message(
+            "user",
+            normalized or "已附加文件",
+            "complete",
+            attachments=_attachment_view_items(normalized_attachments),
+        )
         self._append_message("assistant", "", "streaming")
         self._set_processing(True)
         try:
-            self._watch("submit", self._runtime.submit_text(normalized))
+            try:
+                future = self._runtime.submit_text(normalized, normalized_attachments)
+            except TypeError:
+                future = self._runtime.submit_text(normalized)
+            self._watch("submit", future)
         except (RuntimeError, ValueError, TypeError):
             self._message_model.update_last({"status": "error"})
             self._set_processing(False)
@@ -487,6 +657,12 @@ class ChatViewModel(QObject):
             if operation == "submit":
                 self._message_model.update_last({"status": "error"})
                 self._set_processing(False)
+            if operation == "voice_input":
+                self._voice_recording = False
+                self.voiceRecordingChanged.emit()
+            if operation in {"play_message", "stop_message_playback"}:
+                self._message_playing = False
+                self.messagePlayingChanged.emit()
             self.errorOccurred.emit("操作失败，请稍后重试")
             return
         if operation == "sessions":
@@ -510,7 +686,16 @@ class ChatViewModel(QObject):
             self.sessionsChanged.emit()
         elif operation == "submit":
             # 后台归档完成后刷新侧栏，让新会话立即可见
+            self.submissionAccepted.emit()
             self.refresh_sessions()
+        elif operation == "voice_input":
+            self._voice_recording = False
+            self.voiceRecordingChanged.emit()
+            if isinstance(result, str) and result.strip():
+                self.transcriptReady.emit(result.strip())
+        elif operation in {"play_message", "stop_message_playback"}:
+            self._message_playing = False
+            self.messagePlayingChanged.emit()
         elif operation == "delete":
             self._pending_session_id = ""
             self._pending_switch_id = ""
@@ -587,6 +772,7 @@ class ChatViewModel(QObject):
         for turn in turns:
             created_at = _iso(_read(turn, "created_at", datetime.now(UTC)))
             turn_id = str(_read(turn, "id", uuid4()))
+            raw_attachments = _read(turn, "attachments", ())
             items.extend(
                 (
                     _message_item(
@@ -595,6 +781,7 @@ class ChatViewModel(QObject):
                         _read(turn, "user_text", ""),
                         "complete",
                         created_at,
+                        attachments=_attachment_view_items(raw_attachments),
                     ),
                     _message_item(
                         f"{turn_id}:assistant",
@@ -607,9 +794,23 @@ class ChatViewModel(QObject):
             )
         self._message_model.reset_items(items)
 
-    def _append_message(self, role: str, text: str, status: str) -> None:
+    def _append_message(
+        self,
+        role: str,
+        text: str,
+        status: str,
+        *,
+        attachments: list[dict[str, object]] | None = None,
+    ) -> None:
         self._message_model.append_item(
-            _message_item(str(uuid4()), role, text, status, _iso(datetime.now(UTC)))
+            _message_item(
+                str(uuid4()),
+                role,
+                text,
+                status,
+                _iso(datetime.now(UTC)),
+                attachments=attachments,
+            )
         )
 
     def _set_processing(self, processing: bool) -> None:
@@ -631,6 +832,8 @@ def _message_item(
     markdown: object,
     status: str,
     created_at: str,
+    *,
+    attachments: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
         "messageId": message_id,
@@ -638,7 +841,67 @@ def _message_item(
         "markdown": sanitize_markdown(str(markdown)),
         "status": status,
         "createdAt": created_at,
+        "attachments": list(attachments or []),
     }
+
+
+def _attachment_view_items(
+    attachments: object,
+) -> list[dict[str, object]]:
+    """生成 QML 只读展示所需的附件元数据"""
+
+    items: list[dict[str, object]] = []
+    for attachment in _attachment_items(attachments):
+        if isinstance(attachment, LlmAttachment):
+            path = str(attachment.path)
+            name = str(attachment.name)
+            media_type = str(attachment.media_type)
+            kind = str(attachment.kind)
+        elif isinstance(attachment, Mapping):
+            path = str(attachment.get("path", ""))
+            name = str(attachment.get("name", "附件"))
+            media_type = str(attachment.get("mediaType", attachment.get("media_type", "")))
+            kind = str(attachment.get("kind", "file"))
+            if not path:
+                continue
+        else:
+            continue
+        # QML Image 使用 file URL 才能稳定加载 Windows 本地文件
+        try:
+            from pathlib import Path
+
+            url = Path(path).resolve().as_uri()
+        except (OSError, ValueError):
+            url = path
+        items.append(
+            {
+                "name": name,
+                "path": path,
+                "url": url,
+                "mediaType": media_type,
+                "kind": kind,
+            }
+        )
+    return items
+
+
+def _attachment_items(value: object) -> tuple[object, ...]:
+    """兼容 QML var、QVariantList 和 Python 附件序列"""
+
+    if isinstance(value, QJSValue):
+        if value.isNull() or value.isUndefined():
+            return ()
+        value = value.toVariant()
+    if value is None:
+        return ()
+    if isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError("附件格式无效")
+    try:
+        return tuple(value)  # type: ignore[arg-type]
+    except TypeError as error:
+        raise TypeError("附件格式无效") from error
 
 
 def _session_item(record: object) -> dict[str, object]:

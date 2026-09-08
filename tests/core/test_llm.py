@@ -7,6 +7,7 @@ import pytest
 
 from core.cancellation import CancellationSource, CancelledError
 from core.llm import (
+    LlmAttachment,
     LlmCompleted,
     LlmConfigurationError,
     LlmNetworkError,
@@ -67,6 +68,43 @@ def test_llm_types_are_immutable_and_request_rejects_blank_text():
         LlmRequest("system", "  ")
 
 
+def test_llm_request_keeps_attachment_metadata_without_loading_content(tmp_path):
+    attachment = LlmAttachment(
+        str(tmp_path / "photo.png"), "photo.png", "image/png", 12, "a" * 64, "image"
+    )
+    request = LlmRequest("system", "请看看", attachments=(attachment,))
+    assert request.attachments == (attachment,)
+
+
+def test_responses_input_contains_image_reference_for_attachment(tmp_path):
+    attachment = LlmAttachment(
+        str(tmp_path / "photo.png"), "photo.png", "image/png", 12, "a" * 64, "image"
+    )
+    input_data = OpenAIResponsesProvider._build_input(
+        LlmRequest("system", "请看看", attachments=(attachment,))
+    )
+    assert input_data[-1]["role"] == "user"
+    assert input_data[-1]["content"][-1]["type"] == "input_image"
+    assert input_data[-1]["content"][-1]["file_url"] == attachment.path
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "gb18030"])
+def test_small_text_attachment_is_inlined_for_both_protocols(tmp_path, encoding):
+    path = tmp_path / "名单.txt"
+    path.write_bytes("医院甲\n医院乙".encode(encoding))
+    attachment = LlmAttachment(
+        str(path), path.name, "text/plain", path.stat().st_size, "a" * 64, "file"
+    )
+    request = LlmRequest("system", "请查看名单", attachments=(attachment,))
+
+    responses_content = OpenAIResponsesProvider._build_input(request)[-1]["content"]
+    chat_content = OpenAIChatCompletionsProvider._build_chat_messages(request)[-1]["content"]
+
+    assert "医院甲\n医院乙" in responses_content[-1]["text"]
+    assert "医院甲\n医院乙" in chat_content[-1]["text"]
+    assert "附件正文开始" in chat_content[-1]["text"]
+
+
 class FakeStream:
     def __init__(self, events):
         self.events = list(events)
@@ -97,6 +135,21 @@ class FakeResponses:
 class FakeClient:
     def __init__(self, stream):
         self.responses = FakeResponses(stream)
+
+
+def test_auto_reasoning_effort_omits_provider_override():
+    stream = FakeStream([
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(id="response", usage=None),
+        )
+    ])
+    client = FakeClient(stream)
+    provider = OpenAIResponsesProvider(client=client, reasoning_effort="auto")
+
+    asyncio.run(collect(provider, LlmRequest("system", "hello")))
+
+    assert "reasoning" not in client.responses.calls[0]
 
 
 class FakeChatCompletions:
@@ -401,6 +454,53 @@ def test_openai_provider_sends_stateless_responses_request_and_maps_events():
             "stream": True,
             "store": False,
         }
+    ]
+
+
+def test_responses_provider_maps_output_limit_as_incomplete_completion():
+    stream = FakeStream(
+        [
+            SimpleNamespace(type="response.output_text.delta", delta="部分回复"),
+            SimpleNamespace(
+                type="response.incomplete",
+                response=SimpleNamespace(
+                    id="resp-limited",
+                    usage=SimpleNamespace(input_tokens=100, output_tokens=1024),
+                    incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                ),
+            ),
+        ]
+    )
+    provider = OpenAIResponsesProvider(client=FakeClient(stream))
+
+    events = asyncio.run(collect(provider, LlmRequest("system", "hello")))
+
+    assert events == [
+        LlmTextDelta("部分回复"),
+        LlmCompleted("resp-limited", 100, 1024, True, "max_output_tokens"),
+    ]
+
+
+def test_chat_provider_maps_length_finish_reason_as_incomplete_completion():
+    stream = FakeStream(
+        [
+            SimpleNamespace(
+                id="chat-limited",
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="部分回复", tool_calls=None),
+                    finish_reason="length",
+                )],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=1024),
+            )
+        ]
+    )
+    provider = OpenAIChatCompletionsProvider(client=FakeChatClient(stream))
+
+    events = asyncio.run(collect(provider, LlmRequest("system", "hello")))
+
+    assert events == [
+        LlmTextDelta("部分回复"),
+        LlmCompleted("chat-limited", 100, 1024, True, "max_output_tokens"),
     ]
 
 

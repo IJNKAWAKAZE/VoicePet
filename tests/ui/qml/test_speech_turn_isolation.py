@@ -42,6 +42,15 @@ def test_manual_turn_replaces_previous_reply(speech_app):
     assert pet.property("speech") == "本轮回复"
 
 
+def test_long_reply_is_not_truncated_in_pet_bubble(speech_app):
+    controller, _, _, pet = speech_app
+    long_reply = "完整回复" * 200
+
+    reply(controller, long_reply)
+
+    assert pet.property("speech") == long_reply
+
+
 def test_new_manual_turn_clears_bubble_before_first_delta(speech_app):
     controller, _, _, pet = speech_app
     reply(controller, "上一轮回复")

@@ -64,6 +64,37 @@ class BlockingSubscription:
         self.close_calls += 1
 
 
+def test_recording_ready_follows_first_valid_frame():
+    async def scenario():
+        release = asyncio.Event()
+        waiting = asyncio.Event()
+        ready = []
+
+        class DelayedSubscription(SequenceSubscription):
+            async def read(self, token):
+                waiting.set()
+                await release.wait()
+                return await super().read(token)
+
+        subscription = DelayedSubscription([make_frame(i) for i in range(3)])
+        session = VadAudioSession(SequenceCaptureService(subscription), ThresholdDetector(),
+                                  speech_start_timeout_ms=60)
+
+        async def on_started():
+            ready.append(len(subscription.frames))
+
+        task = asyncio.create_task(session.record_until_silence(
+            CancellationSource().token, on_started=on_started))
+        await waiting.wait()
+        assert ready == []
+        release.set()
+        assert await task == b""
+        assert ready == [2]
+        assert subscription.close_calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_session_keeps_latest_400ms_before_confirmed_speech():
     frames = [make_frame(index) for index in range(1, 26)]
     frames += [make_frame(index, speech=True) for index in range(26, 29)]

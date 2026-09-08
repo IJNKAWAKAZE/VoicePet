@@ -9,6 +9,8 @@ from core.events import (
     ApprovalRequested,
     ConversationPhase,
     CorrelationId,
+    RecordingStarted,
+    SpeakRequested,
     StateChanged,
     TextDelta,
     ToolResultReady,
@@ -528,6 +530,29 @@ def test_tool_result_does_not_create_a_chat_or_pet_message(qapp):
     assert chat.message_model.rowCount() == 1
     assert pet.findChild(QObject, "petSpeechBubble") is not None
     controller.close()
+
+
+def test_pet_listening_hint_waits_for_audio_and_clears_when_recording_ends(qapp):
+    controller, _runtime, _tray, qml, *_ = build_controller(qapp)
+    controller.start()
+    try:
+        pet = qml.root_objects[0].findChild(QObject, "petWindow")
+        turn = TurnId.new()
+        correlation = CorrelationId.new()
+        controller.handle_runtime_event(StateChanged(
+            turn, correlation, ConversationPhase.IDLE, ConversationPhase.LISTENING))
+        assert pet.property("speech") == ""
+        controller.handle_runtime_event(SpeakRequested(turn, correlation, "我在，请说"))
+        assert pet.property("speech") == "我在"
+        controller.handle_runtime_event(RecordingStarted(turn, correlation))
+        assert pet.property("speech") == "我在听…"
+        controller.handle_runtime_event(StateChanged(
+            turn, correlation, ConversationPhase.LISTENING, ConversationPhase.TRANSCRIBING))
+        assert pet.property("speech") == ""
+        controller.handle_runtime_event(RecordingStarted(turn, correlation))
+        assert pet.property("speech") == ""
+    finally:
+        controller.close()
 
 
 def test_replacing_pet_speech_restarts_auto_hide_timer(qapp):

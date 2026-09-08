@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Protocol, TypeVar
 from .asr import AsrError
 from .audio_types import AudioError
 from .audit import AuditContext
+from .builtin_tools import ReadFileTool
 from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .config import normalize_wake_keyword
 from .event_bus import EventBus
@@ -20,6 +22,7 @@ from .events import (
     CorrelationId,
     LlmUsageRecorded,
     MemoryResultReady,
+    RecordingStarted,
     SpeakRequested,
     TextDelta,
     TextInputSubmitted,
@@ -30,6 +33,7 @@ from .events import (
     validate_llm_model_name,
 )
 from .llm import (
+    LlmAttachment,
     LlmCompleted,
     LlmError,
     LlmProtocolError,
@@ -38,6 +42,7 @@ from .llm import (
     LlmTextDelta,
     LlmToolCall,
     ToolDefinition,
+    can_inline_text_attachment,
 )
 from .memory import MemoryConfigurationError
 from .memory_candidates import MEMORY_CANDIDATE_TOOL_NAME, MemoryCandidateService
@@ -137,6 +142,7 @@ class SessionArchiveProvider(Protocol):
         user_text: str,
         assistant_text: str,
         session_id: str | None = None,
+        attachments: Sequence[Mapping[str, object]] = (),
     ) -> object: ...
 
     def discard_turn(self, turn_id: str) -> bool: ...
@@ -246,6 +252,9 @@ class Coordinator:
         self._active_source: CancellationSource | None = None
         self._response_text = ""
         self._active_input_text = ""
+        self._active_attachments: tuple[LlmAttachment, ...] = ()
+        self._llm_history: tuple[Mapping[str, object], ...] = ()
+        self._attachment_reader: ReadFileTool | None = None
         self._active_session_id: str | None = None
         self._session_turn_archived = False
         self._persistent_turn_archived = False
@@ -288,6 +297,8 @@ class Coordinator:
         activation_source = self._validate_activation_source(source)
         self._response_text = ""
         self._active_input_text = ""
+        self._active_attachments = ()
+        self._attachment_reader = None
         self._active_input_is_manual = False
         self._active_session_id = (
             self._session_context.session_id
@@ -320,7 +331,11 @@ class Coordinator:
                 )
         return state_event.turn_id
 
-    async def submit_text(self, text: str) -> TurnId:
+    async def submit_text(
+        self,
+        text: str,
+        attachments: tuple[LlmAttachment, ...] = (),
+    ) -> TurnId:
         """提交手动文本并跳过录音与语音转写"""
 
         self._ensure_running()
@@ -331,6 +346,20 @@ class Coordinator:
         state_event = self._state_machine.start_text_turn(correlation_id)
         self._response_text = ""
         self._active_input_text = normalized
+        self._active_attachments = tuple(attachments)
+        readable_attachments = tuple(
+            item for item in attachments if not can_inline_text_attachment(item)
+        )
+        if readable_attachments:
+            try:
+                self._attachment_reader = ReadFileTool(
+                    allowed_paths={item.path for item in readable_attachments}
+                )
+            except (OSError, RuntimeError, ValueError):
+                # 元数据测试或远端占位附件没有本地正文时仍可正常发送
+                self._attachment_reader = None
+        else:
+            self._attachment_reader = None
         self._active_input_is_manual = True
         self._active_session_id = (
             self._session_context.session_id
@@ -383,6 +412,25 @@ class Coordinator:
         self._turn_budget = None
         if finished is not None:
             await self._event_bus.publish(finished)
+
+    async def capture_manual_transcript(self) -> str:
+        """录制一段由静音自动结束的手动语音并返回转写文本"""
+
+        self._ensure_running()
+        if self.phase is not ConversationPhase.IDLE:
+            raise RuntimeError("当前正在处理其他语音操作")
+        source = CancellationSource()
+        try:
+            audio = await self._audio_session.record_until_silence(
+                source.token,
+                include_preroll=False,
+            )
+        except TypeError:
+            audio = await self._audio_session.record_until_silence(source.token)
+        if not audio:
+            return ""
+        text = await self._transcript_adapter.transcribe(audio, source.token)
+        return text.strip() if isinstance(text, str) else ""
 
     async def speak_notice(self, text: str) -> TurnId:
         """不经过录音和模型地播放固定提示"""
@@ -703,15 +751,25 @@ class Coordinator:
                 if not self._accept_result(turn_id, token):
                     return
             try:
-                if activation_source in {"wake_word", "wake_followup"}:
-                    record = lambda: self._audio_session.record_until_silence(
-                        token,
-                        include_preroll=False,
-                    )
-                else:
-                    record = lambda: self._audio_session.record_until_silence(
-                        token
-                    )
+                async def started() -> None:
+                    if self._accept_result(turn_id, token):
+                        await self._event_bus.publish(
+                            RecordingStarted(turn_id, recording_correlation)
+                        )
+
+                async def record() -> bytes:
+                    recorder = self._audio_session.record_until_silence
+                    options = {}
+                    if activation_source in {"wake_word", "wake_followup"}:
+                        options["include_preroll"] = False
+                    # 新适配器在音频就绪后回调，保留旧录音适配器兼容入口
+                    if "on_started" in inspect.signature(recorder).parameters:
+                        options["on_started"] = started
+                    else:
+                        await started()
+                    token.throw_if_cancelled()
+                    return await recorder(token, **options)
+
                 audio = await self._await_with_budget(record)
             except TurnBudgetExceededError as error:
                 await self._handle_runtime_error(
@@ -846,9 +904,9 @@ class Coordinator:
     ) -> None:
         """在正式收音前播放简短唤醒应答"""
 
+        # 固定唤醒应答独立于模型回复播报开关，播放完成后才进入录音
         if (
-            not self._speech_enabled
-            or self._speech_synthesizer is None
+            self._speech_synthesizer is None
             or self._audio_player is None
         ):
             return
@@ -1040,6 +1098,7 @@ class Coordinator:
         token: CancellationToken,
         *,
         history: tuple[Mapping[str, object], ...] = (),
+        include_attachments: bool = True,
     ) -> None:
         assert self._llm_provider is not None
         correlation_id = CorrelationId.new()
@@ -1047,7 +1106,8 @@ class Coordinator:
         speech_chunks: list[str] = []
         completed = False
         tool_call: LlmToolCall | None = None
-        multiple_tool_calls = False
+        tool_calls: list[LlmToolCall] = []
+        self._llm_history = history + ({"role": "user", "content": input_text},)
         try:
             budget = self._require_turn_budget()
             request = LlmRequest(
@@ -1061,8 +1121,30 @@ class Coordinator:
                         self._pending_summary is not None
                         and tool.name == SHORT_TERM_SUMMARY_TOOL_NAME
                     )
+                ) + (
+                    (
+                        ToolDefinition(
+                            self._attachment_reader.manifest.name,
+                            self._attachment_reader.manifest.description,
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "offset": {"type": "integer"},
+                                    "length": {"type": "integer"},
+                                },
+                                "required": ["path", "offset", "length"],
+                                "additionalProperties": False,
+                            },
+                        ),
+                    )
+                    if self._attachment_reader is not None
+                    else ()
                 ),
-                max_output_tokens=budget.output_token_limit(),
+                max_output_tokens=budget.output_token_limit(4096),
+                attachments=(
+                    self._active_attachments if include_attachments else ()
+                ),
             )
             request_started = float(self._clock())
             async for event in self._stream_llm_with_budget(
@@ -1080,9 +1162,8 @@ class Coordinator:
                         TextDelta(turn_id, correlation_id, event.text)
                     )
                 elif isinstance(event, LlmToolCall):
-                    if tool_call is not None:
-                        multiple_tool_calls = True
-                    else:
+                    tool_calls.append(event)
+                    if tool_call is None:
                         tool_call = event
                 elif isinstance(event, LlmCompleted):
                     try:
@@ -1107,6 +1188,16 @@ class Coordinator:
                             total_tokens,
                         )
                     )
+                    if event.incomplete and not tool_calls:
+                        notice = (
+                            "\n\n> 回复达到长度上限，以上内容可能不完整"
+                            if chunks
+                            else "回复达到长度上限，但没有生成可显示的正文，请缩短问题后重试"
+                        )
+                        chunks.append(notice)
+                        await self._event_bus.publish(
+                            TextDelta(turn_id, correlation_id, notice)
+                        )
                     self._response_text = "".join(chunks)
                     speech_text = markdown_to_speech_text(
                         self._response_text
@@ -1117,8 +1208,37 @@ class Coordinator:
                     return
             if not completed:
                 raise LlmProtocolError("LLM 流缺少完成事件")
-            if multiple_tool_calls:
-                raise LlmProtocolError("单次响应包含多个工具提议")
+            if len(tool_calls) > 1:
+                if self._attachment_reader is None or any(
+                    item.name != "read_file" for item in tool_calls
+                ):
+                    raise LlmProtocolError("单次响应包含多个工具提议")
+                if len({item.call_id for item in tool_calls}) != len(tool_calls):
+                    raise LlmProtocolError("附件读取调用标识重复")
+                # 兼容服务可能一次返回多个读取请求，逐个校验路径并串行读取
+                for item in tool_calls:
+                    if not self._accept_result(turn_id, token):
+                        return
+                    budget.reserve_tool_call()
+                    result = await self._attachment_reader.execute(item.arguments, token)
+                    if not self._accept_result(turn_id, token):
+                        return
+                    await self._event_bus.publish(ToolResultReady(
+                        turn_id, CorrelationId.new(), item.call_id,
+                        result.status.value, {"message": result.safe_message},
+                    ))
+                    if not self._accept_result(turn_id, token):
+                        return
+                    self._append_tool_history(
+                        ToolProposal(item.call_id, item.name, item.arguments), result
+                    )
+                if self._accept_result(turn_id, token):
+                    await self._run_llm(
+                        turn_id, "请根据工具结果继续完成当前请求", token,
+                        history=self._llm_history,
+                        include_attachments=False,
+                    )
+                return
             budget.ensure_available()
             if tool_call is not None:
                 self._pending_tool_call = tool_call
@@ -1181,6 +1301,22 @@ class Coordinator:
         event: LlmToolCall,
         token: CancellationToken,
     ) -> None:
+        if event.name == "read_file" and self._attachment_reader is not None:
+            proposal = ToolProposal(event.call_id, event.name, event.arguments)
+            self._require_turn_budget().reserve_tool_call()
+            result = await self._attachment_reader.execute(event.arguments, token)
+            await self._event_bus.publish(
+                ToolResultReady(
+                    turn_id,
+                    CorrelationId.new(),
+                    event.call_id,
+                    result.status.value,
+                    {"message": result.safe_message},
+                )
+            )
+            if self._accept_result(turn_id, token):
+                await self._continue_after_tool(turn_id, proposal, result, token)
+            return
         if (
             event.name == MEMORY_CANDIDATE_TOOL_NAME
             and self._memory_candidates is not None
@@ -1233,10 +1369,29 @@ class Coordinator:
                 if session_id is None
                 else (str(turn_id), user_text, assistant_text, session_id)
             )
-            await asyncio.to_thread(
-                self._session_archive.archive_turn,
-                *archive_arguments,
+            attachment_view = tuple(
+                {
+                    "name": item.name,
+                    "path": item.path,
+                    "kind": item.kind,
+                    "mediaType": item.media_type,
+                }
+                for item in self._active_attachments
             )
+            archive_method = self._session_archive.archive_turn
+            supports_attachments = False
+            try:
+                supports_attachments = "attachments" in inspect.signature(archive_method).parameters
+            except (TypeError, ValueError):
+                supports_attachments = True
+            if not supports_attachments:
+                await asyncio.to_thread(archive_method, *archive_arguments)
+            else:
+                await asyncio.to_thread(
+                    archive_method,
+                    *archive_arguments,
+                    attachments=attachment_view,
+                )
         except Exception as error:  # noqa: BLE001 会话归档失败不能阻断最终回复
             _ = error
             return
@@ -1562,8 +1717,20 @@ class Coordinator:
         result: ToolExecutionResult,
         token: CancellationToken,
     ) -> None:
-        history = (
-            {"role": "user", "content": self._active_input_text},
+        self._append_tool_history(proposal, result)
+        await self._run_llm(
+            turn_id,
+            "请根据工具结果继续完成当前请求",
+            token,
+            history=self._llm_history,
+            include_attachments=False,
+        )
+
+    def _append_tool_history(
+        self, proposal: ToolProposal, result: ToolExecutionResult,
+    ) -> None:
+        # 保留此前所有分块结果，避免读取后一块时遗失前面的内容
+        self._llm_history += (
             {
                 "type": "function_call",
                 "call_id": proposal.call_id,
@@ -1581,12 +1748,6 @@ class Coordinator:
                     }
                 ),
             },
-        )
-        await self._run_llm(
-            turn_id,
-            "请根据工具结果继续完成当前请求",
-            token,
-            history=history,
         )
 
     async def _run_tts(

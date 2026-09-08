@@ -11,6 +11,7 @@ from core.events import (
     ApprovalRequested,
     ConversationPhase,
     ErrorSeverity,
+    RecordingStarted,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
@@ -20,6 +21,7 @@ from core.events import (
     WakeCommandPending,
 )
 from core.llm import (
+    LlmAttachment,
     LlmCompleted,
     LlmNetworkError,
     LlmTextDelta,
@@ -30,11 +32,13 @@ from core.state_machine import ConversationStateMachine
 from core.tts import SynthesizedAudio, TtsPlaybackError, TtsSynthesisError
 
 
-async def wait_until(predicate, attempts: int = 100):
-    for _ in range(attempts):
+async def wait_until(predicate, timeout: float = 2.0):
+    # 按实际时间等待后台线程完成，避免空转次数受机器负载影响
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
     raise AssertionError("condition was not reached")
 
 
@@ -194,6 +198,17 @@ class ScriptedLlm:
         self.calls.append((request, token))
         for event in self.events:
             await asyncio.sleep(0)
+            yield event
+
+
+class SequencedLlm:
+    def __init__(self, batches) -> None:
+        self.batches = iter(batches)
+        self.calls = []
+
+    async def stream(self, request, token):
+        self.calls.append((request, token))
+        for event in next(self.batches):
             yield event
 
 
@@ -467,6 +482,103 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
     asyncio.run(scenario())
 
 
+def test_manual_text_passes_attachments_to_llm_request():
+    async def scenario():
+        attachment = LlmAttachment("C:/tmp/report.txt", "report.txt", "text/plain", 4, "a" * 64, "file")
+        llm = ScriptedLlm([LlmTextDelta("收到"), LlmCompleted("response", 1, 1)])
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
+        )
+        await coordinator.submit_text("请查看", (attachment,))
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        assert llm.calls[0][0].attachments == (attachment,)
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_incomplete_llm_response_keeps_partial_text_and_finishes_turn():
+    async def scenario():
+        llm = ScriptedLlm([
+            LlmTextDelta("已经生成的部分"),
+            LlmCompleted("limited", 10, 1024, True, "max_output_tokens"),
+        ])
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
+        )
+
+        await coordinator.submit_text("生成很长的结果")
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert coordinator.response_text.startswith("已经生成的部分")
+        assert "达到长度上限" in coordinator.response_text
+        assert llm.calls[0][0].max_output_tokens == 4096
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_manual_voice_input_records_until_silence_and_returns_transcript():
+    async def scenario():
+        audio = SourceAwareAudio()
+        coordinator = Coordinator(audio, SequenceTranscript(["  语音输入  "]), EventBus())
+
+        text = await coordinator.capture_manual_transcript()
+
+        assert text == "语音输入"
+        assert audio.include_preroll == [False]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_attached_file_can_be_read_only_through_current_turn_tool(tmp_path):
+    async def scenario():
+        path = tmp_path / "report.txt"
+        path.write_text("报告内容", encoding="utf-8")
+        attachment = LlmAttachment(
+            str(path.resolve()), "report.bin", "application/octet-stream", path.stat().st_size, "a" * 64, "file"
+        )
+        llm = SequencedLlm((
+            (LlmToolCall("read-1", "read_file", {"path": str(path.resolve()), "offset": 0, "length": 64}),
+             LlmCompleted("first", 1, 1)),
+            (LlmTextDelta("已读取"), LlmCompleted("second", 1, 1)),
+        ))
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
+        )
+        await coordinator.submit_text("读取报告", (attachment,))
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        assert any(tool.name == "read_file" for tool in llm.calls[0][0].tools)
+        assert "5oql5ZGK5YaF5a65" in str(llm.calls[1][0].history)
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_multiple_attachment_reads_preserve_all_chunks(tmp_path):
+    async def scenario():
+        path = tmp_path / "report.txt"
+        path.write_bytes(b"first second third")
+        attachment = LlmAttachment(str(path), path.name, "application/octet-stream", 18, "a" * 64, "file")
+        def read(call_id, offset, length):
+            return LlmToolCall(call_id, "read_file", {"path": str(path), "offset": offset, "length": length})
+        llm = SequencedLlm((
+            (read("read-1", 0, 5), read("read-2", 6, 6), LlmCompleted("one", 1, 1)),
+            (read("read-3", 13, 5), LlmCompleted("two", 1, 1)),
+            (LlmTextDelta("完整回复"), LlmCompleted("three", 1, 1)),
+        ))
+        coordinator = Coordinator(ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm)
+        await coordinator.submit_text("读取报告", (attachment,))
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        assert coordinator.response_text == "完整回复"
+        outputs = [item for item in llm.calls[-1][0].history if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in outputs] == ["read-1", "read-2", "read-3"]
+        assert all('"status":"success"' in item["output"] for item in outputs)
+        await coordinator.stop()
+    asyncio.run(scenario())
+
+
 def test_manual_text_skips_tts_when_manual_speech_is_disabled():
     async def scenario():
         synthesizer = RecordingSynthesizer()
@@ -718,6 +830,41 @@ def test_wake_source_acknowledges_then_records_without_preroll():
         assert len(player.calls) == 1
         assert audio.include_preroll == [False]
         await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_wake_waits_for_acknowledgement_even_when_reply_speech_disabled():
+    async def scenario():
+        bus = EventBus()
+        started = []
+        bus.subscribe(RecordingStarted, started.append)
+        release = asyncio.Event()
+        playing = asyncio.Event()
+
+        class Player:
+            async def play(self, audio, token):
+                playing.set()
+                await release.wait()
+
+        audio = SourceAwareAudio()
+        synthesizer = RecordingSynthesizer()
+        coordinator = Coordinator(audio, SequenceTranscript(["打开设置"]), bus,
+                                  speech_enabled=False, speech_synthesizer=synthesizer,
+                                  audio_player=Player())
+        try:
+            await coordinator.start_listening("wake_word")
+            await wait_until(playing.is_set)
+            assert [text for text, _ in synthesizer.calls] == ["我在，请说"]
+            assert audio.include_preroll == []
+            assert started == []
+            release.set()
+            await wait_until(lambda: bool(audio.include_preroll))
+            assert audio.include_preroll == [False]
+            assert len(started) == 1
+        finally:
+            release.set()
+            await coordinator.stop()
 
     asyncio.run(scenario())
 

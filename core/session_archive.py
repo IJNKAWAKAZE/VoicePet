@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -35,6 +35,7 @@ class SessionTurnRecord:
     session_date: date
     created_at: datetime
     expires_at: datetime
+    attachments: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,7 @@ class SessionArchiveStore:
         user_text: str,
         assistant_text: str,
         session_id: str | None = None,
+        attachments: Sequence[Mapping[str, object]] = (),
     ) -> SessionTurnRecord:
         """按来源轮次幂等归档一个完整问答"""
 
@@ -130,6 +132,7 @@ class SessionArchiveStore:
         self._validate_uuid(normalized_session_id, "会话 ID")
         user = self._validate_text(user_text, "用户文本", 4096)
         assistant = self._validate_text(assistant_text, "助手文本", 16_000)
+        normalized_attachments = self._normalize_attachments(attachments)
         now = self._now()
         with self._lock:
             self._ensure_open()
@@ -184,6 +187,16 @@ class SessionArchiveStore:
                             timestamp,
                             (now.astimezone(UTC) + timedelta(days=self._retention_days)).isoformat(),
                         ),
+                    )
+                    self._connection.execute(
+                        "DELETE FROM session_turn_attachments WHERE turn_id=?", (turn_id,)
+                    )
+                    self._connection.executemany(
+                        "INSERT INTO session_turn_attachments(turn_id,name,path,url,media_type,kind) VALUES (?,?,?,?,?,?)",
+                        [
+                            (turn_id, item["name"], item["path"], item["url"], item["mediaType"], item["kind"])
+                            for item in normalized_attachments
+                        ],
                     )
             except sqlite3.Error as error:
                 raise SessionArchiveError("会话轮次写入失败") from error
@@ -813,6 +826,15 @@ class SessionArchiveStore:
                 ensure_memory_schema(self._connection)
             except MemorySchemaError as error:
                 raise SessionArchiveError("会话数据库结构初始化失败") from error
+            try:
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS session_turn_attachments(" 
+                    "turn_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, "
+                    "url TEXT NOT NULL, media_type TEXT NOT NULL, kind TEXT NOT NULL, "
+                    "PRIMARY KEY(turn_id, path), FOREIGN KEY(turn_id) REFERENCES session_turns(turn_id) ON DELETE CASCADE)"
+                )
+            except sqlite3.Error as error:
+                raise SessionArchiveError("会话数据库结构迁移失败") from error
 
     def _ensure_writes_enabled(self) -> None:
         if not self._enabled:
@@ -990,8 +1012,20 @@ class SessionArchiveStore:
             raise SessionArchiveError(f"{label}无效")
         return value.strip()
 
-    @staticmethod
-    def _turn_record(row: sqlite3.Row) -> SessionTurnRecord:
+    def _turn_record(self, row: sqlite3.Row) -> SessionTurnRecord:
+        attachments = tuple(
+            {
+                "name": str(item["name"]),
+                "path": str(item["path"]),
+                "url": str(item["url"]),
+                "mediaType": str(item["media_type"]),
+                "kind": str(item["kind"]),
+            }
+            for item in self._connection.execute(
+                "SELECT name,path,url,media_type,kind FROM session_turn_attachments WHERE turn_id=? ORDER BY rowid",
+                (row["turn_id"],),
+            ).fetchall()
+        )
         return SessionTurnRecord(
             row["id"],
             row["turn_id"],
@@ -1001,7 +1035,31 @@ class SessionArchiveStore:
             date.fromisoformat(row["session_date"]),
             datetime.fromisoformat(row["created_at"]),
             datetime.fromisoformat(row["expires_at"]),
+            attachments,
         )
+
+    @staticmethod
+    def _normalize_attachments(
+        attachments: Sequence[Mapping[str, object]],
+    ) -> tuple[dict[str, str], ...]:
+        """只保存用于历史展示的附件元数据"""
+
+        if isinstance(attachments, (str, bytes, bytearray)):
+            raise SessionArchiveError("附件元数据无效")
+        normalized: list[dict[str, str]] = []
+        for item in attachments:
+            if not isinstance(item, Mapping):
+                raise SessionArchiveError("附件元数据无效")
+            entry = {
+                key: str(item.get(key, ""))[:2048]
+                for key in ("name", "path", "url", "mediaType", "kind")
+            }
+            if not entry["path"] or entry["kind"] not in {"image", "file"}:
+                raise SessionArchiveError("附件元数据无效")
+            normalized.append(entry)
+            if len(normalized) >= 16:
+                break
+        return tuple(normalized)
 
     def _summary_record(self, row: sqlite3.Row) -> ShortTermSummaryRecord:
         session = self._connection.execute(

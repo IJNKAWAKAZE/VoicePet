@@ -18,6 +18,9 @@ ScrollView {
             })
             baseUrlField.text = root.settings.draft.llm.base_url
             modelField.text = root.settings.draft.llm.model
+            reasoningEffortSelector.currentIndex = Qt.binding(function() {
+                return reasoningEffortSelector.values.indexOf(root.settings.draft.llm.reasoning_effort)
+            })
             rolePrompt.text = root.settings.draft.llm.system_prompt
             apiKeyField.clear()
         }
@@ -57,6 +60,17 @@ ScrollView {
             text: root.settings.draft.llm.model
             placeholderText: "模型名称"
             onTextEdited: root.settings.set_field("llm", "model", text)
+        }
+        FieldLabel { theme: root.theme; text: "思考强度" }
+        AppComboBox {
+            id: reasoningEffortSelector
+            objectName: "reasoningEffortSelector"
+            Layout.preferredWidth: 360
+            theme: root.theme
+            model: ["自动", "最小", "低", "中", "高", "极高"]
+            property var values: ["auto", "minimal", "low", "medium", "high", "xhigh"]
+            currentIndex: Math.max(0, values.indexOf(root.settings.draft.llm.reasoning_effort))
+            onActivated: root.settings.set_field("llm", "reasoning_effort", values[currentIndex])
         }
         Text {
             text: "API Key"

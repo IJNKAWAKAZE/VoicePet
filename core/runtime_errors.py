@@ -71,7 +71,7 @@ def _safe_message(error_code: str, retryable: bool) -> str:
         "asr.configuration": "语音识别配置无效，请检查设置并重新启动",
         "asr.model": "语音识别模型不可用，请运行诊断或更换模型",
         "asr.transcription": "语音识别暂时失败，请重试",
-        "llm.configuration": "LLM 配置或凭据无效，请检查设置",
+        "llm.configuration": "LLM 请求配置无效，请检查模型、API 地址和凭据",
         "llm.network": "LLM 网络暂时不可用，请稍后重试",
         "llm.protocol": "LLM 返回格式无效，请稍后重试",
         "tts.configuration": "语音合成配置无效，请检查设置",

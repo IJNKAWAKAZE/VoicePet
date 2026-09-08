@@ -3,16 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .network_resilience import NetworkCircuitOpenError, NetworkResilience
+
+
+def _attachment_data_url(attachment: "LlmAttachment") -> str | None:
+    """把本地图片转换为兼容云端视觉接口的 data URL"""
+
+    if attachment.kind != "image":
+        return None
+    try:
+        payload = Path(attachment.path).read_bytes()
+    except (OSError, ValueError):
+        return None
+    if not payload:
+        return None
+    encoded = base64.b64encode(payload).decode("ascii")
+    media_type = attachment.media_type or "image/png"
+    return f"data:{media_type};base64,{encoded}"
 
 
 class LlmError(RuntimeError):
@@ -104,6 +122,48 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmAttachment:
+    """随消息传递的本地附件元数据"""
+
+    path: str
+    name: str
+    media_type: str
+    size: int
+    sha256: str
+    kind: str
+
+
+_MAX_INLINE_TEXT_BYTES = 64 * 1024
+
+
+def can_inline_text_attachment(attachment: LlmAttachment) -> bool:
+    """判断文本附件是否适合直接放入模型上下文"""
+
+    return (
+        attachment.kind == "file"
+        and attachment.media_type.startswith("text/")
+        and 0 <= attachment.size <= _MAX_INLINE_TEXT_BYTES
+    )
+
+
+def _inline_text_attachment(attachment: LlmAttachment) -> str | None:
+    if not can_inline_text_attachment(attachment):
+        return None
+    try:
+        data = Path(attachment.path).read_bytes()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(data) > _MAX_INLINE_TEXT_BYTES or b"\x00" in data:
+        return None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+@dataclass(frozen=True, slots=True)
 class LlmRequest:
     """发送给 Provider 的最小本地请求"""
 
@@ -112,6 +172,7 @@ class LlmRequest:
     history: tuple[Mapping[str, JsonValue], ...] = ()
     tools: tuple[ToolDefinition, ...] = ()
     max_output_tokens: int = 1024
+    attachments: tuple[LlmAttachment, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
@@ -125,6 +186,7 @@ class LlmRequest:
             raise LlmConfigurationError("LLM 历史项必须是对象")
         object.__setattr__(self, "history", frozen_history)
         object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(self, "attachments", tuple(self.attachments))
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +218,8 @@ class LlmCompleted:
     response_id: str
     input_tokens: int
     output_tokens: int
+    incomplete: bool = False
+    incomplete_reason: str = ""
 
 
 LlmStreamEvent = LlmTextDelta | LlmToolCall | LlmCompleted
@@ -282,17 +346,19 @@ class OpenAIResponsesProvider:
         token.throw_if_cancelled()
         stream = None
         try:
-            stream = await self._client.responses.create(
-                model=self._model,
-                instructions=request.instructions,
-                input=self._build_input(request),
-                reasoning={"effort": self._reasoning_effort},
-                max_output_tokens=request.max_output_tokens,
-                tools=self._build_tools(request.tools),
-                parallel_tool_calls=False,
-                stream=True,
-                store=False,
-            )
+            settings: dict[str, Any] = {
+                "model": self._model,
+                "instructions": request.instructions,
+                "input": self._build_input(request),
+                "max_output_tokens": request.max_output_tokens,
+                "tools": self._build_tools(request.tools),
+                "parallel_tool_calls": False,
+                "stream": True,
+                "store": False,
+            }
+            if self._reasoning_effort != "auto":
+                settings["reasoning"] = {"effort": self._reasoning_effort}
+            stream = await self._client.responses.create(**settings)
             completed = False
             async for event in stream:
                 token.throw_if_cancelled()
@@ -322,7 +388,40 @@ class OpenAIResponsesProvider:
     @staticmethod
     def _build_input(request: LlmRequest) -> list[dict[str, Any]]:
         history = [_thaw_json(item) for item in request.history]
-        history.append({"role": "user", "content": request.input_text.strip()})
+        if request.attachments:
+            content: list[dict[str, Any]] = [
+                {"type": "input_text", "text": request.input_text.strip()}
+            ]
+            for attachment in request.attachments:
+                if attachment.kind == "image":
+                    image_url = _attachment_data_url(attachment)
+                    image_item: dict[str, Any] = {
+                        "type": "input_image",
+                        # Responses API 要求图片使用 image_url 或 data URL
+                        "image_url": image_url or attachment.path,
+                    }
+                    if not image_url:
+                        # 元数据占位附件保留本地路径供兼容网关读取
+                        image_item["file_url"] = attachment.path
+                    content.append(image_item)
+                else:
+                    inline_text = _inline_text_attachment(attachment)
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"[附件正文开始: {attachment.name}]\n"
+                                f"{inline_text}\n"
+                                f"[附件正文结束: {attachment.name}]"
+                                if inline_text is not None
+                                # 大文件交给 read_file 工具按需读取
+                                else f"[附件] {attachment.name}\n路径: {attachment.path}"
+                            ),
+                        }
+                    )
+            history.append({"role": "user", "content": content})
+        else:
+            history.append({"role": "user", "content": request.input_text.strip()})
         return history
 
     @staticmethod
@@ -364,16 +463,20 @@ class OpenAIResponsesProvider:
             if not isinstance(arguments, dict):
                 raise LlmProtocolError("工具参数必须是 JSON object")
             return LlmToolCall(call_id, name, arguments)
-        if event_type == "response.completed":
+        if event_type in {"response.completed", "response.incomplete"}:
             response = getattr(event, "response", None)
             response_id = getattr(response, "id", None)
             if not isinstance(response_id, str) or not response_id:
                 raise LlmProtocolError("完成事件缺少 response id")
             usage = getattr(response, "usage", None)
+            details = getattr(response, "incomplete_details", None)
+            reason = getattr(details, "reason", "")
             return LlmCompleted(
                 response_id,
                 int(getattr(usage, "input_tokens", 0) or 0),
                 int(getattr(usage, "output_tokens", 0) or 0),
+                event_type == "response.incomplete",
+                reason if isinstance(reason, str) else "",
             )
         return None
 
@@ -413,6 +516,7 @@ class OpenAIChatCompletionsProvider(OpenAIResponsesProvider):
         input_tokens = 0
         output_tokens = 0
         tool_parts: dict[int, dict[str, str]] = {}
+        incomplete = False
         try:
             settings: dict[str, Any] = {
                 "model": self._model,
@@ -437,6 +541,8 @@ class OpenAIChatCompletionsProvider(OpenAIResponsesProvider):
                         getattr(usage, "completion_tokens", 0) or 0
                     )
                 for choice in getattr(chunk, "choices", ()) or ():
+                    if getattr(choice, "finish_reason", None) == "length":
+                        incomplete = True
                     delta = getattr(choice, "delta", None)
                     content = getattr(delta, "content", None)
                     if isinstance(content, str) and content:
@@ -458,7 +564,13 @@ class OpenAIChatCompletionsProvider(OpenAIResponsesProvider):
                 if not isinstance(arguments, dict):
                     raise LlmProtocolError("工具参数必须是 JSON object")
                 yield LlmToolCall(call_id, name, arguments)
-            yield LlmCompleted(response_id, input_tokens, output_tokens)
+            yield LlmCompleted(
+                response_id,
+                input_tokens,
+                output_tokens,
+                incomplete,
+                "max_output_tokens" if incomplete else "",
+            )
         except (LlmError, CancelledError):
             raise
         except Exception as error:
@@ -529,7 +641,39 @@ class OpenAIChatCompletionsProvider(OpenAIResponsesProvider):
             ):
                 raise LlmConfigurationError("Chat Completions 历史项格式无效")
             messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": request.input_text.strip()})
+        if request.attachments:
+            content: list[dict[str, Any]] = [
+                {"type": "text", "text": request.input_text.strip()}
+            ]
+            for attachment in request.attachments:
+                if attachment.kind == "image":
+                    image_url = _attachment_data_url(attachment)
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url or f"file://{attachment.path}"
+                            },
+                        }
+                    )
+                else:
+                    inline_text = _inline_text_attachment(attachment)
+                    content.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f"[附件正文开始: {attachment.name}]\n"
+                                f"{inline_text}\n"
+                                f"[附件正文结束: {attachment.name}]"
+                                if inline_text is not None
+                                # 大文件交给 read_file 工具按需读取
+                                else f"[附件] {attachment.name}\n路径: {attachment.path}"
+                            ),
+                        }
+                    )
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": request.input_text.strip()})
         return messages
 
     @staticmethod

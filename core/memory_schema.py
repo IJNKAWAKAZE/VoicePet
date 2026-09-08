@@ -14,6 +14,7 @@ _TARGET_TABLES = (
     "memory_evidence",
     "memory_sessions",
     "session_turns",
+    "session_turn_attachments",
     "short_term_summaries",
     "summary_suppressions",
     "memory_jobs",
@@ -107,6 +108,17 @@ _DDL = (
         session_date TEXT NOT NULL,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE session_turn_attachments(
+        turn_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        url TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        PRIMARY KEY(turn_id, path)
     )
     """,
     """

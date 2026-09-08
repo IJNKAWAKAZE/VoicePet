@@ -14,16 +14,20 @@ from core.events import (
     MemoryChanged,
     MemoryMaintenanceChanged,
     MemoryResultReady,
+    RecordingStarted,
     RuntimeErrorEvent,
     StateChanged,
+    SpeakRequested,
     TextDelta,
     ToolResultReady,
     TranscriptReady,
     TurnId,
+    WakeCommandPending,
 )
 from core.policy import ConfirmationMode
 from core.window_state import WindowPosition, WindowStateError
 
+from .markdown import sanitize_markdown
 from .pet_animation import PetAssetError
 from .pet_animation_model import PetAnimationModel, PetInteractionController
 from .qml_resources import QmlResourceError
@@ -109,6 +113,7 @@ class QmlApplicationController(QObject):
         self._pet_menu_window: QObject | None = None
         self._confirmation_window: QObject | None = None
         self._phase = ConversationPhase.IDLE
+        self._phase_turn_id: TurnId | None = None
         self._speech_text = ""
         self._speech_turn_id: TurnId | None = None
         self._muted = False
@@ -126,6 +131,7 @@ class QmlApplicationController(QObject):
         app_shell.showMainRequested.connect(self._show_main_window)
         app_shell.hideMainRequested.connect(self._hide_main_window)
         chat.errorOccurred.connect(lambda message: self._dialogs.toast(message, "warning"))
+        chat.voiceRecordingChanged.connect(self._sync_manual_voice_state)
         chat.activeSessionIdChanged.connect(self._reset_pet_speech)
         chat.processingChanged.connect(self._reset_speech_on_submission)
         chat.viewMemoryRequested.connect(lambda: self.show_main("memories"))
@@ -585,7 +591,17 @@ class QmlApplicationController(QObject):
 
     def _set_pet_speech(self, message: str) -> None:
         if self._pet_window is not None:
-            self._pet_window.setProperty("speech", message[:400])
+            self._pet_window.setProperty("speech", sanitize_markdown(message))
+
+    @Slot()
+    def _sync_manual_voice_state(self) -> None:
+        # 手动录音不经过对话状态机，因此由聊天 ViewModel 直接同步桌宠
+        if self._chat.voiceRecording:
+            self._pet_animation.set_phase(ConversationPhase.LISTENING)
+            self._set_pet_speech("正在聆听，请说话…")
+        elif self._phase is ConversationPhase.IDLE:
+            self._pet_animation.set_phase(ConversationPhase.IDLE)
+            self._set_pet_speech("")
 
     @Slot()
     def _reset_pet_speech(self) -> None:
@@ -602,6 +618,23 @@ class QmlApplicationController(QObject):
     @Slot(object)
     def handle_runtime_event(self, event: object) -> None:
         if isinstance(event, StateChanged):
+            # 旧轮次的结束事件不能覆盖新轮次的真实监听状态
+            if (
+                event.current is ConversationPhase.IDLE
+                and self._phase_turn_id is not None
+                and event.turn_id != self._phase_turn_id
+            ):
+                return
+            if (
+                event.current is not ConversationPhase.IDLE
+                and self._phase_turn_id is not None
+                and event.turn_id != self._phase_turn_id
+                and not (
+                    event.current is ConversationPhase.LISTENING
+                    and event.previous is not ConversationPhase.IDLE
+                )
+            ):
+                return
             if event.current is not ConversationPhase.IDLE:
                 self._chat.begin_turn()
             # 手动输入直接进入思考阶段，不能只在开始聆听时重置缓存
@@ -609,16 +642,38 @@ class QmlApplicationController(QObject):
                 self._reset_pet_speech()
                 self._speech_turn_id = event.turn_id
             self._phase = event.current
-            self._pet_animation.set_phase(event.current)
+            self._phase_turn_id = (
+                None if event.current is ConversationPhase.IDLE else event.turn_id
+            )
+            self._pet_animation.set_phase(
+                ConversationPhase.IDLE
+                if event.current is ConversationPhase.LISTENING else event.current
+            )
+            if event.previous is ConversationPhase.LISTENING:
+                self._set_pet_speech("")
             if event.current is ConversationPhase.LISTENING:
                 self._speech_text = ""
-                self._set_pet_speech("我在听…")
+                self._set_pet_speech("")
             listening = event.current is not ConversationPhase.IDLE
             setter = getattr(self._tray, "set_listening", None)
             if callable(setter):
                 setter(listening)
             if event.current is ConversationPhase.IDLE:
                 self._chat.finish_assistant()
+            return
+        if isinstance(event, WakeCommandPending):
+            if event.turn_id == self._phase_turn_id:
+                self._set_pet_speech("")
+            return
+        if isinstance(event, RecordingStarted):
+            if event.turn_id == self._phase_turn_id and self._phase is ConversationPhase.LISTENING:
+                self._pet_animation.set_phase(ConversationPhase.LISTENING)
+                self._set_pet_speech("我在听…")
+            return
+        if isinstance(event, SpeakRequested):
+            # 唤醒应答播放期间展示与语音一致的简短气泡
+            if event.text == "我在，请说" and event.turn_id == self._phase_turn_id:
+                self._set_pet_speech("我在")
             return
         if isinstance(event, TranscriptReady):
             self._chat.append_user_message(event.text)
@@ -629,7 +684,7 @@ class QmlApplicationController(QObject):
             if event.turn_id != self._speech_turn_id:
                 self._reset_pet_speech()
                 self._speech_turn_id = event.turn_id
-            self._speech_text = (self._speech_text + event.text)[-400:]
+            self._speech_text += event.text
             self._set_pet_speech(self._speech_text)
             return
         if isinstance(event, ApprovalRequested):
@@ -644,7 +699,7 @@ class QmlApplicationController(QObject):
                 and event.status in {"success", "denied", "failed"}
             ):
                 self._chat.append_assistant_delta(event.message)
-                self._speech_text = event.message[:400]
+                self._speech_text = event.message
                 self._set_pet_speech(self._speech_text)
             return
         if isinstance(event, MemoryChanged):
