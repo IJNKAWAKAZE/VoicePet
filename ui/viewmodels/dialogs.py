@@ -53,6 +53,26 @@ class ConfirmationRequest:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class AgentInteractionRequest:
+    """Codex Agent 的审批或用户输入请求"""
+
+    request_id: str
+    title: str
+    message: str
+    kind: str = "approval"
+    options: tuple[dict[str, str], ...] = ()
+
+    def to_map(self) -> dict[str, object]:
+        return {
+            "requestId": self.request_id,
+            "title": self.title,
+            "message": self.message,
+            "kind": self.kind,
+            "options": [dict(item) for item in self.options],
+        }
+
+
 class _DictionaryListModel(QAbstractListModel):
     def __init__(self, roles: tuple[str, ...], parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -104,6 +124,8 @@ class DialogCoordinator(QObject):
 
     confirmationChanged = Signal()
     confirmationResolved = Signal(str, bool)
+    agentInteractionChanged = Signal()
+    agentInteractionResolved = Signal(str, object)
     taskCancelRequested = Signal(str)
     pageErrorsChanged = Signal()
 
@@ -118,6 +140,7 @@ class DialogCoordinator(QObject):
             ("taskId", "title", "progress", "cancellable"), self
         )
         self._confirmations: list[ConfirmationRequest] = []
+        self._agent_interaction: AgentInteractionRequest | None = None
         self._confirmation_callbacks: dict[
             str, tuple[Callable[[], None] | None, Callable[[], None] | None]
         ] = {}
@@ -152,6 +175,26 @@ class DialogCoordinator(QObject):
     @Property("QVariantMap", notify=confirmationChanged)
     def currentConfirmation(self) -> dict[str, object]:
         return self.current_confirmation
+
+    @Property("QVariantMap", notify=agentInteractionChanged)
+    def current_agent_interaction(self) -> dict[str, object]:
+        return self._agent_interaction.to_map() if self._agent_interaction else {}
+
+    @Property("QVariantMap", notify=agentInteractionChanged)
+    def currentAgentInteraction(self) -> dict[str, object]:
+        return self.current_agent_interaction
+
+    def request_agent_interaction(self, request: AgentInteractionRequest) -> None:
+        self._agent_interaction = request
+        self.agentInteractionChanged.emit()
+
+    @Slot(str, str)
+    def resolve_agent_interaction(self, request_id: str, result: object) -> None:
+        if self._agent_interaction is None or self._agent_interaction.request_id != request_id:
+            return
+        self._agent_interaction = None
+        self.agentInteractionResolved.emit(request_id, result)
+        self.agentInteractionChanged.emit()
 
     @Property("QVariantMap", notify=pageErrorsChanged)
     def page_errors(self) -> dict[str, str]:

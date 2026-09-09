@@ -330,4 +330,4 @@ def test_concurrent_empty_database_initializers_create_one_valid_schema(tmp_path
     connection = sqlite3.connect(path, isolation_level=None)
     assert connection.execute(
         "SELECT version FROM voicepet_components WHERE name = 'memory_system'"
-    ).fetchone() == (2,)
+     ).fetchone() == (3,)

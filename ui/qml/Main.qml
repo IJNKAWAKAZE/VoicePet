@@ -253,4 +253,10 @@ ApplicationWindow {
         theme: themeViewModel
         dialogs: dialogCoordinator
     }
+
+    AgentInteractionWindow {
+        objectName: "agentInteractionWindow"
+        theme: themeViewModel
+        dialogs: dialogCoordinator
+    }
 }

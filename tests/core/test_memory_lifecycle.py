@@ -69,7 +69,7 @@ def test_fact_contracts_are_frozen_and_memory_schema_uses_component_version(tmp_
     connection.close()
 
     memory_store = MemoryStore(database, clock=lambda: NOW)
-    assert memory_store.diagnostics() == {"schema_version": 2, "fts5": True}
+    assert memory_store.diagnostics() == {"schema_version": 3, "fts5": True}
     memory_store.close()
 
     connection = sqlite3.connect(database)

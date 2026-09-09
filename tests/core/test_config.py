@@ -91,7 +91,7 @@ def test_new_memory_flags_require_real_booleans(field):
 def test_default_config_matches_product_defaults_and_is_immutable():
     config = AppConfig()
 
-    assert config.config_version == 2
+    assert config.config_version == 3
     assert config.audio.sample_rate == 16000
     assert config.audio.channels == 1
     assert config.wake_word.enabled is True
@@ -190,7 +190,7 @@ def test_version_one_config_migrates_ui_defaults_without_rewriting_file(tmp_path
     result = ConfigStore(path).load()
 
     assert result.status is ConfigLoadStatus.LOADED
-    assert result.config.config_version == 2
+    assert result.config.config_version == 3
     assert result.config.ui.theme_id == "sunny_sea"
     assert result.config.ui.pet_scale == 1.0
     assert json.loads(path.read_text(encoding="utf-8"))["config_version"] == 1
@@ -370,6 +370,7 @@ def test_config_round_trip_uses_exact_schema_and_contains_no_secret_fields(tmp_p
     assert loaded.status is ConfigLoadStatus.LOADED
     assert loaded.config == config
     assert set(data) == {
+        "agent",
         "config_version",
         "audio",
         "wake_word",
@@ -414,7 +415,7 @@ def test_corrupt_or_invalid_config_returns_defaults_and_preserves_source(tmp_pat
 @pytest.mark.parametrize(
     "data",
     [
-        {"config_version": 3},
+        {"config_version": 4},
         {"config_version": True},
         {"audio": {"sample_rate": 0, "channels": 1}},
         {"wake_word": {"sensitivity": 2, "debounce_sec": 1.5}},

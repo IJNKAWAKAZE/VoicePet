@@ -15,7 +15,7 @@ SUPPORTED_LLM_APIS = frozenset({"responses", "chat_completions"})
 SUPPORTED_REASONING_EFFORTS = frozenset(
     {"auto", "minimal", "low", "medium", "high", "xhigh"}
 )
-CURRENT_CONFIG_VERSION = 2
+CURRENT_CONFIG_VERSION = 3
 SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
 MAX_SYSTEM_PROMPT_CHARS = 4000
 _LOCAL_LLM_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -100,6 +100,18 @@ class LlmConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentConfig:
+    default_approval_mode: str = "auto_edit"
+    max_turn_minutes: int = 30
+
+    def __post_init__(self) -> None:
+        if self.default_approval_mode not in {"suggest", "auto_edit", "full_auto"}:
+            raise ConfigError("Agent 审批模式无效")
+        if type(self.max_turn_minutes) is not int or not 1 <= self.max_turn_minutes <= 240:
+            raise ConfigError("Agent 单轮时限必须在一到二百四十分钟之间")
+
+
+@dataclass(frozen=True, slots=True)
 class TtsConfig:
     enabled: bool = True
     manual_input_enabled: bool = False
@@ -142,6 +154,7 @@ class AppConfig:
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
@@ -153,6 +166,7 @@ class AppConfig:
             "wake_word",
             "asr",
             "llm",
+            "agent",
             "tts",
             "ui",
             "privacy",
@@ -272,6 +286,7 @@ class AppConfig:
                     "system_prompt": defaults.llm.system_prompt,
                 },
             ),
+            agent=_section(data, "agent", AgentConfig, defaults.agent),
             tts=_section(
                 data,
                 "tts",
@@ -317,11 +332,12 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("配置版本类型无效")
     if version == CURRENT_CONFIG_VERSION:
         return data
-    if version != 1:
+    if version not in (1, 2):
         raise ConfigError(f"只支持 config_version {CURRENT_CONFIG_VERSION}")
 
     migrated = dict(data)
     migrated["config_version"] = CURRENT_CONFIG_VERSION
+    migrated.setdefault("agent", asdict(AgentConfig()))
     raw_ui = migrated.get("ui")
     if raw_ui is not None and not isinstance(raw_ui, dict):
         raise ConfigError("配置分区 ui 必须是对象")

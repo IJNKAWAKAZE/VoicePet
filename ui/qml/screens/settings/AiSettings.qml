@@ -34,6 +34,7 @@ ScrollView {
         width: root.availableWidth
         spacing: 14
         Text { text: "AI 服务"; color: root.theme.text; font.pixelSize: 24; font.bold: true }
+        FieldLabel { theme: root.theme; text: "Codex Agent" }
         FieldLabel { theme: root.theme; text: "API 协议" }
         AppComboBox {
             id: apiSelector

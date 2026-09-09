@@ -9,6 +9,11 @@ Rectangle {
     signal submitRequested(string text, var attachments)
     signal stopRequested
     signal voiceInputRequested
+    signal modeRequested(string mode)
+    property string agentMode: "auto_edit"
+    property string agentModeLabel: "自动编辑"
+    property bool agentModePending: false
+    property var agentModeOptions: []
     property alias attachmentModel: attachments
     property bool menuOpen: attachmentMenu.visible
     property bool recording: false
@@ -201,6 +206,67 @@ Rectangle {
         text: "＋"
         kind: "ghost"
         onClicked: attachmentMenu.visible ? attachmentMenu.close() : attachmentMenu.open()
+    }
+
+    AppButton {
+        id: agentModeButton
+        objectName: "agentModeButton"
+        anchors.left: attachmentMenuButton.right
+        anchors.leftMargin: 4
+        anchors.verticalCenter: toolbar.verticalCenter
+        width: 92
+        height: 28
+        theme: root.theme
+        text: root.agentModePending ? root.agentModeLabel + "（下一轮）" : root.agentModeLabel
+        kind: "ghost"
+        Accessible.name: "Agent 审批模式"
+        onClicked: agentModeMenu.visible ? agentModeMenu.close() : agentModeMenu.open()
+    }
+
+    Popup {
+        id: agentModeMenu
+        x: agentModeButton.x
+        y: -height - 8
+        width: 250
+        padding: 8
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+        background: Rectangle { color: root.theme.surface; radius: 12; border.color: root.theme.border }
+        Column {
+            spacing: 2
+            Repeater {
+                model: root.agentModeOptions
+                delegate: Rectangle {
+                    required property var modelData
+                    width: 234
+                    height: 56
+                    radius: 8
+                    color: modelData.value === root.agentMode ? root.theme.surfaceAlt : "transparent"
+                    border.color: modelData.value === root.agentMode ? root.theme.focus : "transparent"
+                    objectName: "agentModeOption_" + modelData.value
+                    Accessible.name: modelData.label
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.icon
+                        color: root.theme.info
+                        font.pixelSize: 17
+                    }
+                    Column {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 38
+                        anchors.verticalCenter: parent.verticalCenter
+                        Text { text: modelData.label + (modelData.value === root.agentMode ? "  ✓" : ""); color: root.theme.text; font.pixelSize: 13 }
+                        Text { text: modelData.description; color: root.theme.textMuted; font.pixelSize: 11 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: { root.modeRequested(modelData.value); agentModeMenu.close() }
+                    }
+                }
+            }
+        }
     }
 
     Text {

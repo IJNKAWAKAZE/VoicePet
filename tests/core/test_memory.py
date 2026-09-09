@@ -24,7 +24,7 @@ def test_memory_schema_is_idempotent_and_records_are_immutable(tmp_path):
         confidence=0.8,
     )
 
-    assert store.diagnostics()["schema_version"] == 2
+    assert store.diagnostics()["schema_version"] == 3
     assert store.diagnostics()["fts5"] is True
     assert record.status is MemoryStatus.CANDIDATE
     with pytest.raises(FrozenInstanceError):
@@ -198,4 +198,3 @@ def test_memory_validates_uuid_confidence_and_text_limits(tmp_path):
     with pytest.raises(MemoryConfigurationError):
         store.create_candidate("category", "x" * 4097, str(uuid4()), 0.5)
     store.close()
-

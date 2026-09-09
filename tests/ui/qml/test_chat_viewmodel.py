@@ -93,6 +93,11 @@ def test_markdown_removes_images_and_html_but_keeps_links_as_text():
     assert "https://example.com" in safe
 
 
+def test_markdown_adds_qt_emphasis_boundaries_for_chinese_punctuation():
+    safe = sanitize_markdown("活动是**「幽影迷城」**大型活动")
+    assert safe == "活动是 **「幽影迷城」** 大型活动"
+
+
 def test_submit_rejects_blank_and_builds_streaming_pair():
     runtime = FakeRuntime()
     chat = ChatViewModel(runtime)

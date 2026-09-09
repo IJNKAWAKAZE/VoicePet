@@ -1,0 +1,106 @@
+"""核对固定 SDK 的参数和执行前动态工具回调"""
+
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
+import pytest
+
+sdk = pytest.importorskip("openai_codex")
+from openai_codex.client import CodexClient, CodexConfig
+from openai_codex.generated.v2_all import ThreadStartParams, TurnStartParams
+
+from core.agent_codex import (
+    CODEX_SDK_VERSION,
+    CodexAgentAdapter,
+    codex_thread_options,
+    codex_turn_options,
+    require_supported_sdk,
+)
+from core.agent_types import AgentApprovalMode
+
+
+def test_pinned_sdk_and_runtime():
+    from codex_cli_bin import bundled_codex_path
+    assert sdk.__version__ == CODEX_SDK_VERSION == "0.147.0"
+    assert CodexConfig().experimental_api is True
+    assert bundled_codex_path().is_file()
+    require_supported_sdk()
+
+
+@pytest.mark.parametrize("mode", list(AgentApprovalMode))
+def test_options_match_generated_protocol(mode):
+    thread = codex_thread_options(mode)
+    turn = codex_turn_options(mode)
+    ThreadStartParams.model_validate(thread)
+    TurnStartParams.model_validate({**turn, "threadId": "thread", "input": []})
+    expected_policy = "never" if mode is AgentApprovalMode.FULL_AUTO else "untrusted"
+    assert thread["approvalPolicy"] == turn["approvalPolicy"] == expected_policy
+    assert "dynamicTools" not in turn
+    assert "dynamicTools" not in thread
+    assert thread["sandbox"] == "danger-full-access"
+    assert turn["sandboxPolicy"] == {"type": "dangerFullAccess"}
+
+
+def test_auto_edit_accepts_native_file_change_but_keeps_shell_confirmation():
+    adapter = object.__new__(CodexAgentAdapter)
+    adapter._active_mode = AgentApprovalMode.AUTO_EDIT
+    adapter._interaction_callback = None
+    adapter._interaction_waiters = {}
+    assert adapter._handle_server_request("item/fileChange/requestApproval", {"itemId": "file"}) == {"decision": "accept"}
+    assert adapter._handle_server_request("item/commandExecution/requestApproval", {"command": "Set-Content -LiteralPath file.txt -Value test"}) == {"decision": "accept"}
+    assert adapter._handle_server_request("item/commandExecution/requestApproval", {"command": "Remove-Item file.txt"}) == {"decision": "decline"}
+
+
+def test_fake_server_waits_for_dynamic_tool_response(tmp_path):
+    marker = tmp_path / "completed.json"
+    server = tmp_path / "server.py"
+    server.write_text('''import json, sys
+def send(data):
+    print(json.dumps(data), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        send({"id": request["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        send({"id": request["id"], "result": {
+            "approvalPolicy": "never", "approvalsReviewer": "user", "cwd": "C:/", "model": "fake", "modelProvider": "openai",
+            "sandbox": {"type": "readOnly", "access": {"type": "fullAccess"}},
+            "thread": {"id": "thread", "sessionId": "session", "cliVersion": "0.147.0", "createdAt": 1, "updatedAt": 1, "cwd": "C:/", "ephemeral": True, "modelProvider": "openai", "preview": "", "source": "appServer", "status": {"type": "idle"}, "turns": []}}})
+    elif method == "turn/start":
+        send({"id": request["id"], "result": {"turn": {"id": "turn", "items": [], "status": "inProgress"}}})
+        send({"id": "approval", "method": "item/tool/call", "params": {"threadId": "thread", "turnId": "turn", "itemId": "item", "callId": "call", "tool": "voicepet_file_change", "arguments": {"operation": "create"}}})
+    elif request.get("id") == "approval":
+        with open(sys.argv[1], "w") as output:
+            json.dump(request["result"], output)
+        send({"method": "turn/completed", "params": {"threadId": "thread", "turn": {"id": "turn", "items": [], "status": "completed"}}})
+''', encoding="utf-8")
+    entered, release = Event(), Event()
+
+    def handler(method, params):
+        assert method == "item/tool/call"
+        assert params["tool"] == "voicepet_file_change"
+        entered.set()
+        assert release.wait(5)
+        return {"contentItems": [{"type": "inputText", "text": "已拒绝"}], "success": False}
+
+    client = CodexClient(CodexConfig(launch_args_override=(sys.executable, str(server), str(marker))), approval_handler=handler)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            def run():
+                client.start()
+                client.initialize()
+                thread = client.thread_start(codex_thread_options(AgentApprovalMode.SUGGEST))
+                turn = client.turn_start(thread.thread.id, "测试", codex_turn_options(AgentApprovalMode.SUGGEST))
+                return client.next_turn_notification(turn.turn.id)
+            result = pool.submit(run)
+            assert entered.wait(5)
+            assert not marker.exists()
+            release.set()
+            assert result.result(timeout=5).method == "turn/completed"
+            assert json.loads(marker.read_text())["success"] is False
+        finally:
+            release.set()
+            client.close()

@@ -225,6 +225,8 @@ class RuntimeServices:
     memory_context: MemoryContextConfiguration | None = None
     memory_store: MemoryStoreConfiguration | None = None
     session_archive: SessionArchiveConfiguration | None = None
+    agent_gateway: Any | None = None
+    config_store: Any | None = None
 
 
 class RuntimeHost:
@@ -318,6 +320,63 @@ class RuntimeHost:
 
     def cancel_active_turn(self) -> Future[None]:
         return self._submit(self._services.coordinator.cancel_active_turn())
+
+    def set_session_agent_mode(self, session_id: str, mode: str | None) -> Future[None]:
+        """保存会话级 Agent 模式覆盖并让下一轮读取"""
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            async def unavailable() -> None:
+                raise RuntimeHostError("Agent 当前不可用")
+            return self._submit(unavailable())
+        from .agent_types import AgentApprovalMode
+        selected = AgentApprovalMode(mode) if mode is not None else None
+        return self._submit(asyncio.to_thread(gateway.set_session_mode, session_id, selected))
+
+    def session_agent_mode(self, session_id: str) -> Future[str]:
+        """读取会话当前生效的 Agent 模式"""
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            async def unavailable() -> str:
+                raise RuntimeHostError("Agent 当前不可用")
+            return self._submit(unavailable())
+        return self._submit(
+            asyncio.to_thread(lambda: gateway.session_mode(session_id).value)
+        )
+
+    def set_global_agent_mode(self, mode: str | None) -> Future[None]:
+        """设置跨会话沿用的 Agent 模式"""
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            async def unavailable() -> None:
+                raise RuntimeHostError("Agent 当前不可用")
+            return self._submit(unavailable())
+        from .agent_types import AgentApprovalMode
+        async def update() -> None:
+            selected = None if mode is None else AgentApprovalMode(mode)
+            if selected is None:
+                gateway.reset_global_mode()
+            else:
+                gateway.set_global_mode(selected)
+            store = self._services.config_store
+            if store is not None:
+                from dataclasses import replace
+                config = store.load().config
+                store.save(replace(config, agent=replace(config.agent, default_approval_mode=(selected or gateway.global_mode()).value)))
+        return self._submit(update())
+
+    def global_agent_mode(self) -> Future[str]:
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            async def unavailable() -> str:
+                raise RuntimeHostError("Agent 当前不可用")
+            return self._submit(unavailable())
+        return self._submit(asyncio.to_thread(lambda: gateway.global_mode().value))
+
+    def resolve_agent_approval(self, approval_id: str, decision: str) -> Future[None]:
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            raise RuntimeHostError("Agent 当前不可用")
+        return self._submit(gateway.resolve_approval(approval_id, decision))
 
     def set_speech_enabled(self, enabled: bool) -> Future[None]:
         return self._submit(
@@ -726,6 +785,11 @@ class RuntimeHost:
         wake = self._services.wake_service
         if wake is not None and wake in self._started:
             await self._stop_service(wake, errors)
+        try:
+            if self._services.agent_gateway is not None:
+                await self._services.agent_gateway.close()
+        except BaseException as error:  # noqa: BLE001 关闭必须继续释放其余资源
+            errors.append(error)
         try:
             await self._services.coordinator.stop()
         except BaseException as error:  # noqa: BLE001 关闭必须继续释放其余资源

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
+from .agent_types import AgentEventType
 from .asr import AsrError
 from .audio_types import AudioError
 from .audit import AuditContext
@@ -17,6 +18,8 @@ from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .config import normalize_wake_keyword
 from .event_bus import EventBus
 from .events import (
+    AgentApprovalRequested,
+    AgentProgress,
     ApprovalRequested,
     ConversationPhase,
     CorrelationId,
@@ -198,6 +201,7 @@ class Coordinator:
         authorization_issuer: AuthorizationIssuer | None = None,
         tool_executor: ToolExecutor | None = None,
         max_tool_calls_per_turn: int = 4,
+        agent_gateway: object | None = None,
         max_turn_duration: float = 120.0,
         max_turn_tokens: int = 16_384,
         llm_model: str = "unknown",
@@ -225,6 +229,7 @@ class Coordinator:
         self._event_bus = event_bus
         self._state_machine = state_machine or ConversationStateMachine()
         self._llm_provider = llm_provider
+        self._agent_gateway = agent_gateway
         self._llm_tools = tuple(llm_tools)
         self._memory_context = memory_context
         self._session_context = session_context
@@ -886,6 +891,9 @@ class Coordinator:
             if operation is not None:
                 await self._handle_memory_operation(turn_id, operation, token)
                 return
+        if self._agent_gateway is not None:
+            await self._run_agent_turn(turn_id, text, token, attachments=self._active_attachments)
+            return
         if self._llm_provider is not None:
             history: tuple[Mapping[str, object], ...] = ()
             if self._session_context is not None:
@@ -895,6 +903,65 @@ class Coordinator:
                     self._memory_context.build_history, text
                 )
             await self._run_llm(turn_id, text, token, history=history)
+
+    async def _run_agent_turn(self, turn_id: TurnId, text: str, token: CancellationToken, *, attachments: tuple[LlmAttachment, ...] = ()) -> None:
+        """把 Agent 面向用户的文本事件接入现有聊天和语音链路"""
+        correlation_id = CorrelationId.new()
+        chunks: list[str] = []
+        try:
+            agent_attachments = tuple(
+                {"name": item.name, "path": item.path, "media_type": item.media_type, "kind": item.kind}
+                for item in attachments
+            )
+            async for event in self._agent_gateway.run_turn(
+                self._active_session_id or "default",
+                text,
+                turn_id=str(turn_id),
+                attachments=agent_attachments,
+            ):
+                if token.is_cancelled:
+                    await self._agent_gateway.cancel()
+                    return
+                if event.type is AgentEventType.TEXT_DELTA:
+                    value = str(event.payload.get("text", ""))
+                    chunks.append(value)
+                    await self._event_bus.publish(TextDelta(turn_id, correlation_id, value))
+                elif event.type is AgentEventType.COMMAND_STARTED:
+                    await self._event_bus.publish(
+                        AgentProgress(
+                            turn_id,
+                            correlation_id,
+                            str(event.payload.get("message", "Agent 正在执行操作")),
+                        )
+                    )
+                elif event.type is AgentEventType.COMMAND_COMPLETED:
+                    await self._event_bus.publish(
+                        AgentProgress(
+                            turn_id,
+                            correlation_id,
+                            str(event.payload.get("message", "操作已完成")),
+                        )
+                    )
+                if event.type is AgentEventType.APPROVAL_REQUEST:
+                    approval_id = str(event.payload.get("request_id", ""))
+                    if approval_id:
+                        raw_options = event.payload.get("options", ())
+                        options = tuple(item for item in raw_options if isinstance(item, Mapping)) if isinstance(raw_options, (list, tuple)) else ()
+                        await self._event_bus.publish(AgentApprovalRequested(turn_id, correlation_id, approval_id, str(event.payload.get("message", "Agent 请求确认")), options))
+                if event.type is AgentEventType.TURN_COMPLETED:
+                    break
+            response = "".join(chunks)
+            if response and self._session_context is not None:
+                self._session_context.add_turn(text, response)
+            if response and self._session_archive is not None:
+                await self._archive_completed_turn(turn_id, text, response, self._active_session_id, token)
+            finished = self._state_machine.reset(correlation_id)
+            if finished is not None and not self._stopped:
+                await self._event_bus.publish(finished)
+        except asyncio.CancelledError:
+            await self._agent_gateway.cancel()
+        except Exception as error:  # noqa: BLE001 Agent 失败只显示安全错误
+            await self._handle_runtime_error(turn_id, correlation_id, token, error)
 
     async def _play_wake_acknowledgement(
         self,

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import Future
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -15,12 +14,11 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     Qt,
+    QUrl,
     Signal,
     Slot,
 )
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtQml import QJSValue
 
 from core.attachments import inspect_attachment
@@ -51,6 +49,10 @@ class ChatRuntimeProtocol(Protocol):
     ) -> Future[tuple[Any, ...]]: ...
 
     def undo_memory(self, change_id: str) -> Future[bool]: ...
+
+    def session_agent_mode(self, session_id: str) -> Future[str]: ...
+
+    def global_agent_mode(self) -> Future[str]: ...
 
 
 class _RoleListModel(QAbstractListModel):
@@ -143,6 +145,7 @@ class ChatViewModel(QObject):
     voiceRecordingChanged = Signal()
     messagePlayingChanged = Signal()
     submissionAccepted = Signal()
+    agentModeChanged = Signal()
     attachmentPasted = Signal(str, str)
     _futureFinished = Signal(str, object, object)
 
@@ -159,6 +162,7 @@ class ChatViewModel(QObject):
         self._message_model = ChatMessageModel(self)
         self._session_model = SessionListModel(self)
         self._memory_changes_model = ChatMemoryChangeModel(self)
+        self._viewed_memory_changes: set[tuple[str, str]] = set()
         self._processing = False
         self._active_session_id = ""
         self._session_loading = False
@@ -171,6 +175,8 @@ class ChatViewModel(QObject):
         self._memory_action_result = ""
         self._voice_recording = False
         self._message_playing = False
+        self._agent_mode = "auto_edit"
+        self._agent_mode_pending = False
         self._futureFinished.connect(self._handle_future)
 
     @Property(QObject, constant=True)
@@ -207,6 +213,16 @@ class ChatViewModel(QObject):
 
     @Slot()
     def open_memory(self) -> None:
+        # 查看仅收起已展示的提示，实际记忆和撤销记录仍保留在记忆页面
+        for row in range(self._memory_changes_model.rowCount()):
+            change_id = self._memory_changes_model.data(
+                self._memory_changes_model.index(row), Qt.UserRole + 1
+            )
+            self._viewed_memory_changes.add((self._active_session_id, str(change_id)))
+        self._memory_changes_model.reset_items([])
+        self._memory_action_result = ""
+        self.memoryChangesChanged.emit()
+        self.memoryActionResultChanged.emit()
         self.viewMemoryRequested.emit()
 
     @Property(bool, notify=voiceRecordingChanged)
@@ -216,6 +232,69 @@ class ChatViewModel(QObject):
     @Property(bool, notify=messagePlayingChanged)
     def messagePlaying(self) -> bool:
         return self._message_playing
+
+    @Property(str, notify=agentModeChanged)
+    def agentMode(self) -> str:
+        return self._agent_mode
+
+    @Property(str, notify=agentModeChanged)
+    def agentModeLabel(self) -> str:
+        return {"suggest": "建议模式", "auto_edit": "自动编辑", "full_auto": "全自动"}.get(self._agent_mode, "自动编辑")
+
+    @Property(bool, notify=agentModeChanged)
+    def agentModePending(self) -> bool:
+        return self._agent_mode_pending
+
+    @Property("QVariantList", constant=True)
+    def agentModeOptions(self) -> list[dict[str, str]]:
+        return [
+            {"value": "suggest", "label": "建议模式", "description": "命令和文件变更逐次确认", "icon": "◉"},
+            {"value": "auto_edit", "label": "自动编辑", "description": "普通文件编辑自动执行", "icon": "✎"},
+            {"value": "full_auto", "label": "全自动", "description": "执行前不弹出 VoicePet 确认", "icon": "⚡"},
+        ]
+
+    @Slot(str)
+    def set_agent_mode(self, mode: str) -> None:
+        if mode not in {"suggest", "auto_edit", "full_auto"}:
+            self.errorOccurred.emit("Agent 模式无效")
+            return
+        setter = getattr(self._runtime, "set_global_agent_mode", None)
+        if callable(setter):
+            try:
+                self._watch("agent_mode", setter(mode))
+            except (RuntimeError, TypeError, ValueError):
+                self.errorOccurred.emit("Agent 模式切换失败")
+                return
+        self._agent_mode = mode
+        self._agent_mode_pending = self._processing
+        self.agentModeChanged.emit()
+
+    @Slot()
+    def use_default_agent_mode(self) -> None:
+        setter = getattr(self._runtime, "set_global_agent_mode", None)
+        if callable(setter):
+            self._watch("agent_mode_default", setter(None))
+
+    @Slot()
+    def load_global_agent_mode(self) -> None:
+        """应用启动后读取持久化的全局 Agent 模式"""
+        reader = getattr(self._runtime, "global_agent_mode", None)
+        if callable(reader):
+            try:
+                self._watch("agent_mode_global", reader())
+            except (RuntimeError, TypeError, ValueError):
+                self.errorOccurred.emit("Agent 模式读取失败")
+
+    def _load_agent_mode(self) -> None:
+        """切换会话后重新读取会话覆盖和应用默认值"""
+        reader = getattr(self._runtime, "session_agent_mode", None)
+        if not callable(reader) or not self._active_session_id:
+            return
+        session_id = self._active_session_id
+        try:
+            self._watch(f"agent_mode_load:{session_id}", reader(session_id))
+        except (RuntimeError, TypeError, ValueError):
+            self.errorOccurred.emit("Agent 模式读取失败")
 
     @Slot()
     def start_voice_input(self) -> None:
@@ -713,6 +792,23 @@ class ChatViewModel(QObject):
                 self._pending_switch_id = ""
             self._set_session_loading(False)
             self.refresh_sessions()
+        elif operation.startswith("agent_mode_load:"):
+            session_id = operation.split(":", 1)[1]
+            if session_id != self._active_session_id or result not in {"suggest", "auto_edit", "full_auto"}:
+                return
+            self._agent_mode = str(result)
+            self._agent_mode_pending = self._processing
+            self.agentModeChanged.emit()
+        elif operation in {"agent_mode_global", "agent_mode_default"}:
+            if operation == "agent_mode_default":
+                reader = getattr(self._runtime, "global_agent_mode", None)
+                if callable(reader):
+                    self._watch("agent_mode_global", reader())
+                return
+            if result in {"suggest", "auto_edit", "full_auto"}:
+                self._agent_mode = str(result)
+                self._agent_mode_pending = self._processing
+                self.agentModeChanged.emit()
         elif operation == "current":
             session_id = str(result or "")
             if session_id:
@@ -753,6 +849,8 @@ class ChatViewModel(QObject):
                         "undone": bool(_read(change, "undone", False)),
                     }
                     for change in tuple(result or ())
+                    if (session_id, str(_read(change, "id", "")))
+                    not in self._viewed_memory_changes
                 ]
             )
             self.memoryChangesChanged.emit()

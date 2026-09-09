@@ -55,6 +55,12 @@ def _run_frozen_smoke() -> int:
         return 3
     if not all(path.is_file() for path in required):
         return 4
+    try:
+        from codex_cli_bin import bundled_codex_path
+        if not bundled_codex_path().is_file():
+            return 6
+    except (ImportError, OSError):
+        return 6
     data_root = Path(local_app_data) / "VoicePet"
     try:
         data_root.mkdir(parents=True, exist_ok=True)
@@ -69,6 +75,43 @@ def _run_worker() -> int:
     return run_worker()
 
 
+def _run_agent_worker() -> int:
+    """进入独立 Agent Worker 进程，避免加载 Qt 主线程"""
+
+    import asyncio
+    import json
+    import os
+
+    from core.agent_codex import (
+        AgentCodexCompatibilityError,
+        CodexAgentAdapter,
+        require_supported_sdk,
+    )
+    from core.agent_worker import run_agent_worker
+
+    try:
+        require_supported_sdk()
+    except AgentCodexCompatibilityError:
+        return 2
+    try:
+        # 冻结版无控制台时 sys.stdin 为空，直接使用父进程传入的匿名管道
+        input_stream = os.fdopen(os.dup(0), "rb", buffering=0)
+        output_stream = os.fdopen(os.dup(1), "wb", buffering=0)
+        bootstrap = json.loads(input_stream.readline(1024 * 1024 + 1))
+        adapter = CodexAgentAdapter(
+            api_key=bootstrap["api_key"],
+            data_directory=bootstrap["data_directory"],
+            model=bootstrap["model"],
+            base_url=bootstrap.get("base_url", ""),
+            reasoning_effort=bootstrap.get("reasoning_effort", "low"),
+            system_prompt=bootstrap.get("system_prompt", ""),
+        )
+        asyncio.run(run_agent_worker(lambda: adapter, input_stream, output_stream))
+        return 0
+    except (KeyError, TypeError, ValueError, AgentCodexCompatibilityError):
+        return 2
+
+
 def _run_memory_reset() -> int:
     from core.memory_reset import reset_memory_entry
 
@@ -80,6 +123,7 @@ def main(
     *,
     ui_entry: Callable[[bool], int] = _run_ui,
     worker_entry: Callable[[], int] = _run_worker,
+    agent_worker_entry: Callable[[], int] = _run_agent_worker,
     reset_entry: Callable[[], int] = _run_memory_reset,
 ) -> int:
     """调用冻结支持并按互斥模式分发进程职责"""
@@ -88,11 +132,14 @@ def main(
     parser = argparse.ArgumentParser(prog="VoicePet")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--tool-worker", action="store_true")
+    modes.add_argument("--agent-worker", action="store_true")
     modes.add_argument("--smoke-test", action="store_true")
     modes.add_argument("--reset-test-memory", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.tool_worker:
         return worker_entry()
+    if arguments.agent_worker:
+        return agent_worker_entry()
     if arguments.reset_test_memory:
         return reset_entry()
     return ui_entry(arguments.smoke_test)

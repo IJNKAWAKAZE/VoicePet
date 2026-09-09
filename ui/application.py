@@ -15,12 +15,14 @@ from core.config import ConfigError, ConfigStore, default_config_path
 from core.credentials import CredentialError, DpapiCredentialStore
 from core.event_bus import EventBus
 from core.events import (
+    AgentApprovalRequested,
+    AgentProgress,
     ApprovalRequested,
     MemoryChanged,
     MemoryMaintenanceChanged,
     MemoryResultReady,
-    RuntimeErrorEvent,
     RecordingStarted,
+    RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
     TextDelta,
@@ -55,6 +57,8 @@ from .viewmodels import (
 from .window_coordinator import WindowCoordinator
 
 _RUNTIME_EVENT_TYPES = (
+    AgentApprovalRequested,
+    AgentProgress,
     StateChanged,
     RecordingStarted,
     TranscriptReady,

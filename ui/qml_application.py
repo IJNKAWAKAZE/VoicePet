@@ -9,6 +9,8 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QJSValue
 
 from core.events import (
+    AgentApprovalRequested,
+    AgentProgress,
     ApprovalRequested,
     ConversationPhase,
     MemoryChanged,
@@ -16,8 +18,8 @@ from core.events import (
     MemoryResultReady,
     RecordingStarted,
     RuntimeErrorEvent,
-    StateChanged,
     SpeakRequested,
+    StateChanged,
     TextDelta,
     ToolResultReady,
     TranscriptReady,
@@ -34,7 +36,11 @@ from .qml_resources import QmlResourceError
 from .qml_runtime import QmlRuntime
 from .viewmodels.app_shell import AppShellViewModel
 from .viewmodels.chat import ChatViewModel
-from .viewmodels.dialogs import ConfirmationRequest, DialogCoordinator
+from .viewmodels.dialogs import (
+    AgentInteractionRequest,
+    ConfirmationRequest,
+    DialogCoordinator,
+)
 from .viewmodels.memories import MemoryViewModel
 from .viewmodels.pets import PetViewModel
 from .viewmodels.settings import SettingsViewModel
@@ -55,6 +61,8 @@ class QmlRuntimeHostProtocol(Protocol):
     def approve(self, mode: ConfirmationMode) -> Any: ...
 
     def reject(self) -> Any: ...
+
+    def resolve_agent_approval(self, approval_id: str, decision: str) -> Any: ...
 
     def close(self) -> None: ...
 
@@ -131,6 +139,7 @@ class QmlApplicationController(QObject):
         app_shell.showMainRequested.connect(self._show_main_window)
         app_shell.hideMainRequested.connect(self._hide_main_window)
         chat.errorOccurred.connect(lambda message: self._dialogs.toast(message, "warning"))
+        self._dialogs.agentInteractionResolved.connect(self._resolve_agent_interaction)
         chat.voiceRecordingChanged.connect(self._sync_manual_voice_state)
         chat.activeSessionIdChanged.connect(self._reset_pet_speech)
         chat.processingChanged.connect(self._reset_speech_on_submission)
@@ -173,6 +182,19 @@ class QmlApplicationController(QObject):
     def is_closed(self) -> bool:
         return self._closed
 
+    @Slot(str, object)
+    def _resolve_agent_interaction(self, approval_id: str, result: object) -> None:
+        """把 Agent 窗口的选择回传到 Worker"""
+        if self._runtime_host is None:
+            return
+        decision = str(result)
+        if decision not in {"accept", "decline", "cancel"}:
+            decision = "decline"
+        try:
+            self._runtime_host.resolve_agent_approval(approval_id, decision)
+        except (RuntimeError, ValueError):
+            self._dialogs.toast("Agent 审批回传失败", "warning")
+
     def start(self) -> None:
         self._qml_runtime.load()
         roots = self._qml_runtime.root_objects
@@ -204,6 +226,7 @@ class QmlApplicationController(QObject):
                 enable_menu(True)
         if self._runtime_host is not None:
             self._runtime_host.start()
+        self._chat.load_global_agent_mode()
         self._chat.refresh_sessions()
         self._chat.restore_current_session()
         if self._pets is not None:
@@ -715,6 +738,15 @@ class QmlApplicationController(QObject):
                 self._memories.refresh_summaries()
             return
         if isinstance(event, ToolResultReady):
+            return
+        if isinstance(event, AgentProgress):
+            # 执行状态只显示在桌宠气泡，避免污染最终聊天回复
+            self._set_pet_speech(event.message)
+            return
+        if isinstance(event, AgentApprovalRequested):
+            self._dialogs.request_agent_interaction(
+                AgentInteractionRequest(event.approval_id, "Agent 请求确认", event.summary, options=event.options)
+            )
             return
         if isinstance(event, RuntimeErrorEvent):
             self._dialogs.set_page_error("chat", event.safe_message)

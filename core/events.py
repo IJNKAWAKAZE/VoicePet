@@ -199,12 +199,32 @@ class TextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentProgress:
+    """Agent 工具执行过程的可读状态，不写入聊天记录"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalRequested:
     turn_id: TurnId
     correlation_id: CorrelationId
     tool_call_id: str
     summary: str
     risk: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentApprovalRequested:
+    """Codex Agent 在执行前等待用户选择"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    approval_id: str
+    summary: str
+    options: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

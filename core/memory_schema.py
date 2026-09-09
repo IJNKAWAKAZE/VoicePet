@@ -4,7 +4,50 @@ import sqlite3
 from pathlib import Path
 
 MEMORY_COMPONENT = "memory_system"
-MEMORY_SCHEMA_VERSION = 2
+MEMORY_SCHEMA_VERSION = 3
+
+_AGENT_DDL = (
+    """
+    CREATE TABLE agent_session_bindings(
+        session_id TEXT PRIMARY KEY,
+        codex_thread_id TEXT,
+        runtime_id TEXT,
+        approval_mode_override TEXT CHECK(approval_mode_override IN ('suggest','auto_edit','full_auto')),
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE agent_turns(
+        turn_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        codex_turn_id TEXT,
+        approval_mode TEXT NOT NULL CHECK(approval_mode IN ('suggest','auto_edit','full_auto')),
+        status TEXT NOT NULL CHECK(status IN ('running','completed','cancelled','failed','outcome_unknown')),
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        safe_summary TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE agent_events(
+        turn_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK(seq >= 0),
+        event_type TEXT NOT NULL,
+        safe_summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(turn_id, seq)
+    )
+    """,
+    "CREATE INDEX idx_agent_turns_session ON agent_turns(session_id)",
+)
+
+_AGENT_COLUMNS = {
+    "agent_session_bindings": {"session_id", "codex_thread_id", "runtime_id", "approval_mode_override", "updated_at"},
+    "agent_turns": {"turn_id", "session_id", "codex_turn_id", "approval_mode", "status", "started_at", "completed_at", "input_tokens", "output_tokens", "safe_summary"},
+    "agent_events": {"turn_id", "seq", "event_type", "safe_summary", "created_at"},
+}
 
 _TARGET_TABLES = (
     "memories",
@@ -19,6 +62,7 @@ _TARGET_TABLES = (
     "summary_suppressions",
     "memory_jobs",
     "memory_progress",
+    *_AGENT_COLUMNS,
 )
 
 _DDL = (
@@ -264,6 +308,17 @@ def _ensure_memory_schema(connection: sqlite3.Connection) -> None:
     target_exists = any(_table_exists(connection, table_name) for table_name in _TARGET_TABLES)
     if component_version is None and target_exists:
         raise MemorySchemaError("检测到旧记忆结构，请显式执行一次性测试数据重置")
+    if component_version == 2:
+        # 先核对旧结构再事务迁移，旧会话和记忆正文保持原样
+        _validate_schema(connection, include_agent=False)
+        for statement in _AGENT_DDL:
+            connection.execute(statement)
+        connection.execute(
+            "UPDATE voicepet_components SET version=? WHERE name=?",
+            (MEMORY_SCHEMA_VERSION, MEMORY_COMPONENT),
+        )
+        _validate_schema(connection)
+        return
     if component_version is not None and component_version != MEMORY_SCHEMA_VERSION:
         raise MemorySchemaError("记忆结构组件版本未知")
     if component_version == MEMORY_SCHEMA_VERSION:
@@ -287,7 +342,7 @@ def _component_version(connection: sqlite3.Connection) -> int | None:
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
-    for statement in _DDL:
+    for statement in (*_DDL, *_AGENT_DDL):
         connection.execute(statement)
     connection.execute(
         "INSERT INTO voicepet_components(name, version) VALUES (?, ?) "
@@ -296,8 +351,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     )
 
 
-def _validate_schema(connection: sqlite3.Connection) -> None:
-    for table_name, required_columns in _REQUIRED_COLUMNS.items():
+def _validate_schema(connection: sqlite3.Connection, *, include_agent: bool = True) -> None:
+    required = {**_REQUIRED_COLUMNS, **(_AGENT_COLUMNS if include_agent else {})}
+    for table_name, required_columns in required.items():
         if not _table_exists(connection, table_name):
             raise MemorySchemaError("记忆结构缺少必要数据表")
         columns = {

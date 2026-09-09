@@ -243,6 +243,21 @@ class ChatRuntime:
         return completed(True)
 
 
+def test_chat_open_memory_acknowledges_prompt_without_deleting_record(qapp):
+    runtime = ChatRuntime()
+    chat = ChatViewModel(runtime)
+    chat.set_active_session_for_memory("session-1")
+    runtime.change_futures["session-1"].set_result(
+        (Change("change-1", "m1", "session-1", "t1", "create", 1, datetime.now(UTC)),)
+    )
+    qapp.processEvents()
+
+    chat.open_memory()
+
+    assert chat.memoryChangeCount == 0
+    assert chat.memoryChangesModel.rowCount() == 0
+
+
 def test_chat_discards_late_other_session_changes_without_touching_stream(qapp):
     runtime = ChatRuntime()
     chat = ChatViewModel(runtime)

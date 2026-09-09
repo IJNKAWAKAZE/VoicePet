@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dynamic_libs
 
 root = Path(SPEC).resolve().parent
 datas = [
@@ -34,6 +34,11 @@ hiddenimports = [
     "pythoncom",
     "pywintypes",
 ]
+for package in ("openai_codex", "codex_cli_bin"):
+    package_datas, package_binaries, package_hidden = collect_all(package)
+    datas.extend(package_datas)
+    binaries.extend(package_binaries)
+    hiddenimports.extend(package_hidden)
 
 analysis = Analysis(
     [str(root / "app.py")],

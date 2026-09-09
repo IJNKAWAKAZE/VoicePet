@@ -9,12 +9,16 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .agent_gateway import AgentGateway
+from .agent_process import AgentWorkerProcessManager
+from .agent_store import AgentStore
+from .agent_types import AgentApprovalMode
 from .asr import FasterWhisperTranscriptAdapter, project_asr_directory
 from .audio_input import AudioCaptureService, SoundDeviceInputBackend
 from .audio_session import VadAudioSession
 from .audio_types import AudioFormat
 from .audit import AuditStore
-from .config import AppConfig, is_local_llm_base_url
+from .config import AppConfig, ConfigStore, is_local_llm_base_url
 from .coordinator import Coordinator
 from .diagnostic_probes import probe_asr, probe_llm, probe_pet, probe_tts
 from .diagnostics import (
@@ -167,6 +171,28 @@ def build_default_runtime(
         model_directory=project_asr_directory(root, config.asr.model),
     )
     credential = api_key.strip() if isinstance(api_key, str) else ""
+    agent_gateway = None
+    agent_manager = None
+    # 配置凭据后统一使用 Codex Agent 处理对话
+    if credential:
+        agent_store = AgentStore(data_directory / "assistant.db")
+        agent_manager = AgentWorkerProcessManager(
+            api_key=credential,
+            data_directory=data_directory / "codex",
+            model=config.llm.model,
+            base_url=config.llm.base_url,
+            reasoning_effort=config.llm.reasoning_effort,
+            system_prompt=llm_instructions,
+        )
+        async def agent_client_factory():
+            assert agent_manager is not None
+            return await agent_manager.start()
+        agent_gateway = AgentGateway(
+            agent_client_factory,
+            agent_store,
+            default_mode=AgentApprovalMode(config.agent.default_approval_mode),
+        )
+    credential = api_key.strip() if isinstance(api_key, str) else ""
     local_without_key = bool(config.llm.base_url) and is_local_llm_base_url(
         config.llm.base_url
     )
@@ -237,6 +263,7 @@ def build_default_runtime(
         policy_engine=policy,
         authorization_issuer=AuthorizationIssuer(secret),
         tool_executor=worker,
+        agent_gateway=agent_gateway,
     )
     memory_jobs = MemoryJobStore(data_directory / "assistant.db")
     scheduler = MemoryScheduler(
@@ -375,4 +402,6 @@ def build_default_runtime(
         memory_context=memory_context,
         memory_store=memory_store,
         session_archive=session_archive,
+        agent_gateway=agent_gateway,
+        config_store=ConfigStore(root / "config.json"),
     )

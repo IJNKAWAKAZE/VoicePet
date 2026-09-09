@@ -181,12 +181,17 @@ Item {
         anchors.margins: 24
         theme: root.theme
         processing: root.chat.processing
+        agentMode: root.chat.agentMode
+        agentModeLabel: root.chat.agentModeLabel
+        agentModePending: root.chat.agentModePending
+        agentModeOptions: root.chat.agentModeOptions
         enabled: !root.chat.sessionLoading
         onSubmitRequested: (text, attachments) => root.chat.submit(text, attachments)
         onStopRequested: root.chat.stop_generation()
         onVoiceInputRequested: root.chat.start_voice_input()
         recording: root.chat.voiceRecording
         pasteAttachments: () => root.chat.paste_attachments()
+        onModeRequested: mode => root.chat.set_agent_mode(mode)
     }
 
     Connections {

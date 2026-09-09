@@ -28,7 +28,7 @@ def test_memory_and_archive_stores_share_schema_in_either_open_order(tmp_path, f
         for row in connection.execute("PRAGMA table_info(short_term_summaries)")
     }
 
-    assert component == (2,)
+    assert component == (3,)
     assert {"session_id", "source_turn_ids_json", "decisions_json"} <= columns
     connection.close()
     second_store.close()

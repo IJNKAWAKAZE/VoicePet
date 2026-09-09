@@ -16,7 +16,7 @@ VoicePet 是一个面向 Windows 的桌面语音助手。它以桌宠形式常�
 - 本地短期会话、长期记忆和可控的数据保留策略
 - 系统信息查询、文件移动及撤销等受限工具
 - 敏感操作确认、操作审计和脱敏诊断包
-- API Key 使用 Windows DPAPI 加密保存
+- API Key 使用 Windows DPAPI 加密保存`r`n- 可选的 Codex Agent Worker，支持会话线程恢复和三档执行模式
 - 唤醒监听异常自动恢复和静音转写幻觉过滤
 
 ## 运行环境
@@ -40,7 +40,7 @@ Set-Location VoicePet
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[audio,asr,wake,llm,tts,tools,ui,build]"
+python -m pip install -e ".[audio,asr,wake,llm,tts,tools,ui,agent,build]"
 
 python app.py
 ```
@@ -53,6 +53,10 @@ python app.py
 4. 保存需要重启才能生效的设置并重新启动 VoicePet
 
 默认唤醒词是“你好，小蓝”。也可以从托盘菜单选择“开始聆听”，无需使用唤醒词。托盘中的“手动输入”会打开常驻聊天窗口，文字和语音消息都进入当前会话。
+
+Codex Agent 使用官方 OpenAI API Key，密钥仍由 Windows DPAPI 加密保存，不支持 ChatGPT OAuth。设置页可以启用 Agent 并选择默认模式，聊天输入框可以为当前会话覆盖模式：建议模式逐次确认，自动编辑自动接受普通文本创建和补丁，全自动使用完整访问并跳过 VoicePet 二次确认。模式切换在下一轮生效，Windows 用户权限和 UAC 仍然有效。
+
+Agent 运行数据保存在 %LOCALAPPDATA%\\VoicePet\\data\\codex。Worker 是独立进程，取消时会尝试关闭受管理的命令进程树；已经完成的外部写入不会自动撤销。锁定 runtime 尚未证明执行前审批能力时，建议模式和自动编辑会显示不可用，避免误把全自动行为当成逐次审批。
 
 在“设置 → 语音”中，如果已启用中文唤醒但缺少模型，开关下方会持续提醒，并提供手动下载按钮。进入页面、开启开关及下载完成后会检查本地模型；不会因此自动下载或弹窗。`models/wake` 仅在实际下载或安装时创建，已有空目录不代表模型已下载。
 
@@ -136,3 +140,4 @@ dist\VoicePet\VoicePet.exe
 ## 许可证
 
 本仓库目前尚未添加许可证文件。在许可证明确之前，默认保留所有权利。
+
