@@ -10,6 +10,26 @@ from core.session_archive import SessionArchiveError, SessionArchiveStore
 NOW = datetime(2026, 9, 6, 12, tzinfo=UTC)
 
 
+def test_unmatched_recall_keeps_only_valid_unconflicted_confirmed_facts(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db", clock=lambda: NOW)
+    try:
+        valid = save_memory(store, "周末喜欢观鸟", fact_key="hobby")
+        save_memory(store, "曾经养鱼", expires_at=NOW-timedelta(seconds=1))
+        deleted = save_memory(store, "已经删除的资料")
+        store.delete(deleted.id)
+        store.create_candidate("profile", "尚未确认的资料", str(uuid4()), 0.5)
+        save_memory(store, "称呼小王", fact_key="user.name", value="小王")
+        save_memory(store, "称呼小李", fact_key="user.name", value="小李")
+        save_memory(store, "尚有争议的资料", fact_key="custom.fact", value="甲")
+        conflict = save_memory(store, "争议的另一条资料", fact_key="custom.fact", value="乙")
+        store._connection.execute("UPDATE memories SET status='conflicted' WHERE id=?", (conflict.id,))
+        assert store.recall_related((("继续", 3),), include_unmatched=True) == (valid,)
+        assert store.recall_related((("继续", 3),), include_unmatched=True,
+                                    exclude_source_ids=(valid.source_turn_id,)) == ()
+    finally:
+        store.close()
+
+
 def save_memory(store, content, *, fact_key="user.interest", source_turn_id=None,
                 expires_at=None, value=None):
     return store.create_confirmed(

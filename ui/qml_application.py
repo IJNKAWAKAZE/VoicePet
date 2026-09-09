@@ -694,9 +694,16 @@ class QmlApplicationController(QObject):
                 self._set_pet_speech("我在听…")
             return
         if isinstance(event, SpeakRequested):
+            if event.turn_id != self._phase_turn_id:
+                return
             # 唤醒应答播放期间展示与语音一致的简短气泡
-            if event.text == "我在，请说" and event.turn_id == self._phase_turn_id:
+            if self._phase is ConversationPhase.LISTENING and event.text == "我在，请说":
                 self._set_pet_speech("我在")
+            elif self._phase is ConversationPhase.SPEAKING:
+                # 回复播报保留完整正文；历史重播没有 TextDelta，用播报文本填充气泡。
+                if not self._speech_text:
+                    self._speech_text = event.text
+                self._set_pet_speech(self._speech_text)
             return
         if isinstance(event, TranscriptReady):
             self._chat.append_user_message(event.text)

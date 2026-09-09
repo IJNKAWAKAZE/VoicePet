@@ -35,6 +35,24 @@ class TurnClient:
 
 
 @pytest.mark.anyio
+async def test_context_survives_worker_request_serialization(tmp_path):
+    from core.agent_types import AgentTurnRequest
+
+    client = TurnClient()
+
+    async def factory():
+        return client
+
+    store = AgentStore(tmp_path / "agent.db")
+    gateway = AgentGateway(factory, store)
+    _ = [event async for event in gateway.run_turn("one", "我在哪个城市？", context="用户事实：我住在杭州")]
+    request = AgentTurnRequest.from_mapping(client.requests[0].to_mapping())
+    assert request.input == "我在哪个城市？"
+    assert request.context == "用户事实：我住在杭州"
+    assert "杭州" not in repr(request)
+
+
+@pytest.mark.anyio
 async def test_terminal_event_releases_turn_before_consumer_stops(tmp_path):
     store = AgentStore(tmp_path / "agent.db")
     client = TurnClient()

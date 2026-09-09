@@ -29,6 +29,8 @@ class Store:
         ("wake_word", "sensitivity", "0.7", 0.7),
         ("privacy", "summary_retention_days", "14", 14),
         ("privacy", "chat_retention_days", "21", 21),
+        ("privacy", "summary_retention_days", 'Number("14")', 14),
+        ("privacy", "chat_retention_days", 'Number("21")', 21),
         ("privacy", "auto_memory_enabled", "false", False),
         ("privacy", "chat_history_enabled", "false", False),
     ],

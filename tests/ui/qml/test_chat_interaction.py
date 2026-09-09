@@ -2,8 +2,8 @@ from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QObject, QPoint, QPointF, Qt, QUrl, QMimeData
-from PySide6.QtGui import QGuiApplication, QWheelEvent, QImage
+from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QGuiApplication, QImage, QWheelEvent
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtTest import QSignalSpy, QTest
 
@@ -157,6 +157,30 @@ def test_streaming_reply_follows_tail_after_wrapping(history_window):
     assert messages.property("atYEnd")
 
 
+@pytest.mark.parametrize("entry", ["text", "voice", "composer_voice"])
+def test_new_user_input_returns_from_history_to_latest_message(history_window, entry):
+    root, chat, _, _ = history_window
+    for index in range(18):
+        chat.append_user_message(f"历史问题 {index}")
+        chat.append_assistant_delta("历史回答。" * 30)
+        chat.finish_assistant()
+    QTest.qWait(60)
+    messages = root.findChild(QQuickItem, "chatMessageList")
+    messages.setProperty("followTail", False)
+    messages.positionViewAtBeginning()
+    QTest.qWait(30)
+    assert not messages.property("atYEnd")
+    if entry == "text":
+        chat.submit("新的文字问题")
+    elif entry == "voice":
+        chat.append_user_message("刚刚说出的语音问题")
+    else:
+        chat.start_voice_input()
+    QTest.qWait(80)
+    assert messages.property("atYEnd")
+    assert messages.property("followTail")
+
+
 def test_empty_streaming_placeholder_does_not_render_a_blank_bubble(history_window):
     root, chat, _, _ = history_window
     chat.submit("只测试占位消息")
@@ -211,6 +235,78 @@ def test_voice_append_keeps_draft_and_moves_cursor_to_end(history_window):
     assert editor.property("text") == "原有文字\n第一段语音 第二段语音"
     assert editor.property("cursorPosition") == editor.property("length")
     assert editor.property("activeFocus")
+
+
+@pytest.mark.parametrize("keyboard", [False, True])
+def test_sending_voice_draft_clears_editor_after_acceptance(history_window, keyboard):
+    root, chat, _, _ = history_window
+    editor = root.findChild(QQuickItem, "composerText")
+    chat.transcriptReady.emit("语音输入的文字")
+    assert editor.property("text") == "语音输入的文字"
+    if keyboard:
+        QTest.keyClick(root, Qt.Key_Return)
+    else:
+        button = root.findChild(QQuickItem, "composerSendButton")
+        QTest.mouseClick(root, Qt.LeftButton, pos=button.mapToScene(QPoint(10, 10)).toPoint())
+    QTest.qWait(30)
+    assert editor.property("text") == ""
+
+
+@pytest.mark.parametrize("kind", ["image", "file"])
+def test_attachment_leaves_a_full_visible_line_for_the_draft(history_window, tmp_path, kind):
+    root, _, _, _ = history_window
+    composer = root.findChild(QQuickItem, "chatComposer")
+    editor = root.findChild(QQuickItem, "composerText")
+    scroll = root.findChild(QQuickItem, "composerScroll")
+    toolbar = root.findChild(QQuickItem, "composerToolbar")
+    composer.addAttachment(QUrl.fromLocalFile(str(tmp_path / "attachment.png")), kind)
+    composer.setDraftText("这个附件是什么？")
+    QTest.qWait(30)
+    assert scroll.height() >= editor.property("cursorRectangle").height() + editor.property("topPadding") + editor.property("bottomPadding")
+    assert scroll.mapToScene(QPointF(0, scroll.height())).y() <= toolbar.mapToScene(QPointF(0, 0)).y()
+
+
+def test_long_draft_has_scrollbar_and_cursor_can_reach_both_ends(history_window):
+    root, _, _, _ = history_window
+    composer = root.findChild(QQuickItem, "chatComposer")
+    editor = root.findChild(QQuickItem, "composerText")
+    scroll = root.findChild(QQuickItem, "composerScroll")
+    bar = root.findChild(QQuickItem, "composerScrollBar")
+    draft = "多行草稿，需要能够上下查看。\n" * 50
+    composer.setDraftText(draft)
+    QTest.qWait(30)
+    flickable = scroll.property("contentItem")
+    assert bar.property("visible")
+    assert bar.property("size") < 1
+    assert flickable.property("contentY") > 0
+    assert scroll.height() <= 140
+    QTest.keyClick(root, Qt.Key_Home, Qt.ControlModifier)
+    QTest.qWait(30)
+    assert editor.property("cursorPosition") == 0
+    assert flickable.property("contentY") <= 1
+    QTest.keyClick(root, Qt.Key_End, Qt.ControlModifier)
+    QTest.qWait(30)
+    assert editor.property("cursorPosition") == len(draft)
+    assert flickable.property("contentY") > 0
+
+
+def test_busy_enter_does_not_insert_newline_and_ready_enter_sends(history_window):
+    root, chat, _, _ = history_window
+    composer = root.findChild(QQuickItem, "chatComposer")
+    editor = root.findChild(QQuickItem, "composerText")
+    sent = QSignalSpy(composer.submitRequested)
+    chat.begin_turn()
+    composer.setDraftText("等待发送的文字")
+    QTest.keyClick(root, Qt.Key_Return)
+    assert editor.property("text") == "等待发送的文字"
+    assert sent.count() == 0
+    QTest.keyClick(root, Qt.Key_Return, Qt.ShiftModifier)
+    assert editor.property("text") == "等待发送的文字\n"
+    chat.finish_assistant()
+    QTest.keyClick(root, Qt.Key_Return)
+    QTest.qWait(30)
+    assert sent.count() == 1
+    assert editor.property("text") == ""
 
 
 def test_qml_attachment_payload_is_plain_mapping_and_can_be_submitted(history_window, tmp_path):

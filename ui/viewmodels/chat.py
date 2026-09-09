@@ -145,6 +145,7 @@ class ChatViewModel(QObject):
     voiceRecordingChanged = Signal()
     messagePlayingChanged = Signal()
     submissionAccepted = Signal()
+    scrollToLatestRequested = Signal()
     agentModeChanged = Signal()
     attachmentPasted = Signal(str, str)
     _futureFinished = Signal(str, object, object)
@@ -309,6 +310,7 @@ class ChatViewModel(QObject):
         try:
             self._voice_recording = True
             self.voiceRecordingChanged.emit()
+            self.scrollToLatestRequested.emit()
             self._watch("voice_input", starter())
         except (RuntimeError, ValueError, TypeError):
             self._voice_recording = False
@@ -467,6 +469,7 @@ class ChatViewModel(QObject):
             attachments=_attachment_view_items(normalized_attachments),
         )
         self._append_message("assistant", "", "streaming")
+        self.scrollToLatestRequested.emit()
         self._set_processing(True)
         try:
             try:
@@ -499,6 +502,7 @@ class ChatViewModel(QObject):
     def append_user_message(self, text: str) -> None:
         if isinstance(text, str) and text.strip():
             self._append_message("user", text.strip(), "complete")
+            self.scrollToLatestRequested.emit()
 
     @Slot(str)
     def append_assistant_delta(self, text: str) -> None:

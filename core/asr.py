@@ -7,10 +7,18 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .cancellation import CancellationToken
+
+
+@lru_cache(maxsize=1)
+def _simplified_converter():
+    from opencc import OpenCC
+
+    return OpenCC("t2s")
 
 _SILENCE_HALLUCINATION_PATTERNS = (
     re.compile(r"(?i)^by\s*[\w\u3400-\u9fff·._-]{1,32}[。.!！]?$"),
@@ -371,6 +379,8 @@ class FasterWhisperTranscriptAdapter:
             and not self._is_silence_hallucination(segment.text.strip())
         ]
         text = " ".join(parts).strip()
+        if text:
+            text = _simplified_converter().convert(text)
         if self._is_silence_hallucination(text):
             return ""
         return text

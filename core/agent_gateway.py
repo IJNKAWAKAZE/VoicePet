@@ -20,7 +20,7 @@ class AgentGateway:
             self._client=await self._client_factory()
             self._capabilities=await self._client.initialize()
         return self._capabilities
-    async def run_turn(self, session_id:str, text:str, *, mode:AgentApprovalMode|None=None, thread_id:str|None=None, turn_id:str|None=None, attachments=())->AsyncIterator[AgentEvent]:
+    async def run_turn(self, session_id:str, text:str, *, mode:AgentApprovalMode|None=None, thread_id:str|None=None, turn_id:str|None=None, attachments=(), context:str="")->AsyncIterator[AgentEvent]:
         if self._active_turn is not None: raise AgentGatewayError("已有 Agent 轮次运行")
         chosen=mode or self._global_mode; current=turn_id or uuid4().hex
         if thread_id is None:
@@ -28,7 +28,7 @@ class AgentGateway:
             thread_id = binding.codex_thread_id if binding else None
         await self.initialize()
         # 轮次使用全局模式快照并复用当前会话的原生线程
-        request=AgentTurnRequest(session_id,thread_id,current,text,chosen,attachments=attachments); self._store.start_turn(current,session_id,chosen); self._active_turn=current
+        request=AgentTurnRequest(session_id,thread_id,current,text,chosen,attachments=attachments,context=context); self._store.start_turn(current,session_id,chosen); self._active_turn=current
         try:
             if self._client is None: await self.initialize()
             assert self._client is not None; await self._client.start_turn(request)
@@ -48,8 +48,11 @@ class AgentGateway:
                 if terminal:
                     break
         except asyncio.CancelledError:
-            if self._client is not None: await self._client.cancel_turn(current)
-            self._store.finish_turn(current,"cancelled"); raise
+            try:
+                if self._client is not None: await self._client.cancel_turn(current)
+            finally:
+                self._store.finish_turn(current,"cancelled")
+            raise
         except Exception:
             self._store.finish_turn(current,"outcome_unknown"); raise
         finally:

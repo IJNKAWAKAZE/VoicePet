@@ -350,6 +350,10 @@ class SettingsViewModel(QObject):
             self._set_error(f"{section}.{field}", "设置字段不存在")
             return
         self._last_field = f"{section}.{field}"
+        # QML Number(text) 经 QVariant 传入时可能是 double；只接受精确整数。
+        default_value = AppConfig().to_dict()[section][field]
+        if type(default_value) is int and type(value) is float and value.is_integer():
+            value = int(value)
         if section == "ui" and field in self._IMMEDIATE_UI_FIELDS:
             self._save_immediate(field, value)
             return

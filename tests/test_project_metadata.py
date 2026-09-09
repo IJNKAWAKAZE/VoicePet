@@ -16,6 +16,7 @@ def test_asr_optional_dependencies_are_pinned_to_compatible_ranges():
 
     assert metadata["project"]["optional-dependencies"]["asr"] == [
         "faster-whisper>=1.2.1,<2",
+        "opencc-python-reimplemented>=0.1.7,<0.2",
         "numpy>=1.26,<3",
     ]
 

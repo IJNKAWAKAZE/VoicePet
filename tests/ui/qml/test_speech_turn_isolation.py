@@ -7,6 +7,8 @@ from test_qml_application import build_controller, completed
 from core.events import (
     ConversationPhase,
     CorrelationId,
+    RecordingStarted,
+    SpeakRequested,
     StateChanged,
     TextDelta,
     TurnId,
@@ -103,6 +105,57 @@ def test_same_turn_phase_change_keeps_streaming_text(speech_app):
     ))
     controller.handle_runtime_event(TextDelta(turn, correlation, "第二段"))
     assert pet.property("speech") == "第一段第二段"
+
+
+def test_history_playback_displays_spoken_text_and_keeps_it_after_completion(speech_app):
+    controller, _, chat, pet = speech_app
+    reply(controller, "上一轮回复")
+    turn, correlation = TurnId.new(), CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.SYNTHESIZING,
+    ))
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.SYNTHESIZING, ConversationPhase.SPEAKING,
+    ))
+    controller.handle_runtime_event(SpeakRequested(turn, correlation, "这条聊天记录正在播放"))
+    assert pet.property("speech") == "这条聊天记录正在播放"
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.SPEAKING, ConversationPhase.IDLE,
+    ))
+    assert pet.property("speech") == "这条聊天记录正在播放"
+    assert chat.messageModel.rowCount() == 1
+
+
+def test_reply_playback_keeps_full_reply_and_ignores_stale_recording(speech_app):
+    controller, _, _, pet = speech_app
+    turn, correlation = TurnId.new(), CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.THINKING,
+    ))
+    controller.handle_runtime_event(TextDelta(turn, correlation, "第一句。第二句。"))
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.THINKING, ConversationPhase.SYNTHESIZING,
+    ))
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.SYNTHESIZING, ConversationPhase.SPEAKING,
+    ))
+    controller.handle_runtime_event(SpeakRequested(turn, correlation, "第一句。"))
+    controller.handle_runtime_event(RecordingStarted(turn, correlation))
+    controller.handle_runtime_event(SpeakRequested(TurnId.new(), correlation, "旧轮次提示"))
+    assert pet.property("speech") == "第一句。第二句。"
+
+
+def test_normal_reply_equal_to_wake_acknowledgement_is_not_replaced(speech_app):
+    controller, _, _, pet = speech_app
+    turn, correlation = TurnId.new(), CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.SYNTHESIZING,
+    ))
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.SYNTHESIZING, ConversationPhase.SPEAKING,
+    ))
+    controller.handle_runtime_event(SpeakRequested(turn, correlation, "我在，请说"))
+    assert pet.property("speech") == "我在，请说"
 
 
 def test_delta_from_new_turn_never_appends_previous_turn_text(speech_app):

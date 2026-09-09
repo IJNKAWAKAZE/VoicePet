@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +31,232 @@ from core.llm import (
 from core.session_context import SessionContext
 from core.state_machine import ConversationStateMachine
 from core.tts import SynthesizedAudio, TtsPlaybackError, TtsSynthesisError
+
+
+@pytest.mark.parametrize("speech,manual,expected", [(True, True, True), (False, True, False), (True, False, False)])
+def test_agent_replies_receive_memory_and_use_speech_switches(tmp_path, speech, manual, expected):
+    from uuid import uuid4
+
+    from core.agent_types import AgentEventType
+    from core.memory import MemoryStore
+    from core.memory_context import MemoryContextAssembler
+    from core.session_archive import SessionArchiveStore
+
+    async def scenario():
+        store = MemoryStore(tmp_path / "memory.db")
+        archive = SessionArchiveStore(tmp_path / "memory.db")
+        context = SessionContext(max_turns=1)
+        old = archive.archive_turn(str(uuid4()), "旅行计划", "周六出发", context.session_id)
+        archive.save_summary(old.turn_id, "旅行计划", (), decisions=("周六出发",))
+        store.create_confirmed(category="profile", content="我住在杭州", source_turn_id=str(uuid4()))
+        requests, enqueued = [], []
+
+        class Gateway:
+            async def run_turn(self, session, text, **kwargs):
+                requests.append((text, kwargs))
+                yield SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": "你住在**杭州**😊"})
+                yield SimpleNamespace(type=AgentEventType.TURN_COMPLETED, payload={"status": "completed"})
+
+        synth, player = RecordingSynthesizer(), RecordingPlayer()
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), EventBus(), agent_gateway=Gateway(),
+            memory_context=MemoryContextAssembler(store, archive=archive, session_context=context),
+            session_context=context, session_archive=archive,
+            archive_completion=lambda *args: enqueued.append(args),
+            speech_synthesizer=synth, audio_player=player,
+            speech_enabled=speech, manual_input_speech_enabled=manual,
+        )
+        try:
+            await coordinator.submit_text("我在哪个城市？")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+            assert requests[0][0] == "我在哪个城市？"
+            assert "杭州" in requests[0][1]["context"]
+            assert "周六出发" in requests[0][1]["context"]
+            assert bool(player.calls) is expected
+            assert [text for text, _ in synth.calls] == (["你住在杭州"] if expected else [])
+            assert coordinator.response_text == "你住在**杭州**😊"
+            assert len(enqueued) == 1
+            assert context.build_history()[-2]["content"] == "我在哪个城市？"
+        finally:
+            await coordinator.stop()
+            archive.close()
+            store.close()
+
+    asyncio.run(scenario())
+
+
+def test_agent_stalled_stream_obeys_budget_and_reports_error():
+    async def scenario():
+        closed = asyncio.Event()
+
+        class Gateway:
+            async def run_turn(self, *args, **kwargs):
+                try:
+                    await asyncio.Event().wait()
+                    yield
+                finally:
+                    closed.set()
+
+        bus, errors = EventBus(), []
+        bus.subscribe(RuntimeErrorEvent, errors.append)
+        coordinator = Coordinator(ImmediateAudio(), UnexpectedTranscript(), bus,
+                                  agent_gateway=Gateway(), max_turn_duration=0.03)
+        try:
+            await coordinator.submit_text("查询")
+            await wait_until(lambda: bool(errors))
+            assert errors[0].error_code == "runtime.budget"
+            assert closed.is_set()
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_stalled_agent_releases_stream_before_next_turn():
+    async def scenario():
+        started, closed = asyncio.Event(), asyncio.Event()
+
+        class Gateway:
+            async def run_turn(self, *args, **kwargs):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                    yield
+                finally:
+                    closed.set()
+
+            async def cancel(self):
+                pass
+
+        coordinator = Coordinator(ImmediateAudio(), UnexpectedTranscript(), EventBus(), agent_gateway=Gateway())
+        try:
+            await coordinator.submit_text("查询")
+            await asyncio.wait_for(started.wait(), 0.5)
+            await asyncio.wait_for(coordinator.cancel_active_turn(), 0.5)
+            assert closed.is_set()
+            assert coordinator.phase is ConversationPhase.IDLE
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_history_playback_strips_markdown_and_emoji_and_accepts_long_text():
+    async def scenario():
+        synth = RecordingSynthesizer()
+        coordinator = Coordinator(ImmediateAudio(), UnexpectedTranscript(), EventBus(),
+                                  speech_synthesizer=synth, audio_player=RecordingPlayer())
+        try:
+            await coordinator.speak_notice("# **杭州**😊\n[西湖](https://example.com)\n" + "这是聊天记录。" * 80)
+            spoken = "".join(text for text, _ in synth.calls)
+            assert spoken.startswith("杭州\n西湖\n")
+            assert all(symbol not in spoken for symbol in ("#", "*", "😊", "https://"))
+            assert spoken.endswith("这是聊天记录。" * 80)
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["manual", "replay"])
+def test_manual_actions_after_wake_never_start_followup_recording(operation):
+    from core.agent_types import AgentEventType
+
+    async def scenario():
+        class Gateway:
+            async def run_turn(self, *args, **kwargs):
+                yield SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": "手动消息的回复"})
+                yield SimpleNamespace(type=AgentEventType.TURN_COMPLETED, payload={"status": "completed"})
+
+            async def cancel(self):
+                pass
+
+        audio, bus, states = SourceAwareAudio(), EventBus(), []
+        bus.subscribe(StateChanged, states.append)
+        coordinator = Coordinator(
+            audio, SequenceTranscript([""]), bus, agent_gateway=Gateway(),
+            continuous_conversation=True, manual_input_speech_enabled=True,
+            speech_synthesizer=RecordingSynthesizer(), audio_player=RecordingPlayer(),
+        )
+        try:
+            await coordinator.start_listening("wake_word")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+            states.clear()
+            if operation == "manual":
+                await coordinator.submit_text("手动问题")
+                await wait_until(lambda: any(event.current is ConversationPhase.SPEAKING for event in states))
+            else:
+                await coordinator.speak_notice("聊天记录的回复")
+            await asyncio.sleep(0.01)
+            assert coordinator.phase is ConversationPhase.IDLE
+            assert audio.include_preroll == [False]
+            assert all(event.current is not ConversationPhase.LISTENING for event in states)
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("original_source", ["manual", "wake_word"])
+def test_click_interrupt_uses_its_own_voice_mode_and_does_not_continue(original_source):
+    from core.agent_types import AgentEventType
+
+    async def scenario():
+        class Gateway:
+            async def run_turn(self, *args, **kwargs):
+                yield SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": "点击录音后的回复"})
+                yield SimpleNamespace(type=AgentEventType.TURN_COMPLETED, payload={"status": "completed"})
+
+            async def cancel(self):
+                pass
+
+        audio, synth = SourceAwareAudio(), RecordingSynthesizer()
+        coordinator = Coordinator(
+            audio, SequenceTranscript(["语音问题"]), EventBus(), agent_gateway=Gateway(),
+            continuous_conversation=True, manual_input_speech_enabled=False,
+            speech_synthesizer=synth, audio_player=RecordingPlayer(),
+        )
+        try:
+            if original_source == "manual":
+                await coordinator.submit_text("手动问题")
+            else:
+                await coordinator.start_listening(original_source)
+            await coordinator.interrupt("click")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+            assert audio.include_preroll == [True]
+            assert "点击录音后的回复" in [text for text, _ in synth.calls]
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_wake_reply_still_starts_followup_recording():
+    from core.agent_types import AgentEventType
+
+    async def scenario():
+        class Gateway:
+            async def run_turn(self, *args, **kwargs):
+                yield SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": "语音问题的回复"})
+                yield SimpleNamespace(type=AgentEventType.TURN_COMPLETED, payload={"status": "completed"})
+
+            async def cancel(self):
+                pass
+
+        audio = SourceAwareAudio()
+        coordinator = Coordinator(
+            audio, SequenceTranscript(["语音问题", "结束对话"]), EventBus(), agent_gateway=Gateway(),
+            continuous_conversation=True,
+            speech_synthesizer=RecordingSynthesizer(), audio_player=RecordingPlayer(),
+        )
+        try:
+            await coordinator.start_listening("wake_word")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+            assert audio.include_preroll == [False, False]
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(scenario())
 
 
 async def wait_until(predicate, timeout: float = 2.0):
@@ -1891,6 +2118,15 @@ def test_turn_duration_expires_blocked_synthesis():
 
 def test_turn_duration_expires_blocked_playback():
     async def scenario():
+        elapsed = [0.0]
+
+        class DeadlineSynthesizer(RecordingSynthesizer):
+            async def synthesize(self, text, token):
+                audio = await super().synthesize(text, token)
+                # 在播放开始前才消耗预算，避免慢机器在转写阶段提前超时。
+                elapsed[0] = 0.98
+                return audio
+
         transcript = ControlledTranscript(["hello"])
         player = BlockingPlayer()
         bus = EventBus()
@@ -1909,15 +2145,16 @@ def test_turn_duration_expires_blocked_playback():
             llm_provider=ScriptedLlm(
                 [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
             ),
-            speech_synthesizer=RecordingSynthesizer(),
+            speech_synthesizer=DeadlineSynthesizer(),
             audio_player=player,
-            max_turn_duration=0.02,
+            max_turn_duration=1.0,
+            clock=lambda: elapsed[0],
         )
         await coordinator.start_listening()
         await wait_until(lambda: len(transcript.calls) == 1)
         transcript.releases[0].set()
-        await player.started.wait()
         try:
+            await asyncio.wait_for(player.started.wait(), timeout=0.5)
             await asyncio.wait_for(ready.wait(), timeout=0.5)
         finally:
             await coordinator.stop()

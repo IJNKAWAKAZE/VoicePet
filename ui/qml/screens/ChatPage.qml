@@ -196,8 +196,16 @@ Item {
 
     Connections {
         target: root.chat
+        function onScrollToLatestRequested() {
+            messages.cancelFlick()
+            messages.followTail = true
+            tailLayout.restart()
+        }
         function onTranscriptReady(text) { composer.appendDraftText(text) }
-        function onSubmissionAccepted() { composer.clearAttachments() }
+        function onSubmissionAccepted() {
+            composer.setDraftText("")
+            composer.clearAttachments()
+        }
         function onAttachmentPasted(url, kind) { composer.addAttachment(url, kind) }
     }
 }

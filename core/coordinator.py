@@ -367,6 +367,7 @@ class Coordinator:
             raise ValueError("手动输入必须是一至四千零九十六个字符")
         correlation_id = CorrelationId.new()
         state_event = self._state_machine.start_text_turn(correlation_id)
+        self._active_activation_source = "manual_text"
         self._response_text = ""
         self._active_input_text = normalized
         self._active_attachments = tuple(attachments)
@@ -426,6 +427,13 @@ class Coordinator:
             return
         if self._active_source is not None:
             self._active_source.cancel("user_cancelled")
+            if self._agent_gateway is not None:
+                tasks = tuple(task for task, source in self._tasks.items()
+                              if source is self._active_source and task is not asyncio.current_task())
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
         finished = self._state_machine.reset(CorrelationId.new())
         self._active_source = None
         self._pending_tool_call = None
@@ -459,15 +467,16 @@ class Coordinator:
         """不经过录音和模型地播放固定提示"""
 
         self._ensure_running()
-        normalized = text.strip() if isinstance(text, str) else ""
-        if not normalized or len(normalized) > 400:
-            raise ValueError("提示文本必须是一至四百个字符")
+        normalized = markdown_to_speech_text(text) if isinstance(text, str) else ""
+        if not normalized or len(normalized) > 200_000:
+            raise ValueError("提示文本为空或过长")
         if self._speech_synthesizer is None or self._audio_player is None:
             raise RuntimeError("语音提示当前不可用")
         if self.phase is not ConversationPhase.IDLE:
             raise RuntimeError("当前正在处理其他语音操作")
 
         self._response_text = normalized
+        self._active_activation_source = "notice"
         self._active_input_text = ""
         self._active_input_is_manual = False
         self._active_session_id = None
@@ -500,11 +509,15 @@ class Coordinator:
     async def interrupt(self, source: str = "click") -> TurnId:
         self._ensure_running()
         activation_source = self._validate_activation_source(source)
+        self._active_activation_source = activation_source
         if self._active_source is not None:
             self._active_source.cancel("user_interrupt")
 
         self._response_text = ""
         self._active_input_text = ""
+        self._active_input_is_manual = False
+        self._active_attachments = ()
+        self._attachment_reader = None
         self._active_session_id = (
             self._session_context.session_id
             if self._session_context is not None
@@ -939,17 +952,32 @@ class Coordinator:
         """把 Agent 面向用户的文本事件接入现有聊天和语音链路"""
         correlation_id = CorrelationId.new()
         chunks: list[str] = []
+        stream = None
         try:
+            memory_history = ()
+            if self._memory_context is not None:
+                memory_history = await self._await_with_budget(
+                    lambda: asyncio.to_thread(self._memory_context.build_history, text)
+                )
+            if not self._accept_result(turn_id, token):
+                return
             agent_attachments = tuple(
                 {"name": item.name, "path": item.path, "media_type": item.media_type, "kind": item.kind}
                 for item in attachments
             )
-            async for event in self._agent_gateway.run_turn(
+            stream = self._agent_gateway.run_turn(
                 self._active_session_id or "default",
                 text,
                 turn_id=str(turn_id),
                 attachments=agent_attachments,
-            ):
+                context="\n\n".join(str(item["content"]) for item in memory_history),
+            )
+            completed = False
+            while True:
+                try:
+                    event = await self._await_with_budget(lambda: anext(stream))
+                except StopAsyncIteration:
+                    break
                 if token.is_cancelled:
                     await self._agent_gateway.cancel()
                     return
@@ -980,15 +1008,31 @@ class Coordinator:
                         options = tuple(item for item in raw_options if isinstance(item, Mapping)) if isinstance(raw_options, (list, tuple)) else ()
                         await self._event_bus.publish(AgentApprovalRequested(turn_id, correlation_id, approval_id, str(event.payload.get("message", "Agent 请求确认")), options))
                 if event.type is AgentEventType.TURN_COMPLETED:
+                    if event.payload.get("status", "completed") != "completed":
+                        raise RuntimeError("Agent 轮次未成功完成")
+                    completed = True
                     break
+                if event.type in {AgentEventType.ERROR, AgentEventType.CANCELLED}:
+                    raise RuntimeError("Agent 轮次中断")
+            if not completed:
+                raise RuntimeError("Agent 流缺少完成事件")
+            if not self._accept_result(turn_id, token):
+                return
             response = "".join(chunks)
+            self._response_text = response
             if response and self._session_context is not None:
                 self._session_context.add_turn(text, response)
             if response and self._session_archive is not None:
                 await self._archive_completed_turn(turn_id, text, response, self._active_session_id, token)
-            finished = self._state_machine.reset(correlation_id)
-            if finished is not None and not self._stopped:
-                await self._event_bus.publish(finished)
+            if not self._accept_result(turn_id, token):
+                return
+            if (response and self._speech_enabled_for_active_turn()
+                    and self._speech_synthesizer is not None and self._audio_player is not None):
+                await self._run_tts(turn_id, split_speech_text(markdown_to_speech_text(response)), token)
+            else:
+                finished = self._state_machine.reset(correlation_id)
+                if finished is not None and not self._stopped:
+                    await self._event_bus.publish(finished)
             if (
                 self._continuous_conversation
                 and self._active_activation_source in {"wake_word", "wake_followup"}
@@ -999,6 +1043,9 @@ class Coordinator:
             await self._agent_gateway.cancel()
         except Exception as error:  # noqa: BLE001 Agent 失败只显示安全错误
             await self._handle_runtime_error(turn_id, correlation_id, token, error)
+        finally:
+            if stream is not None:
+                await stream.aclose()
 
     async def _play_wake_acknowledgement(
         self,
@@ -1074,12 +1121,6 @@ class Coordinator:
                 correlation_id,
             )
             await self._event_bus.publish(finished)
-            if (
-                self._continuous_conversation
-                and self._active_activation_source in {"wake_word", "wake_followup"}
-                and not self._stopped
-            ):
-                await self.start_listening("wake_followup")
         except (TtsError, TurnBudgetExceededError):
             reset = self._state_machine.reset(correlation_id)
             if reset is not None and not self._stopped:

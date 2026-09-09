@@ -135,6 +135,7 @@ class AgentTurnRequest:
     input: str = field(repr=False)
     approval_mode: AgentApprovalMode
     attachments: tuple[Mapping[str, str], ...] = field(default=(), repr=False)
+    context: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         for value in (self.session_id, self.turn_id):
@@ -143,6 +144,8 @@ class AgentTurnRequest:
             validate_identifier(self.thread_id)
         if not isinstance(self.input, str) or len(self.input) > 200_000:
             raise ValueError("输入过长或类型无效")
+        if not isinstance(self.context, str) or len(self.context) > 8000:
+            raise ValueError("Agent 上下文无效")
         if not isinstance(self.approval_mode, AgentApprovalMode):
             raise ValueError("Agent 审批模式无效")  # noqa: TRY004
         if not isinstance(self.attachments, (list, tuple)) or len(self.attachments) > 16:
@@ -160,7 +163,7 @@ class AgentTurnRequest:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> AgentTurnRequest:
         required = {"session_id", "thread_id", "turn_id", "input", "approval_mode"}
-        if not isinstance(data, Mapping) or not required <= set(data) or set(data) - required - {"attachments"}:
+        if not isinstance(data, Mapping) or not required <= set(data) or set(data) - required - {"attachments", "context"}:
             raise ValueError("Agent 轮次字段无效")
         try:
             mode = AgentApprovalMode(data["approval_mode"])
@@ -169,7 +172,7 @@ class AgentTurnRequest:
         return cls(**{**data, "approval_mode": mode})
 
     def to_mapping(self) -> dict[str, Any]:
-        return {"session_id": self.session_id, "thread_id": self.thread_id, "turn_id": self.turn_id, "input": self.input, "approval_mode": self.approval_mode.value, "attachments": thaw_json(self.attachments)}
+        return {"session_id": self.session_id, "thread_id": self.thread_id, "turn_id": self.turn_id, "input": self.input, "approval_mode": self.approval_mode.value, "attachments": thaw_json(self.attachments), "context": self.context}
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,6 +28,23 @@ class CacheMissError(Exception):
     pass
 
 
+def test_transcribe_converts_traditional_chinese_to_simplified(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, *args, **kwargs):
+            return [FakeSegment("我現在住在臺灣，週末想搭飛機。VoicePet 123")], {}
+
+    install_fake_modules(monkeypatch, FakeModel)
+    adapter = FasterWhisperTranscriptAdapter(device="cpu")
+    try:
+        text = asyncio.run(adapter.transcribe(b"\x00\x00", CancellationSource().token))
+        assert text == "我现在住在台湾，周末想搭飞机。VoicePet 123"
+    finally:
+        adapter.close()
+
+
 def install_fake_modules(monkeypatch, model_class, downloader=None):
     downloader = downloader or (lambda *args, **kwargs: "cached-model")
     monkeypatch.setitem(

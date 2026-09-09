@@ -11,6 +11,7 @@ datas = [
     (str(root / "ui" / "qml"), "ui/qml"),
 ]
 datas += collect_data_files("faster_whisper", includes=["assets/*.onnx"])
+datas += collect_data_files("opencc")
 binaries = collect_dynamic_libs("sherpa_onnx")
 hiddenimports = [
     "PySide6",

@@ -275,6 +275,22 @@ def test_privacy_retention_can_be_retyped_and_discarded_without_blur(qapp, key, 
         assert field.property("text") == str(getattr(settings.config.privacy, key))
 
 
+@pytest.mark.parametrize("key,placeholder", [
+    ("summary_retention_days", "近期摘要保留天数"),
+    ("chat_retention_days", "聊天记录保留天数"),
+])
+def test_privacy_retention_retyped_value_can_be_saved(qapp, key, placeholder):
+    settings = SettingsViewModel(AppConfig(), Store())
+    with page(qapp, "PrivacySettings", settings) as root:
+        field = next(item for item in visual_items(root) if item.property("placeholderText") == placeholder)
+        field.forceActiveFocus()
+        QTest.keyClick(root.window(), Qt.Key_A, Qt.ControlModifier)
+        QTest.keyClick(root.window(), "2")
+        QTest.keyClick(root.window(), "1")
+        settings.save_draft()
+        assert getattr(settings.config.privacy, key) == 21
+
+
 def test_privacy_switches_restore_and_auto_dependency_preserves_preference(qapp):
     settings = SettingsViewModel(AppConfig(), Store())
     with page(qapp, "PrivacySettings", settings) as root:

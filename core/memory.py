@@ -449,11 +449,14 @@ class MemoryStore:
         *,
         limit: int = 10,
         exclude_source_ids: Sequence[str] = (),
+        include_unmatched: bool = False,
     ) -> tuple[MemoryRecord, ...]:
-        """用一条有界候选查询召回相关的非基础确认事实"""
+        """按字面相关性排序；组装提示时可补入未匹配事实供模型判断"""
 
         if type(limit) is not int or not 1 <= limit <= 100:
             raise MemoryConfigurationError("相关记忆召回数量无效")
+        if type(include_unmatched) is not bool:
+            raise MemoryConfigurationError("记忆召回模式无效")
         if isinstance(exclude_source_ids, (str, bytes, bytearray)) or not isinstance(
             exclude_source_ids, Sequence
         ):
@@ -467,7 +470,7 @@ class MemoryStore:
             terms = query_terms(hints)
         except (TypeError, ValueError) as error:
             raise MemoryConfigurationError("记忆召回提示无效") from error
-        if not terms:
+        if not terms and not include_unmatched:
             return ()
         long_terms = tuple(term for term, _ in terms if len(term) >= 3)
         short_terms = tuple(term for term, _ in terms if len(term) < 3)
@@ -499,6 +502,10 @@ class MemoryStore:
         basic_keys = tuple(sorted(SINGLE_VALUE_FACT_KEYS))
         basic_placeholders = ",".join("?" for _ in basic_keys)
         now = self._now().isoformat()
+        # 字面相似度只用于优先排序，不把模型尚未看到的事实判为无关。
+        if include_unmatched:
+            relevance = ["1"]
+            parameters = []
         sql = (
             f"SELECT m.*,({score}) AS recall_score FROM memories m WHERE ("
             + " OR ".join(relevance)
@@ -521,7 +528,8 @@ class MemoryStore:
                 rows = self._connection.execute(sql, [*score_parameters, *parameters]).fetchall()
             except sqlite3.Error as error:
                 raise MemoryStorageError("相关记忆召回失败") from error
-            return tuple(self._record(row) for row in rows if row["recall_score"] > 0)
+            return tuple(self._record(row) for row in rows
+                         if include_unmatched or row["recall_score"] > 0)
 
     def search(
         self,

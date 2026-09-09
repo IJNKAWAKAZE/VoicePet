@@ -37,7 +37,9 @@ Rectangle {
     }
 
     readonly property int toolbarHeight: 40
-    implicitHeight: 98 + (attachments.count > 0 ? 34 : 0) + (recording ? 22 : 0)
+    readonly property int editorHeight: Math.max(56, Math.min(140, composer.implicitHeight))
+    implicitHeight: editorHeight + toolbarHeight + 16
+        + (attachments.count > 0 ? 34 : 0) + (recording ? 22 : 0)
     radius: 14
     color: theme.surface
     border.color: composer.activeFocus ? theme.focus : theme.border
@@ -157,9 +159,9 @@ Rectangle {
         }
     }
 
-    TextArea {
-        id: composer
-        objectName: "composerText"
+    ScrollView {
+        id: composerScroll
+        objectName: "composerScroll"
         anchors.left: parent.left
         anchors.leftMargin: 14
         anchors.right: parent.right
@@ -169,24 +171,38 @@ Rectangle {
         anchors.rightMargin: 14
         anchors.topMargin: voiceStatus.visible ? 2 : attachmentPreview.visible ? 4 : 10
         anchors.bottomMargin: 6
-        placeholderText: "输入消息，Enter 发送，Shift+Enter 换行"
-        wrapMode: TextEdit.Wrap
-        color: root.theme.text
-        placeholderTextColor: root.theme.textMuted
-        background: null
         clip: true
-        Accessible.name: "消息输入"
-        Keys.onPressed: event => {
-            if (event.matches(StandardKey.Paste) && root.pasteAttachments
-                    && root.pasteAttachments()) {
-                event.accepted = true
-                return
-            }
-            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                if (!(event.modifiers & Qt.ShiftModifier) && !root.processing) {
-                    root.submitRequested(text, attachmentPayload())
-                    text = ""
+        contentWidth: availableWidth
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical: ScrollBar {
+            objectName: "composerScrollBar"
+            policy: ScrollBar.AsNeeded
+        }
+
+        TextArea {
+            id: composer
+            objectName: "composerText"
+            width: composerScroll.availableWidth
+            placeholderText: "输入消息，Enter 发送，Shift+Enter 换行"
+            wrapMode: TextEdit.Wrap
+            color: root.theme.text
+            placeholderTextColor: root.theme.textMuted
+            background: null
+            selectByMouse: true
+            Accessible.name: "消息输入"
+            Keys.onPressed: event => {
+                if (event.matches(StandardKey.Paste) && root.pasteAttachments
+                        && root.pasteAttachments()) {
                     event.accepted = true
+                    return
+                }
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    if (!(event.modifiers & Qt.ShiftModifier)) {
+                        // 普通 Enter 始终按发送键处理，忙碌时不落入 TextArea 的默认换行。
+                        event.accepted = true
+                        if (!root.processing && !root.recording)
+                            root.submitRequested(text, attachmentPayload())
+                    }
                 }
             }
         }

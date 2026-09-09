@@ -28,6 +28,7 @@ class AgentWorkerClient:
         self._events: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=256)
         self._write_lock = asyncio.Lock()
         self._closed = False
+        self._failure: AgentClientError | None = None
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def initialize(self) -> AgentCapabilities:
@@ -43,7 +44,17 @@ class AgentWorkerClient:
         await self._call("agent.approval.resolve", {"approval_id": approval_id, "decision": decision})
 
     async def next_event(self) -> AgentEvent:
-        return await self._events.get()
+        if not self._events.empty():
+            return self._events.get_nowait()
+        event_task = asyncio.create_task(self._events.get())
+        try:
+            await asyncio.wait((event_task, self._reader_task), return_when=asyncio.FIRST_COMPLETED)
+            if event_task.done():
+                return event_task.result()
+            raise self._failure or AgentClientError("Agent Worker 连接已断开")
+        finally:
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
 
     async def close(self) -> None:
         if self._closed:
@@ -65,13 +76,21 @@ class AgentWorkerClient:
         return await self._send(method, params)
 
     async def _send(self, method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        if self._failure is not None:
+            raise self._failure
         request_id = uuid4().hex
         future: asyncio.Future[Mapping[str, object]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        async with self._write_lock:
-            self._writer.write(encode_message(AgentRpcRequest(request_id, method, params)))
-            await self._writer.drain()
-        return await future
+        try:
+            async with asyncio.timeout(10):
+                async with self._write_lock:
+                    self._writer.write(encode_message(AgentRpcRequest(request_id, method, params)))
+                    await self._writer.drain()
+                return await future
+        except TimeoutError as error:
+            raise AgentClientError("Agent Worker 请求超时") from error
+        finally:
+            self._pending.pop(request_id, None)
 
     async def _read_loop(self) -> None:
         try:
@@ -82,7 +101,7 @@ class AgentWorkerClient:
                 message = decode_message(line)
                 if isinstance(message, AgentRpcResponse):
                     future = self._pending.pop(message.request_id, None)
-                    if future is None:
+                    if future is None or future.done():
                         continue
                     if message.error is not None:
                         detail = message.error.get("message") if isinstance(message.error, Mapping) else None
@@ -100,6 +119,7 @@ class AgentWorkerClient:
                     await self._events.put(event)
         except Exception as error:  # noqa: BLE001
             failure = error if isinstance(error, AgentClientError) else AgentClientError("Agent Worker 读取失败")
+            self._failure = failure
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(failure)

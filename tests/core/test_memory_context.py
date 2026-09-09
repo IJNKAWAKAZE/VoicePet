@@ -2,10 +2,49 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
+
 from core.memory import MemoryStore
 from core.memory_context import MemoryContextAssembler
 from core.session_archive import SessionArchiveStore
 from core.session_context import SessionContext
+
+
+@pytest.mark.parametrize("fact,question", [
+    ("我住在杭州", "我的常住地是哪儿？"),
+    ("平时靠修复牙齿工作", "我的职业是什么？"),
+    ("每逢周末都会背上相机拍鸟", "闲暇时间通常干啥？"),
+    ("吃花生会起疹子", "点餐时有哪些忌口？"),
+    ("项目定在下周三上线", "发布日期确定了吗？"),
+])
+def test_model_receives_saved_facts_even_when_question_uses_different_words(tmp_path, fact, question):
+    store = MemoryStore(tmp_path / "memory.db")
+    try:
+        record = store.create_confirmed(category="user_requested", content=fact, source_turn_id=str(uuid4()))
+        # 明确没有字面命中，事实仍应到达回答模型，而不是靠按话题写关键词补丁。
+        assert store.recall_related(((question, 3),)) == ()
+        assembler = MemoryContextAssembler(store)
+        content = assembler.build_history(question)[0]["content"]
+        assert fact in content
+        assert "根据当前问题判断哪些事实相关" in content
+        store.delete(record.id)
+        assert assembler.build_history(question) == ()
+    finally:
+        store.close()
+
+
+def test_unmatched_facts_fill_context_without_displacing_matched_facts(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    try:
+        matched = store.create_confirmed(category="project", content="数据库使用 SQLite", source_turn_id=str(uuid4()))
+        recent = store.create_confirmed(category="user_requested", content="每逢周末都会背上相机拍鸟", source_turn_id=str(uuid4()))
+        payload = MemoryContextAssembler(store, max_records=2).build_history("SQLite")[0]["content"]
+        assert payload.index(matched.content) < payload.index(recent.content)
+        single = MemoryContextAssembler(store, max_records=1).build_history("SQLite")[0]["content"]
+        assert matched.content in single
+        assert recent.content not in single
+    finally:
+        store.close()
 
 
 def test_memory_context_uses_only_matching_confirmed_records_and_bounds_text(tmp_path):
