@@ -148,7 +148,7 @@ def test_ai_base_url_stays_in_draft_until_save():
 def test_invalid_url_is_not_saved_and_has_stable_field_error():
     store = Store()
     settings = SettingsViewModel(AppConfig(), store)
-    settings.set_field("llm", "base_url", "http://example.com/v1")
+    settings.set_field("llm", "base_url", "ftp://example.com/v1")
 
     settings.save_draft()
 

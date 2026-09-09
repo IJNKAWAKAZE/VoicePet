@@ -67,6 +67,14 @@ class WakeWordConfig:
     keyword: str = "你好，小蓝"
     sensitivity: float = 0.5
     debounce_sec: float = 1.5
+    continuous_conversation: bool = False
+    followup_timeout: float = 8.0
+
+    def __post_init__(self) -> None:
+        if type(self.continuous_conversation) is not bool:
+            raise ConfigError("连续对话开关必须是布尔值")
+        if self.followup_timeout <= 0:
+            raise ConfigError("连续对话等待时间必须大于零")
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,7 +402,7 @@ def is_local_llm_base_url(value: str) -> bool:
 
 
 def validate_llm_base_url(value: str) -> None:
-    """验证自定义 LLM 端点不会降级公网传输安全"""
+    """验证自定义 LLM 端点的 URL 格式"""
 
     if not isinstance(value, str):
         raise ConfigError("LLM API Base URL 类型无效")
@@ -411,11 +419,9 @@ def validate_llm_base_url(value: str) -> None:
         raise ConfigError("LLM API Base URL 不能包含凭据")
     if parsed.query or parsed.fragment:
         raise ConfigError("LLM API Base URL 不能包含查询参数或片段")
-    if parsed.scheme == "https" and hostname:
+    if parsed.scheme in {"http", "https"} and hostname:
         return
-    if parsed.scheme == "http" and is_local_llm_base_url(value):
-        return
-    raise ConfigError("LLM API Base URL 必须使用 HTTPS 或本机 HTTP")
+    raise ConfigError("LLM API Base URL 必须使用 HTTP 或 HTTPS")
 
 
 @dataclass(frozen=True, slots=True)

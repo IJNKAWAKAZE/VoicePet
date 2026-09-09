@@ -130,6 +130,12 @@ def test_markdown_to_speech_text_keeps_image_alt_and_drops_empty_markup():
     assert markdown_to_speech_text("** ~~ ` ```") == ""
 
 
+def test_markdown_to_speech_text_removes_emoji_and_kaomoji_without_dropping_text():
+    assert "😀" not in markdown_to_speech_text("你好 😀！")
+    assert "๑" not in markdown_to_speech_text("(๑•̀ㅂ•́)و✧ 已完成")
+    assert markdown_to_speech_text("公式 (a + b) 和版本 3.12.14") == "公式 (a + b) 和版本 3.12.14"
+
+
 def test_speech_text_stays_in_one_chunk_with_sentences_and_version_numbers():
     text = "系统版本是 Windows 11，Python 版本是 3.12.14。已经读取完成。"
 

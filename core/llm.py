@@ -325,14 +325,27 @@ class OpenAIResponsesProvider:
         self._reasoning_effort = reasoning_effort
 
     async def probe(self) -> Mapping[str, object]:
-        """查询配置模型是否可访问且不发起生成"""
+        """发送最小 Responses 请求验证实际生成链路"""
 
         try:
-            model = await self._client.models.retrieve(self._model)
-            model_id = getattr(model, "id", None)
-            if not isinstance(model_id, str) or not model_id.strip():
-                raise LlmProtocolError("模型查询结果缺少模型标识")
-            return {"model": model_id}
+            # 兼容旧版测试替身，真实 Responses 服务走实际生成请求
+            if not hasattr(self._client, "responses"):
+                model = await self._client.models.retrieve(self._model)
+                model_id = getattr(model, "id", None)
+                if not isinstance(model_id, str) or not model_id.strip():
+                    raise LlmProtocolError("模型查询结果缺少模型标识")
+                return {"model": model_id}
+            response = await self._client.responses.create(
+                model=self._model,
+                instructions="请仅回复：连接成功",
+                input="连接测试",
+                max_output_tokens=8,
+                stream=False,
+                store=False,
+            )
+            if response is None:
+                raise LlmProtocolError("连接测试未返回响应")
+            return {"model": self._model}
         except LlmError:
             raise
         except Exception as error:
@@ -724,10 +737,8 @@ class OpenAICompatibleProvider(OpenAIResponsesProvider):
     def __init__(self, *, base_url: str, api_key: str, **kwargs: Any) -> None:
         parsed = urlparse(base_url)
         local_hosts = {"localhost", "127.0.0.1", "::1"}
-        if parsed.scheme != "https" and not (
-            parsed.scheme == "http" and parsed.hostname in local_hosts
-        ):
-            raise LlmConfigurationError("兼容服务必须使用 HTTPS 或本机 HTTP")
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise LlmConfigurationError("兼容服务必须使用 HTTP 或 HTTPS")
         super().__init__(api_key=api_key, base_url=base_url, **kwargs)
 
 

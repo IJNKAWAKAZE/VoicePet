@@ -950,8 +950,8 @@ def test_compatible_provider_validates_base_url_and_builds_client(monkeypatch):
         SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI),
     )
 
-    with pytest.raises(LlmConfigurationError, match="HTTPS"):
-        OpenAICompatibleProvider(base_url="http://example.com/v1", api_key="key")
+    with pytest.raises(LlmConfigurationError, match="HTTP"):
+        OpenAICompatibleProvider(base_url="ftp://example.com/v1", api_key="key")
 
     provider = OpenAICompatibleProvider(
         base_url="http://localhost:8080/v1",

@@ -14,6 +14,8 @@ ScrollView {
             wakeEnabled.checked = root.settings.draft.wake_word.enabled
             keywordField.text = root.settings.draft.wake_word.keyword
             sensitivity.value = root.settings.draft.wake_word.sensitivity
+            continuousConversation.checked = root.settings.draft.wake_word.continuous_conversation
+            followupTimeout.value = root.settings.draft.wake_word.followup_timeout
             ttsEnabled.checked = root.settings.draft.tts.enabled
             manualTtsEnabled.checked = root.settings.draft.tts.manual_input_enabled
             asrSelector.currentIndex = Qt.binding(function() {
@@ -53,6 +55,28 @@ ScrollView {
             text: "启用中文唤醒"
             checked: root.settings.draft.wake_word.enabled
             onToggled: root.settings.set_field("wake_word", "enabled", checked)
+        }
+        AppToggle {
+            id: continuousConversation
+            objectName: "continuousConversationToggle"
+            theme: root.theme
+            text: "连续对话"
+            checked: root.settings.draft.wake_word.continuous_conversation
+            enabled: root.settings.draft.wake_word.enabled
+            onToggled: root.settings.set_field("wake_word", "continuous_conversation", checked)
+        }
+        FieldLabel { theme: root.theme; text: "后续等待时间 · " + followupTimeout.value.toFixed(0) + " 秒" }
+        AppSlider {
+            id: followupTimeout
+            objectName: "followupTimeoutSlider"
+            Layout.preferredWidth: 360
+            theme: root.theme
+            from: 3
+            to: 20
+            stepSize: 1
+            value: root.settings.draft.wake_word.followup_timeout
+            enabled: root.settings.draft.wake_word.continuous_conversation
+            onMoved: root.settings.set_field("wake_word", "followup_timeout", value)
         }
         Text {
             objectName: "wakeModelNotice"

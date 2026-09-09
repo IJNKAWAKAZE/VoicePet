@@ -28,7 +28,7 @@ Item {
             width: parent.width; spacing: 8
             AppButton { theme: root.theme; text: "长期记忆"; kind: root.section === "long" ? "primary" : "ghost"; onClicked: root.section = "long" }
             AppButton { theme: root.theme; text: "近期摘要"; kind: root.section === "summary" ? "primary" : "ghost"; onClicked: root.section = "summary" }
-            AppButton { objectName: "memoryRefreshButton"; theme: root.theme; text: "刷新"; kind: "secondary"; enabled: !root.memories.loading && !root.memories.actionBusy; onClicked: root.refreshWhenVisible() }
+            AppButton { objectName: "memoryRefreshButton"; theme: root.theme; text: "刷新"; kind: "secondary"; enabled: !root.memories.loading && !root.memories.actionBusy; onClicked: { root.refreshWhenVisible(); focus = false } }
         }
         Flow {
             visible: root.section === "long"; width: parent.width; spacing: 8
@@ -45,7 +45,7 @@ Item {
         id: memoryList
         objectName: "memoryList"
         visible: root.section === "long"
-        anchors.left: parent.left; anchors.right: parent.right; anchors.top: toolbar.bottom; anchors.bottom: changesPanel.top
+        anchors.left: parent.left; anchors.right: parent.right; anchors.top: toolbar.bottom; anchors.bottom: parent.bottom
         anchors.margins: 20; anchors.topMargin: 12; spacing: 10; clip: true
         model: root.memories.memoryModel; ScrollBar.vertical: ScrollBar {}
         delegate: AppCard {
@@ -93,7 +93,7 @@ Item {
     }
 
     AppCard {
-        id: changesPanel; objectName: "memoryChangesPanel"; visible: root.section === "long"
+        id: changesPanel; objectName: "memoryChangesPanel"; visible: false
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 20
         height: 92; theme: root.theme
         Column { id: changesColumn; anchors.fill: parent; anchors.margins: 10; spacing: 6

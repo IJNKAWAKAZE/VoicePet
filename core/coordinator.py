@@ -84,6 +84,16 @@ _ACTIVATION_SOURCES = frozenset(
 _WAKE_ACKNOWLEDGEMENT = "我在，请说"
 
 
+def simplify_asr_text(text: str) -> str:
+    """将语音识别结果统一转换为简体中文"""
+
+    try:
+        from opencc import OpenCC
+    except ImportError:
+        return text
+    return OpenCC("t2s").convert(text)
+
+
 class AudioSession(Protocol):
     """录音适配器边界"""
 
@@ -197,6 +207,8 @@ class Coordinator:
         speech_enabled: bool = True,
         manual_input_speech_enabled: bool = False,
         wake_keyword: str = "你好，小蓝",
+        continuous_conversation: bool = False,
+        followup_timeout: float = 8.0,
         policy_engine: PolicyEngine | None = None,
         authorization_issuer: AuthorizationIssuer | None = None,
         tool_executor: ToolExecutor | None = None,
@@ -224,6 +236,8 @@ class Coordinator:
         if type(manual_input_speech_enabled) is not bool:
             raise TypeError("手动输入语音播报开关必须是布尔值")
         normalize_wake_keyword(wake_keyword)
+        if followup_timeout <= 0:
+            raise ValueError("连续对话等待时间必须大于零")
         self._audio_session = audio_session
         self._transcript_adapter = transcript_adapter
         self._event_bus = event_bus
@@ -245,6 +259,9 @@ class Coordinator:
         self._manual_input_speech_enabled = manual_input_speech_enabled
         self._active_input_is_manual = False
         self._wake_keyword = wake_keyword
+        self._continuous_conversation = continuous_conversation
+        self._followup_timeout = followup_timeout
+        self._active_activation_source = "click"
         self._policy_engine = policy_engine
         self._authorization_issuer = authorization_issuer
         self._tool_executor = tool_executor
@@ -300,6 +317,7 @@ class Coordinator:
     async def start_listening(self, source: str = "click") -> TurnId:
         self._ensure_running()
         activation_source = self._validate_activation_source(source)
+        self._active_activation_source = activation_source
         self._response_text = ""
         self._active_input_text = ""
         self._active_attachments = ()
@@ -775,7 +793,16 @@ class Coordinator:
                     token.throw_if_cancelled()
                     return await recorder(token, **options)
 
-                audio = await self._await_with_budget(record)
+                if activation_source == "wake_followup":
+                    try:
+                        audio = await asyncio.wait_for(
+                            self._await_with_budget(record),
+                            timeout=self._followup_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        audio = b""
+                else:
+                    audio = await self._await_with_budget(record)
             except TurnBudgetExceededError as error:
                 await self._handle_runtime_error(
                     turn_id,
@@ -818,10 +845,14 @@ class Coordinator:
                 return
 
             normalized_text = prepare_transcript_for_source(
-                text,
+                simplify_asr_text(text),
                 source=activation_source,
                 keyword=self._wake_keyword,
             )
+            if activation_source == "wake_followup" and normalized_text in {
+                "再见", "结束对话", "退出", "不用了", "停止对话",
+            }:
+                normalized_text = ""
             if not normalized_text:
                 reset_event = self._state_machine.reset(
                     transcription_correlation
@@ -958,6 +989,12 @@ class Coordinator:
             finished = self._state_machine.reset(correlation_id)
             if finished is not None and not self._stopped:
                 await self._event_bus.publish(finished)
+            if (
+                self._continuous_conversation
+                and self._active_activation_source in {"wake_word", "wake_followup"}
+                and not self._stopped
+            ):
+                await self.start_listening("wake_followup")
         except asyncio.CancelledError:
             await self._agent_gateway.cancel()
         except Exception as error:  # noqa: BLE001 Agent 失败只显示安全错误
@@ -1037,6 +1074,12 @@ class Coordinator:
                 correlation_id,
             )
             await self._event_bus.publish(finished)
+            if (
+                self._continuous_conversation
+                and self._active_activation_source in {"wake_word", "wake_followup"}
+                and not self._stopped
+            ):
+                await self.start_listening("wake_followup")
         except (TtsError, TurnBudgetExceededError):
             reset = self._state_machine.reset(correlation_id)
             if reset is not None and not self._stopped:

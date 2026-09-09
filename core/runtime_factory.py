@@ -258,6 +258,8 @@ def build_default_runtime(
         speech_enabled=config.tts.enabled,
         manual_input_speech_enabled=config.tts.manual_input_enabled,
         wake_keyword=config.wake_word.keyword,
+        continuous_conversation=config.wake_word.continuous_conversation,
+        followup_timeout=config.wake_word.followup_timeout,
         speech_synthesizer=speech,
         audio_player=audio_player,
         policy_engine=policy,

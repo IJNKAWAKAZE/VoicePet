@@ -103,6 +103,29 @@ ScrollView {
                 kind: "ghost"
                 onClicked: root.settings.delete_api_key()
             }
+            AppButton {
+                theme: root.theme
+                objectName: "testAiConnectionButton"
+                text: root.diagnostics.connectionRunning ? "正在测试连接…" : "测试连接"
+                kind: "secondary"
+                enabled: !root.diagnostics.connectionRunning
+                focusPolicy: Qt.NoFocus
+                onClicked: root.diagnostics.test_connection()
+            }
+        }
+        Text {
+            objectName: "aiConnectionStatus"
+            Layout.fillWidth: true
+            text: root.diagnostics.connectionStatus
+            visible: text.length > 0
+            color: root.theme.text
+            wrapMode: Text.Wrap
+        }
+        Text {
+            Layout.fillWidth: true
+            text: "测试当前运行配置；修改 AI 设置后请先保存并重启，再测试新配置"
+            color: root.theme.textMuted
+            wrapMode: Text.Wrap
         }
         FieldLabel { theme: root.theme; text: "角色设定" }
         ScrollView {
@@ -123,30 +146,6 @@ ScrollView {
                         root.settings.set_field("llm", "system_prompt", text)
                 }
             }
-        }
-        Text {
-            objectName: "aiConnectionStatus"
-            Layout.fillWidth: true
-            text: root.diagnostics.connectionStatus
-            visible: text.length > 0
-            color: root.theme.text
-            wrapMode: Text.Wrap
-        }
-        RowLayout {
-            AppButton {
-                theme: root.theme
-                objectName: "testAiConnectionButton"
-                text: root.diagnostics.connectionRunning ? "正在测试连接…" : "测试连接"
-                kind: "secondary"
-                enabled: !root.diagnostics.connectionRunning
-                onClicked: root.diagnostics.test_connection()
-            }
-        }
-        Text {
-            Layout.fillWidth: true
-            text: "测试当前运行配置；修改 AI 设置后请先保存并重启，再测试新配置"
-            color: root.theme.textMuted
-            wrapMode: Text.Wrap
         }
     }
 }

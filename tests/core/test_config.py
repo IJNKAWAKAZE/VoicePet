@@ -327,7 +327,7 @@ def test_system_prompt_rejects_oversized_or_non_text_values(system_prompt):
 @pytest.mark.parametrize(
     "base_url",
     [
-        "http://example.com/v1",
+        "ftp://example.com/v1",
         "https://user:secret@example.com/v1",
         "https://example.com/v1?token=secret",
         "https://example.com/v1#fragment",
@@ -352,6 +352,15 @@ def test_llm_config_accepts_secure_and_loopback_base_urls(base_url):
     config = replace(AppConfig(), llm=replace(AppConfig().llm, base_url=base_url))
 
     assert config.llm.base_url == base_url
+
+
+def test_llm_config_accepts_http_internal_network_base_url():
+    config = replace(
+        AppConfig(),
+        llm=replace(AppConfig().llm, base_url="http://192.168.1.20:8080/v1"),
+    )
+
+    assert config.llm.base_url == "http://192.168.1.20:8080/v1"
 
 
 def test_llm_config_rejects_unknown_api_protocol():

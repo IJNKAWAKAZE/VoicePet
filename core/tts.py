@@ -772,8 +772,40 @@ def markdown_to_speech_text(text: str) -> str:
     normalized = re.sub(r"[*~`]+", "", normalized)
     normalized = re.sub(r"(?<!\w)_+|_+(?!\w)", "", normalized)
     normalized = normalized.replace("|", " ")
+    normalized = remove_non_speech_symbols(normalized)
     lines = [line.strip() for line in normalized.split("\n")]
     return "\n".join(line for line in lines if line).strip()
+
+
+_EMOJI_RE = re.compile(
+    "[\\U0001F000-\\U0001FAFF\\u2600-\\u27BF\\uFE0F\\u200D]"
+)
+_KAOMOJI_RE = re.compile(r"(?<![A-Za-z0-9_])[\\(（][^\\(（）\\)）\\n]{1,32}[\\)）]")
+_KAOMOJI_ALLOWED_RE = re.compile(r"^[^A-Za-z0-9_]+$")
+_KAOMOJI_FACE_RE = re.compile(r"[Tツ；;╥QД°^＾][\\s._*^＾°:；;ω▽▼□口皿益Д╥ノへつ\\-]*[Tツ；;╥QД°^＾]")
+
+
+def remove_non_speech_symbols(text: str) -> str:
+    """移除不会产生有效读音的 emoji 与常见颜文字"""
+
+    if not text:
+        return ""
+    text = text.replace("(๑•̀ㅂ•́)و✧", " ")
+    text = _EMOJI_RE.sub("", text)
+
+    def replace_kaomoji(match: re.Match[str]) -> str:
+        value = match.group(0)
+        inner = value[1:-1]
+        if _KAOMOJI_ALLOWED_RE.fullmatch(inner) and _KAOMOJI_FACE_RE.search(inner):
+            return " "
+        return value
+
+    text = re.sub(r"\\([^()\\n]*[๑][^()\\n]*\\)[^A-Za-z0-9\\s]*", " ", text)
+    text = _KAOMOJI_RE.sub(replace_kaomoji, text)
+    text = text.replace("(๑•̀ㅂ•́)و✧", " ")
+    text = _EMOJI_RE.sub("", text)
+    text = re.sub(r"(?<![A-Za-z0-9/:])(?::[-^']?[)D(]|[)D])", "", text)
+    return re.sub(r"[ \\t]{2,}", " ", text)
 
 
 def split_speech_text(
