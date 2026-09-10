@@ -17,7 +17,7 @@ from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .network_resilience import NetworkCircuitOpenError, NetworkResilience
 
 
-def _attachment_data_url(attachment: "LlmAttachment") -> str | None:
+def _attachment_data_url(attachment: LlmAttachment) -> str | None:
     """把本地图片转换为兼容云端视觉接口的 data URL"""
 
     if attachment.kind != "image":
@@ -427,7 +427,7 @@ class OpenAIResponsesProvider:
                                 f"{inline_text}\n"
                                 f"[附件正文结束: {attachment.name}]"
                                 if inline_text is not None
-                                # 大文件交给 read_file 工具按需读取
+                                # 超出内联上限的附件只保留名称与路径
                                 else f"[附件] {attachment.name}\n路径: {attachment.path}"
                             ),
                         }
@@ -515,228 +515,11 @@ class OpenAIResponsesProvider:
         return LlmError(f"LLM Provider 执行失败: {error_type}{status_detail}")
 
 
-class OpenAIChatCompletionsProvider(OpenAIResponsesProvider):
-    """OpenAI Chat Completions API 的无状态流式适配器"""
-
-    async def stream(
-        self,
-        request: LlmRequest,
-        token: CancellationToken,
-    ) -> AsyncIterator[LlmStreamEvent]:
-        token.throw_if_cancelled()
-        stream = None
-        response_id: str | None = None
-        input_tokens = 0
-        output_tokens = 0
-        tool_parts: dict[int, dict[str, str]] = {}
-        incomplete = False
-        try:
-            settings: dict[str, Any] = {
-                "model": self._model,
-                "messages": self._build_chat_messages(request),
-                "max_tokens": request.max_output_tokens,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-            if request.tools:
-                settings["tools"] = self._build_tools(request.tools)
-                settings["parallel_tool_calls"] = False
-            stream = await self._client.chat.completions.create(**settings)
-            async for chunk in stream:
-                token.throw_if_cancelled()
-                chunk_id = getattr(chunk, "id", None)
-                if isinstance(chunk_id, str) and chunk_id:
-                    response_id = chunk_id
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                    output_tokens = int(
-                        getattr(usage, "completion_tokens", 0) or 0
-                    )
-                for choice in getattr(chunk, "choices", ()) or ():
-                    if getattr(choice, "finish_reason", None) == "length":
-                        incomplete = True
-                    delta = getattr(choice, "delta", None)
-                    content = getattr(delta, "content", None)
-                    if isinstance(content, str) and content:
-                        yield LlmTextDelta(content)
-                        token.throw_if_cancelled()
-                    self._collect_tool_fragments(delta, tool_parts)
-            if response_id is None:
-                raise LlmProtocolError("Chat Completions 流缺少响应标识")
-            for index in sorted(tool_parts):
-                parts = tool_parts[index]
-                call_id = parts["id"]
-                name = parts["name"]
-                if not call_id or not name:
-                    raise LlmProtocolError("Chat Completions 工具调用缺少标识或名称")
-                try:
-                    arguments = json.loads(parts["arguments"])
-                except json.JSONDecodeError as error:
-                    raise LlmProtocolError("工具参数不是有效 JSON") from error
-                if not isinstance(arguments, dict):
-                    raise LlmProtocolError("工具参数必须是 JSON object")
-                yield LlmToolCall(call_id, name, arguments)
-            yield LlmCompleted(
-                response_id,
-                input_tokens,
-                output_tokens,
-                incomplete,
-                "max_output_tokens" if incomplete else "",
-            )
-        except (LlmError, CancelledError):
-            raise
-        except Exception as error:
-            raise self._map_provider_error(error) from error
-        finally:
-            if stream is not None:
-                close = getattr(stream, "close", None)
-                if close is None:
-                    close = getattr(stream, "aclose", None)
-                if close is not None:
-                    result = close()
-                    if inspect.isawaitable(result):
-                        await result
-
-    @staticmethod
-    def _build_chat_messages(request: LlmRequest) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": request.instructions}
-        ]
-        for item in request.history:
-            item_type = item.get("type")
-            if item_type == "function_call":
-                call_id = item.get("call_id")
-                name = item.get("name")
-                arguments = item.get("arguments")
-                if not all(
-                    isinstance(value, str) and value
-                    for value in (call_id, name, arguments)
-                ):
-                    raise LlmConfigurationError("工具调用历史格式无效")
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": name,
-                                    "arguments": arguments,
-                                },
-                            }
-                        ],
-                    }
-                )
-                continue
-            if item_type == "function_call_output":
-                call_id = item.get("call_id")
-                output = item.get("output")
-                if not all(
-                    isinstance(value, str) and value
-                    for value in (call_id, output)
-                ):
-                    raise LlmConfigurationError("工具结果历史格式无效")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    }
-                )
-                continue
-            role = item.get("role")
-            content = item.get("content")
-            if role not in {"system", "user", "assistant"} or not isinstance(
-                content, str
-            ):
-                raise LlmConfigurationError("Chat Completions 历史项格式无效")
-            messages.append({"role": role, "content": content})
-        if request.attachments:
-            content: list[dict[str, Any]] = [
-                {"type": "text", "text": request.input_text.strip()}
-            ]
-            for attachment in request.attachments:
-                if attachment.kind == "image":
-                    image_url = _attachment_data_url(attachment)
-                    content.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url or f"file://{attachment.path}"
-                            },
-                        }
-                    )
-                else:
-                    inline_text = _inline_text_attachment(attachment)
-                    content.append(
-                        {
-                            "type": "text",
-                            "text": (
-                                f"[附件正文开始: {attachment.name}]\n"
-                                f"{inline_text}\n"
-                                f"[附件正文结束: {attachment.name}]"
-                                if inline_text is not None
-                                # 大文件交给 read_file 工具按需读取
-                                else f"[附件] {attachment.name}\n路径: {attachment.path}"
-                            ),
-                        }
-                    )
-            messages.append({"role": "user", "content": content})
-        else:
-            messages.append({"role": "user", "content": request.input_text.strip()})
-        return messages
-
-    @staticmethod
-    def _build_tools(tools: Sequence[ToolDefinition]) -> list[dict[str, Any]]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": _thaw_json(tool.input_schema),
-                    "strict": True,
-                },
-            }
-            for tool in tools
-        ]
-
-    @staticmethod
-    def _collect_tool_fragments(
-        delta: Any,
-        tool_parts: dict[int, dict[str, str]],
-    ) -> None:
-        for fragment in getattr(delta, "tool_calls", ()) or ():
-            index = getattr(fragment, "index", None)
-            if not isinstance(index, int) or index < 0:
-                raise LlmProtocolError("工具调用分片缺少有效索引")
-            parts = tool_parts.setdefault(
-                index,
-                {"id": "", "name": "", "arguments": ""},
-            )
-            call_id = getattr(fragment, "id", None)
-            if isinstance(call_id, str) and call_id:
-                if parts["id"] and parts["id"] != call_id:
-                    raise LlmProtocolError("工具调用分片标识不一致")
-                parts["id"] = call_id
-            function = getattr(fragment, "function", None)
-            name = getattr(function, "name", None)
-            arguments = getattr(function, "arguments", None)
-            if isinstance(name, str):
-                parts["name"] += name
-            if isinstance(arguments, str):
-                parts["arguments"] += arguments
-
-
 class OpenAICompatibleProvider(OpenAIResponsesProvider):
     """通过自定义 base URL 使用 Responses 协议的 Provider"""
 
     def __init__(self, *, base_url: str, api_key: str, **kwargs: Any) -> None:
         parsed = urlparse(base_url)
-        local_hosts = {"localhost", "127.0.0.1", "::1"}
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise LlmConfigurationError("兼容服务必须使用 HTTP 或 HTTPS")
         super().__init__(api_key=api_key, base_url=base_url, **kwargs)

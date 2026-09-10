@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 import core
+from core.memory_schema import ensure_memory_schema
 from core.session_archive import (
     SessionArchiveError,
     SessionArchiveStore,
@@ -13,7 +14,6 @@ from core.session_archive import (
     SessionTurnRecord,
     ShortTermSummaryRecord,
 )
-from core.memory_schema import ensure_memory_schema
 
 NOW = datetime(2026, 9, 2, 23, 30, tzinfo=timezone(timedelta(hours=8)))
 

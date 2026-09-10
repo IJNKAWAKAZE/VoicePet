@@ -3,13 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.agent_types import AgentEventType
 from core.asr import AsrTranscriptionError
 from core.audio_types import AudioDeviceError
 from core.cancellation import CancellationToken
 from core.coordinator import Coordinator
 from core.event_bus import EventBus
 from core.events import (
-    ApprovalRequested,
+    AgentApprovalRequested,
     ConversationPhase,
     ErrorSeverity,
     RecordingStarted,
@@ -21,13 +22,7 @@ from core.events import (
     TranscriptReady,
     WakeCommandPending,
 )
-from core.llm import (
-    LlmAttachment,
-    LlmCompleted,
-    LlmNetworkError,
-    LlmTextDelta,
-    LlmToolCall,
-)
+from core.llm import LlmAttachment
 from core.session_context import SessionContext
 from core.state_machine import ConversationStateMachine
 from core.tts import SynthesizedAudio, TtsPlaybackError, TtsSynthesisError
@@ -416,77 +411,6 @@ class DelayedFirstTranscriptFailure:
         raise AssertionError("cancelled transcript must not continue")
 
 
-class ScriptedLlm:
-    def __init__(self, events) -> None:
-        self.events = tuple(events)
-        self.calls = []
-
-    async def stream(self, request, token):
-        self.calls.append((request, token))
-        for event in self.events:
-            await asyncio.sleep(0)
-            yield event
-
-
-class SequencedLlm:
-    def __init__(self, batches) -> None:
-        self.batches = iter(batches)
-        self.calls = []
-
-    async def stream(self, request, token):
-        self.calls.append((request, token))
-        for event in next(self.batches):
-            yield event
-
-
-class FailingLlm:
-    def __init__(self) -> None:
-        self.calls = []
-
-    async def stream(self, request, token):
-        self.calls.append((request, token))
-        raise LlmNetworkError("service unavailable")
-        yield
-
-
-class BlockingLlm:
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-        self.cancelled = asyncio.Event()
-
-    async def stream(self, request, token):
-        del request, token
-        self.started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self.cancelled.set()
-            raise
-        if False:
-            yield
-
-
-class DelayedFirstLlm:
-    def __init__(self) -> None:
-        self.calls = []
-        self.first_started = asyncio.Event()
-        self.second_started = asyncio.Event()
-        self.release_first = asyncio.Event()
-
-    async def stream(self, request, token):
-        index = len(self.calls)
-        self.calls.append((request, token))
-        if index == 0:
-            self.first_started.set()
-            await self.release_first.wait()
-            yield LlmTextDelta("stale")
-            yield LlmCompleted("old-response", 1, 1)
-            return
-        self.second_started.set()
-        yield LlmTextDelta("fresh")
-        yield LlmCompleted("new-response", 1, 1)
-
-
 class RecordingSynthesizer:
     def __init__(self, error=None) -> None:
         self.error = error
@@ -604,6 +528,90 @@ class DelayedFirstSynthesizer(RecordingSynthesizer):
         return await super().synthesize(text, token)
 
 
+def agent_delta(text: str):
+    return SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": text})
+
+
+def agent_completed(status: str = "completed"):
+    return SimpleNamespace(
+        type=AgentEventType.TURN_COMPLETED, payload={"status": status}
+    )
+
+
+class ScriptedGateway:
+    """按脚本回放 Agent 事件，替代已移除的内置大模型网关"""
+
+    def __init__(self, events) -> None:
+        self.events = tuple(events)
+        self.calls: list[tuple[str, str, dict]] = []
+
+    async def run_turn(self, session, text, **kwargs):
+        self.calls.append((session, text, kwargs))
+        for event in self.events:
+            await asyncio.sleep(0)
+            yield event
+
+    async def cancel(self) -> None:
+        return None
+
+
+class SequencedGateway:
+    def __init__(self, batches) -> None:
+        self.batches = iter(batches)
+        self.calls: list[tuple[str, str, dict]] = []
+
+    async def run_turn(self, session, text, **kwargs):
+        self.calls.append((session, text, kwargs))
+        for event in next(self.batches):
+            yield event
+
+    async def cancel(self) -> None:
+        return None
+
+
+class BlockingGateway:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def run_turn(self, session, text, **kwargs):
+        del session, text, kwargs
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+            yield
+        finally:
+            self.cancelled.set()
+
+    async def cancel(self) -> None:
+        return None
+
+
+class DelayedFirstGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def run_turn(self, session, text, **kwargs):
+        del session, text, kwargs
+        index = self.calls
+        self.calls += 1
+        if index == 0:
+            self.first_started.set()
+            await self.release_first.wait()
+            yield agent_delta("stale")
+            yield agent_completed()
+            return
+        self.second_started.set()
+        yield agent_delta("fresh")
+        yield agent_completed()
+
+    async def cancel(self) -> None:
+        return None
+
+
 def test_spoken_notice_bypasses_recording_transcript_and_llm():
     async def scenario():
         audio = ImmediateAudio()
@@ -665,9 +673,7 @@ def test_spoken_notice_rejects_a_second_active_notice():
 def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
     async def scenario():
         audio = ImmediateAudio()
-        llm = ScriptedLlm(
-            [LlmTextDelta("手动回复"), LlmCompleted("response", 2, 2)]
-        )
+        gateway = ScriptedGateway([agent_delta("手动回复"), agent_completed()])
         archive = RecordingSessionArchive()
         synthesizer = RecordingSynthesizer()
         player = RecordingPlayer()
@@ -680,7 +686,7 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
             audio,
             UnexpectedTranscript(),
             bus,
-            llm_provider=llm,
+            agent_gateway=gateway,
             session_archive=archive,
             speech_synthesizer=synthesizer,
             audio_player=player,
@@ -700,7 +706,7 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
         assert [(event.turn_id, event.text) for event in inputs] == [
             (turn_id, "手动问题")
         ]
-        assert llm.calls[0][0].input_text == "手动问题"
+        assert gateway.calls[0][1] == "手动问题"
         assert archive.calls == [(str(turn_id), "手动问题", "手动回复")]
         assert [text for text, _ in synthesizer.calls] == ["手动回复"]
         assert len(player.calls) == 1
@@ -709,37 +715,23 @@ def test_manual_text_bypasses_audio_and_asr_but_uses_full_response_pipeline():
     asyncio.run(scenario())
 
 
-def test_manual_text_passes_attachments_to_llm_request():
+def test_manual_text_passes_attachments_to_agent_request():
     async def scenario():
         attachment = LlmAttachment("C:/tmp/report.txt", "report.txt", "text/plain", 4, "a" * 64, "file")
-        llm = ScriptedLlm([LlmTextDelta("收到"), LlmCompleted("response", 1, 1)])
+        gateway = ScriptedGateway([agent_delta("收到"), agent_completed()])
         coordinator = Coordinator(
-            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
+            ImmediateAudio(), UnexpectedTranscript(), EventBus(), agent_gateway=gateway
         )
         await coordinator.submit_text("请查看", (attachment,))
         await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
-        assert llm.calls[0][0].attachments == (attachment,)
-        await coordinator.stop()
-
-    asyncio.run(scenario())
-
-
-def test_incomplete_llm_response_keeps_partial_text_and_finishes_turn():
-    async def scenario():
-        llm = ScriptedLlm([
-            LlmTextDelta("已经生成的部分"),
-            LlmCompleted("limited", 10, 1024, True, "max_output_tokens"),
-        ])
-        coordinator = Coordinator(
-            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
+        assert gateway.calls[0][2]["attachments"] == (
+            {
+                "name": "report.txt",
+                "path": "C:/tmp/report.txt",
+                "media_type": "text/plain",
+                "kind": "file",
+            },
         )
-
-        await coordinator.submit_text("生成很长的结果")
-        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
-
-        assert coordinator.response_text.startswith("已经生成的部分")
-        assert "达到长度上限" in coordinator.response_text
-        assert llm.calls[0][0].max_output_tokens == 4096
         await coordinator.stop()
 
     asyncio.run(scenario())
@@ -759,53 +751,6 @@ def test_manual_voice_input_records_until_silence_and_returns_transcript():
     asyncio.run(scenario())
 
 
-def test_attached_file_can_be_read_only_through_current_turn_tool(tmp_path):
-    async def scenario():
-        path = tmp_path / "report.txt"
-        path.write_text("报告内容", encoding="utf-8")
-        attachment = LlmAttachment(
-            str(path.resolve()), "report.bin", "application/octet-stream", path.stat().st_size, "a" * 64, "file"
-        )
-        llm = SequencedLlm((
-            (LlmToolCall("read-1", "read_file", {"path": str(path.resolve()), "offset": 0, "length": 64}),
-             LlmCompleted("first", 1, 1)),
-            (LlmTextDelta("已读取"), LlmCompleted("second", 1, 1)),
-        ))
-        coordinator = Coordinator(
-            ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm
-        )
-        await coordinator.submit_text("读取报告", (attachment,))
-        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
-        assert any(tool.name == "read_file" for tool in llm.calls[0][0].tools)
-        assert "5oql5ZGK5YaF5a65" in str(llm.calls[1][0].history)
-        await coordinator.stop()
-
-    asyncio.run(scenario())
-
-
-def test_multiple_attachment_reads_preserve_all_chunks(tmp_path):
-    async def scenario():
-        path = tmp_path / "report.txt"
-        path.write_bytes(b"first second third")
-        attachment = LlmAttachment(str(path), path.name, "application/octet-stream", 18, "a" * 64, "file")
-        def read(call_id, offset, length):
-            return LlmToolCall(call_id, "read_file", {"path": str(path), "offset": offset, "length": length})
-        llm = SequencedLlm((
-            (read("read-1", 0, 5), read("read-2", 6, 6), LlmCompleted("one", 1, 1)),
-            (read("read-3", 13, 5), LlmCompleted("two", 1, 1)),
-            (LlmTextDelta("完整回复"), LlmCompleted("three", 1, 1)),
-        ))
-        coordinator = Coordinator(ImmediateAudio(), UnexpectedTranscript(), EventBus(), llm_provider=llm)
-        await coordinator.submit_text("读取报告", (attachment,))
-        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
-        assert coordinator.response_text == "完整回复"
-        outputs = [item for item in llm.calls[-1][0].history if item.get("type") == "function_call_output"]
-        assert [item["call_id"] for item in outputs] == ["read-1", "read-2", "read-3"]
-        assert all('"status":"success"' in item["output"] for item in outputs)
-        await coordinator.stop()
-    asyncio.run(scenario())
-
-
 def test_manual_text_skips_tts_when_manual_speech_is_disabled():
     async def scenario():
         synthesizer = RecordingSynthesizer()
@@ -814,8 +759,8 @@ def test_manual_text_skips_tts_when_manual_speech_is_disabled():
             ImmediateAudio(),
             UnexpectedTranscript(),
             EventBus(),
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("安静回复"), LlmCompleted("response", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("安静回复"), agent_completed()]
             ),
             speech_synthesizer=synthesizer,
             audio_player=player,
@@ -835,12 +780,12 @@ def test_manual_text_skips_tts_when_manual_speech_is_disabled():
 
 def test_manual_text_rejects_invalid_or_busy_submission():
     async def scenario():
-        llm = BlockingLlm()
+        gateway = BlockingGateway()
         coordinator = Coordinator(
             ImmediateAudio(),
             UnexpectedTranscript(),
             EventBus(),
-            llm_provider=llm,
+            agent_gateway=gateway,
             shutdown_timeout=0.01,
         )
 
@@ -848,7 +793,7 @@ def test_manual_text_rejects_invalid_or_busy_submission():
             with pytest.raises(ValueError):
                 await coordinator.submit_text(text)
         await coordinator.submit_text("第一条")
-        await llm.started.wait()
+        await gateway.started.wait()
         with pytest.raises(RuntimeError, match="cannot start text turn"):
             await coordinator.submit_text("第二条")
         await coordinator.stop()
@@ -860,14 +805,12 @@ def test_voice_and_manual_text_share_one_current_session_context():
     async def scenario():
         session = SessionContext()
         archive = RecordingSessionArchive()
-        llm = ScriptedLlm(
-            [LlmTextDelta("共同回复"), LlmCompleted("response", 1, 1)]
-        )
+        gateway = ScriptedGateway([agent_delta("共同回复"), agent_completed()])
         coordinator = Coordinator(
             ImmediateAudio(),
             SequenceTranscript(["语音问题"]),
             EventBus(),
-            llm_provider=llm,
+            agent_gateway=gateway,
             session_context=session,
             session_archive=archive,
         )
@@ -877,13 +820,10 @@ def test_voice_and_manual_text_share_one_current_session_context():
         await coordinator.submit_text("文字问题")
         await wait_until(
             lambda: coordinator.phase is ConversationPhase.IDLE
-            and len(llm.calls) == 2
+            and len(gateway.calls) == 2
         )
 
-        assert llm.calls[1][0].history == (
-            {"role": "user", "content": "语音问题"},
-            {"role": "assistant", "content": "共同回复"},
-        )
+        assert [call[1] for call in gateway.calls] == ["语音问题", "文字问题"]
         assert len(archive.calls) == 2
         assert archive.calls[0][3] == session.session_id
         assert archive.calls[1][3] == session.session_id
@@ -1380,14 +1320,14 @@ def test_stale_asr_error_after_interrupt_is_discarded():
     asyncio.run(scenario())
 
 
-def test_llm_uses_distinct_operation_id_and_publishes_ordered_deltas():
+def test_agent_uses_distinct_operation_id_and_publishes_ordered_deltas():
     async def scenario():
         transcript = ControlledTranscript(["hello"])
-        llm = ScriptedLlm(
+        gateway = ScriptedGateway(
             [
-                LlmTextDelta("你"),
-                LlmTextDelta("好"),
-                LlmCompleted("response-1", 2, 2),
+                agent_delta("你"),
+                agent_delta("好"),
+                agent_completed(),
             ]
         )
         bus = EventBus()
@@ -1403,7 +1343,7 @@ def test_llm_uses_distinct_operation_id_and_publishes_ordered_deltas():
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
         )
 
         turn_id = await coordinator.start_listening()
@@ -1415,7 +1355,7 @@ def test_llm_uses_distinct_operation_id_and_publishes_ordered_deltas():
         assert all(event.turn_id == turn_id for event in deltas)
         assert len({event.correlation_id for event in deltas}) == 1
         assert deltas[0].correlation_id != transcripts[0].correlation_id
-        assert llm.calls[0][0].input_text == "hello"
+        assert gateway.calls[0][1] == "hello"
         assert machine.phase is ConversationPhase.IDLE
         assert machine.turn_id is None
         await coordinator.stop()
@@ -1423,47 +1363,7 @@ def test_llm_uses_distinct_operation_id_and_publishes_ordered_deltas():
     asyncio.run(scenario())
 
 
-def test_second_turn_includes_first_complete_turn_without_current_input():
-    async def scenario():
-        transcript = ControlledTranscript(["第一问", "第二问"])
-        llm = ScriptedLlm(
-            [LlmTextDelta("第一答"), LlmCompleted("response", 1, 1)]
-        )
-        coordinator = Coordinator(
-            ImmediateAudio(),
-            transcript,
-            EventBus(),
-            llm_provider=llm,
-            session_context=SessionContext(),
-            speech_synthesizer=RecordingSynthesizer(),
-            audio_player=RecordingPlayer(),
-        )
-
-        await coordinator.start_listening()
-        await wait_until(lambda: len(transcript.calls) == 1)
-        transcript.releases[0].set()
-        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
-
-        await coordinator.start_listening()
-        await wait_until(lambda: len(transcript.calls) == 2)
-        transcript.releases[1].set()
-        await wait_until(lambda: len(llm.calls) == 2)
-
-        second_request = llm.calls[1][0]
-        assert second_request.input_text == "第二问"
-        assert second_request.history == (
-            {"role": "user", "content": "第一问"},
-            {"role": "assistant", "content": "第一答"},
-        )
-        assert all(
-            item.get("content") != "第二问" for item in second_request.history
-        )
-        await coordinator.stop()
-
-    asyncio.run(scenario())
-
-
-def test_final_llm_reply_is_archived_once_without_blocking_tts():
+def test_final_agent_reply_is_archived_once_without_blocking_tts():
     async def scenario():
         transcript = ControlledTranscript(["第一问"])
         archive = RecordingSessionArchive()
@@ -1471,8 +1371,8 @@ def test_final_llm_reply_is_archived_once_without_blocking_tts():
             ImmediateAudio(),
             transcript,
             EventBus(),
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("第一答"), LlmCompleted("response", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("第一答"), agent_completed()]
             ),
             session_archive=archive,
             speech_synthesizer=RecordingSynthesizer(),
@@ -1498,9 +1398,7 @@ def test_session_archive_failure_does_not_suppress_final_reply():
             ImmediateAudio(),
             transcript,
             EventBus(),
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
-            ),
+            agent_gateway=ScriptedGateway([agent_delta("回复"), agent_completed()]),
             session_archive=RecordingSessionArchive(RuntimeError("disk")),
         )
 
@@ -1516,51 +1414,55 @@ def test_session_archive_failure_does_not_suppress_final_reply():
     asyncio.run(scenario())
 
 
-def test_llm_tool_call_requests_approval_and_enters_awaiting_approval():
+def test_agent_approval_request_is_forwarded_to_the_ui():
     async def scenario():
         transcript = ControlledTranscript(["open calculator"])
-        llm = ScriptedLlm(
+        gateway = ScriptedGateway(
             [
-                LlmToolCall("call-1", "open_app", {"name": "calc"}),
-                LlmCompleted("response-1", 5, 2),
+                SimpleNamespace(
+                    type=AgentEventType.APPROVAL_REQUEST,
+                    payload={
+                        "request_id": "approval-1",
+                        "message": "是否打开计算器？",
+                        "options": [{"label": "允许", "value": "accept"}],
+                    },
+                ),
+                agent_delta("已打开"),
+                agent_completed(),
             ]
         )
         bus = EventBus()
         machine = ConversationStateMachine()
         approvals = []
-        states = []
-        bus.subscribe(ApprovalRequested, approvals.append)
-        bus.subscribe(StateChanged, states.append)
+        bus.subscribe(AgentApprovalRequested, approvals.append)
         coordinator = Coordinator(
             ImmediateAudio(),
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
         )
 
         turn_id = await coordinator.start_listening()
         await wait_until(lambda: len(transcript.calls) == 1)
         transcript.releases[0].set()
-        await wait_until(
-            lambda: machine.phase is ConversationPhase.AWAITING_APPROVAL
-        )
+        await wait_until(lambda: len(approvals) == 1)
 
-        assert len(approvals) == 1
         assert approvals[0].turn_id == turn_id
-        assert approvals[0].tool_call_id == "call-1"
-        assert "open_app" in approvals[0].summary
-        assert states[-1].correlation_id == approvals[0].correlation_id
-        assert states[-1].current is ConversationPhase.AWAITING_APPROVAL
+        assert approvals[0].approval_id == "approval-1"
+        assert approvals[0].summary == "是否打开计算器？"
+        assert approvals[0].options == ({"label": "允许", "value": "accept"},)
         await coordinator.stop()
 
     asyncio.run(scenario())
 
 
-def test_llm_error_is_published_and_returns_to_idle():
+def test_agent_error_is_published_and_returns_to_idle():
     async def scenario():
         transcript = ControlledTranscript(["hello"])
-        llm = FailingLlm()
+        gateway = ScriptedGateway(
+            [SimpleNamespace(type=AgentEventType.ERROR, payload={"message": "failed"})]
+        )
         bus = EventBus()
         machine = ConversationStateMachine()
         errors = []
@@ -1572,7 +1474,7 @@ def test_llm_error_is_published_and_returns_to_idle():
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
         )
 
         await coordinator.start_listening()
@@ -1582,16 +1484,10 @@ def test_llm_error_is_published_and_returns_to_idle():
         await wait_until(lambda: machine.phase is ConversationPhase.IDLE)
 
         assert len(errors) == 1
-        assert errors[0].code == "llm.network"
-        assert errors[0].component == "llm"
-        assert errors[0].severity is ErrorSeverity.WARNING
-        assert errors[0].retryable is True
-        assert errors[0].user_action_required is False
-        assert errors[0].safe_message == "LLM 网络暂时不可用，请稍后重试"
-        assert errors[0].diagnostic_context == {
-            "exception_type": "LlmNetworkError"
-        }
-        assert "service unavailable" not in repr(errors[0])
+        assert errors[0].error_code == "runtime.error"
+        assert errors[0].component == "runtime"
+        assert errors[0].severity is ErrorSeverity.ERROR
+        assert errors[0].retryable is False
         thinking = next(
             event
             for event in states
@@ -1608,10 +1504,10 @@ def test_llm_error_is_published_and_returns_to_idle():
     asyncio.run(scenario())
 
 
-def test_interrupt_discards_stale_llm_stream_events():
+def test_interrupt_discards_stale_agent_stream_events():
     async def scenario():
         transcript = ControlledTranscript(["old", "new"])
-        llm = DelayedFirstLlm()
+        gateway = DelayedFirstGateway()
         bus = EventBus()
         machine = ConversationStateMachine()
         deltas = []
@@ -1621,19 +1517,19 @@ def test_interrupt_discards_stale_llm_stream_events():
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
         )
 
         old_turn = await coordinator.start_listening()
         await wait_until(lambda: len(transcript.calls) == 1)
         transcript.releases[0].set()
-        await llm.first_started.wait()
+        await gateway.first_started.wait()
 
         new_turn = await coordinator.interrupt()
         await wait_until(lambda: len(transcript.calls) == 2)
         transcript.releases[1].set()
-        await llm.second_started.wait()
-        llm.release_first.set()
+        await gateway.second_started.wait()
+        gateway.release_first.set()
         await wait_until(lambda: coordinator.response_text == "fresh")
 
         assert old_turn != new_turn
@@ -1647,29 +1543,29 @@ def test_interrupt_discards_stale_llm_stream_events():
     asyncio.run(scenario())
 
 
-def test_interrupt_never_archives_stale_llm_completion():
+def test_interrupt_never_archives_stale_agent_completion():
     async def scenario():
         transcript = ControlledTranscript(["旧问题", "新问题"])
-        llm = DelayedFirstLlm()
+        gateway = DelayedFirstGateway()
         session = SessionContext()
         coordinator = Coordinator(
             ImmediateAudio(),
             transcript,
             EventBus(),
-            llm_provider=llm,
+            agent_gateway=gateway,
             session_context=session,
         )
 
         await coordinator.start_listening()
         await wait_until(lambda: len(transcript.calls) == 1)
         transcript.releases[0].set()
-        await llm.first_started.wait()
+        await gateway.first_started.wait()
 
         await coordinator.interrupt()
         await wait_until(lambda: len(transcript.calls) == 2)
         transcript.releases[1].set()
         await wait_until(lambda: coordinator.response_text == "fresh")
-        llm.release_first.set()
+        gateway.release_first.set()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
@@ -1685,11 +1581,11 @@ def test_interrupt_never_archives_stale_llm_completion():
 def test_tts_synthesizes_sentences_and_completes_turn_in_order():
     async def scenario():
         transcript = ControlledTranscript(["hello"])
-        llm = ScriptedLlm(
+        gateway = ScriptedGateway(
             [
-                LlmTextDelta("第一句。第二"),
-                LlmTextDelta("句！尾巴"),
-                LlmCompleted("response-1", 2, 3),
+                agent_delta("第一句。第二"),
+                agent_delta("句！尾巴"),
+                agent_completed(),
             ]
         )
         synthesizer = RecordingSynthesizer()
@@ -1707,7 +1603,7 @@ def test_tts_synthesizes_sentences_and_completes_turn_in_order():
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
             speech_synthesizer=synthesizer,
             audio_player=player,
         )
@@ -1762,8 +1658,8 @@ def test_disabled_speech_skips_tts_and_completes_reply():
             ImmediateAudio(),
             transcript,
             bus,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("静音回复"), LlmCompleted("response-1", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("静音回复"), agent_completed()]
             ),
             speech_synthesizer=synthesizer,
             audio_player=player,
@@ -1793,8 +1689,8 @@ def test_disabling_speech_cancels_playback_and_allows_later_reenable():
             ImmediateAudio(),
             transcript,
             bus,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("保留文字"), LlmCompleted("response-1", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("保留文字"), agent_completed()]
             ),
             speech_synthesizer=RecordingSynthesizer(),
             audio_player=player,
@@ -1820,13 +1716,11 @@ def test_disabling_speech_cancels_playback_and_allows_later_reenable():
 def test_tts_converts_completed_markdown_without_changing_text_events():
     async def scenario():
         transcript = ControlledTranscript(["hello"])
-        llm = ScriptedLlm(
+        gateway = ScriptedGateway(
             [
-                LlmTextDelta("**重要"),
-                LlmTextDelta(
-                    "**：[说明](https://example.com)。版本是 3.12.14。"
-                ),
-                LlmCompleted("response-1", 2, 3),
+                agent_delta("**重要"),
+                agent_delta("**：[说明](https://example.com)。版本是 3.12.14。"),
+                agent_completed(),
             ]
         )
         synthesizer = RecordingSynthesizer()
@@ -1841,7 +1735,7 @@ def test_tts_converts_completed_markdown_without_changing_text_events():
             transcript,
             bus,
             machine,
-            llm_provider=llm,
+            agent_gateway=gateway,
             speech_synthesizer=synthesizer,
             audio_player=RecordingPlayer(),
         )
@@ -1899,8 +1793,8 @@ def test_tts_errors_are_published_and_return_completed_reply_to_idle(
             transcript,
             bus,
             machine,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("回复"), LlmCompleted("response-1", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("回复"), agent_completed()]
             ),
             speech_synthesizer=RecordingSynthesizer(synth_error),
             audio_player=RecordingPlayer(play_error),
@@ -1950,8 +1844,8 @@ def test_interrupt_discards_stale_synthesis_before_playback():
             transcript,
             bus,
             machine,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("回复。"), LlmCompleted("response", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("回复。"), agent_completed()]
             ),
             speech_synthesizer=synthesizer,
             audio_player=player,
@@ -2042,10 +1936,10 @@ def test_turn_duration_expires_blocked_transcription():
     asyncio.run(scenario())
 
 
-def test_turn_duration_expires_blocked_llm_stream():
+def test_turn_duration_expires_blocked_agent_stream():
     async def scenario():
         transcript = ControlledTranscript(["hello"])
-        llm = BlockingLlm()
+        gateway = BlockingGateway()
         bus = EventBus()
         errors = []
         ready = asyncio.Event()
@@ -2059,20 +1953,20 @@ def test_turn_duration_expires_blocked_llm_stream():
             ImmediateAudio(),
             transcript,
             bus,
-            llm_provider=llm,
+            agent_gateway=gateway,
             max_turn_duration=0.02,
         )
         await coordinator.start_listening()
         await wait_until(lambda: len(transcript.calls) == 1)
         transcript.releases[0].set()
-        await llm.started.wait()
+        await gateway.started.wait()
         try:
             await asyncio.wait_for(ready.wait(), timeout=0.5)
         finally:
             await coordinator.stop()
 
         assert errors[-1].error_code == "runtime.budget"
-        assert llm.cancelled.is_set()
+        assert gateway.cancelled.is_set()
 
     asyncio.run(scenario())
 
@@ -2094,8 +1988,8 @@ def test_turn_duration_expires_blocked_synthesis():
             ImmediateAudio(),
             transcript,
             bus,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("回复"), agent_completed()]
             ),
             speech_synthesizer=synthesizer,
             audio_player=RecordingPlayer(),
@@ -2142,8 +2036,8 @@ def test_turn_duration_expires_blocked_playback():
             ImmediateAudio(),
             transcript,
             bus,
-            llm_provider=ScriptedLlm(
-                [LlmTextDelta("回复"), LlmCompleted("response", 1, 1)]
+            agent_gateway=ScriptedGateway(
+                [agent_delta("回复"), agent_completed()]
             ),
             speech_synthesizer=DeadlineSynthesizer(),
             audio_player=player,

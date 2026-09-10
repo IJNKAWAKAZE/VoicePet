@@ -11,12 +11,10 @@ from core.events import (
     ConversationPhase,
     CorrelationId,
     ErrorSeverity,
-    LlmUsageRecorded,
     MemoryResultReady,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
-    ToolResultReady,
     TranscriptReady,
     TurnId,
     WakeCommandPending,
@@ -140,13 +138,6 @@ def test_event_logger_records_ids_and_safe_metadata_without_event_bodies(tmp_pat
                 "private approval summary",
                 "R2",
             ),
-            ToolResultReady(
-                turn_id,
-                correlation_id,
-                "call-1",
-                "success",
-                {"secret": "private tool payload"},
-            ),
             MemoryResultReady(
                 turn_id,
                 correlation_id,
@@ -155,15 +146,6 @@ def test_event_logger_records_ids_and_safe_metadata_without_event_bodies(tmp_pat
                 1,
             ),
             SpeakRequested(turn_id, correlation_id, "private spoken text"),
-            LlmUsageRecorded(
-                turn_id,
-                correlation_id,
-                "gpt-5.6-terra",
-                125,
-                10,
-                5,
-                20,
-            ),
             RuntimeErrorEvent(
                 turn_id,
                 correlation_id,
@@ -200,7 +182,6 @@ def test_event_logger_records_ids_and_safe_metadata_without_event_bodies(tmp_pat
     for private_text in (
         "private transcript",
         "private approval summary",
-        "private tool payload",
         "private memory content",
         "private spoken text",
         "abcdefghijklmnopqrstuvwxyz",
@@ -217,20 +198,6 @@ def test_event_logger_records_ids_and_safe_metadata_without_event_bodies(tmp_pat
         "exception_type": "NetworkError",
         "retryable": True,
         "user_action_required": False,
-    }
-    usage_record = next(
-        record for record in records
-        if record["event_type"] == "LlmUsageRecorded"
-    )
-    assert usage_record["level"] == "INFO"
-    assert usage_record["component"] == "llm"
-    assert usage_record["message"] == "LLM 请求完成"
-    assert usage_record["context"] == {
-        "duration_ms": 125,
-        "input_tokens": 10,
-        "model": "gpt-5.6-terra",
-        "output_tokens": 5,
-        "turn_total_tokens": 20,
     }
 
 

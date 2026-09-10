@@ -21,12 +21,10 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
-    ToolResultReady,
     TranscriptReady,
     TurnId,
     WakeCommandPending,
 )
-from core.policy import ConfirmationMode
 from core.window_state import WindowPosition, WindowStateError
 
 from .markdown import sanitize_markdown
@@ -58,7 +56,7 @@ class QmlRuntimeHostProtocol(Protocol):
 
     def set_audio_muted(self, muted: bool) -> Any: ...
 
-    def approve(self, mode: ConfirmationMode) -> Any: ...
+    def approve(self) -> Any: ...
 
     def reject(self) -> Any: ...
 
@@ -744,8 +742,6 @@ class QmlApplicationController(QObject):
                 self._memories.set_maintenance_status(event.status, event.message)
                 self._memories.refresh_summaries()
             return
-        if isinstance(event, ToolResultReady):
-            return
         if isinstance(event, AgentProgress):
             # 执行状态只显示在桌宠气泡，避免污染最终聊天回复
             self._set_pet_speech(event.message)
@@ -771,7 +767,7 @@ class QmlApplicationController(QObject):
         approve = None
         reject = None
         if self._runtime_host is not None:
-            approve = lambda: self._runtime_host.approve(ConfirmationMode.UI)
+            approve = lambda: self._runtime_host.approve()
             reject = lambda: self._runtime_host.reject()
         self._dialogs.confirm(request, approve, reject)
         main_visible = bool(

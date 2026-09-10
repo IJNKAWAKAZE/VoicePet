@@ -16,7 +16,6 @@ from core.llm import (
     LlmTextDelta,
     LlmToolCall,
     MockProvider,
-    OpenAIChatCompletionsProvider,
     OpenAICompatibleProvider,
     OpenAIResponsesProvider,
     ResilientLlmProvider,
@@ -89,7 +88,7 @@ def test_responses_input_contains_image_reference_for_attachment(tmp_path):
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "gb18030"])
-def test_small_text_attachment_is_inlined_for_both_protocols(tmp_path, encoding):
+def test_small_text_attachment_is_inlined_for_responses_protocol(tmp_path, encoding):
     path = tmp_path / "名单.txt"
     path.write_bytes("医院甲\n医院乙".encode(encoding))
     attachment = LlmAttachment(
@@ -98,11 +97,9 @@ def test_small_text_attachment_is_inlined_for_both_protocols(tmp_path, encoding)
     request = LlmRequest("system", "请查看名单", attachments=(attachment,))
 
     responses_content = OpenAIResponsesProvider._build_input(request)[-1]["content"]
-    chat_content = OpenAIChatCompletionsProvider._build_chat_messages(request)[-1]["content"]
 
     assert "医院甲\n医院乙" in responses_content[-1]["text"]
-    assert "医院甲\n医院乙" in chat_content[-1]["text"]
-    assert "附件正文开始" in chat_content[-1]["text"]
+    assert "附件正文开始" in responses_content[-1]["text"]
 
 
 class FakeStream:
@@ -152,33 +149,12 @@ def test_auto_reasoning_effort_omits_provider_override():
     assert "reasoning" not in client.responses.calls[0]
 
 
-class FakeChatCompletions:
-    def __init__(self, stream):
-        self.stream = stream
-        self.calls = []
-
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.stream
 
 
-class FakeChatClient:
-    def __init__(self, stream):
-        self.chat = SimpleNamespace(completions=FakeChatCompletions(stream))
 
 
-class FailingChatCompletions:
-    def __init__(self, error):
-        self.error = error
-
-    async def create(self, **kwargs):
-        del kwargs
-        raise self.error
 
 
-class FailingChatClient:
-    def __init__(self, error):
-        self.chat = SimpleNamespace(completions=FailingChatCompletions(error))
 
 
 class FakeModels:
@@ -481,331 +457,20 @@ def test_responses_provider_maps_output_limit_as_incomplete_completion():
     ]
 
 
-def test_chat_provider_maps_length_finish_reason_as_incomplete_completion():
-    stream = FakeStream(
-        [
-            SimpleNamespace(
-                id="chat-limited",
-                choices=[SimpleNamespace(
-                    delta=SimpleNamespace(content="部分回复", tool_calls=None),
-                    finish_reason="length",
-                )],
-                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=1024),
-            )
-        ]
-    )
-    provider = OpenAIChatCompletionsProvider(client=FakeChatClient(stream))
-
-    events = asyncio.run(collect(provider, LlmRequest("system", "hello")))
-
-    assert events == [
-        LlmTextDelta("部分回复"),
-        LlmCompleted("chat-limited", 100, 1024, True, "max_output_tokens"),
-    ]
 
 
-def test_chat_provider_sends_messages_and_maps_text_stream():
-    stream = FakeStream(
-        [
-            SimpleNamespace(
-                id="chat-1",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="你", tool_calls=None)
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                id="chat-1",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="好", tool_calls=None)
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                id="chat-1",
-                choices=[],
-                usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4),
-            ),
-        ]
-    )
-    client = FakeChatClient(stream)
-    provider = OpenAIChatCompletionsProvider(
-        client=client,
-        model="gpt-chat",
-    )
-    request = LlmRequest(
-        instructions="你是桌面助手",
-        input_text="继续",
-        history=({"role": "assistant", "content": "你好"},),
-        max_output_tokens=512,
-    )
-
-    events = asyncio.run(collect(provider, request))
-
-    assert events == [
-        LlmTextDelta("你"),
-        LlmTextDelta("好"),
-        LlmCompleted("chat-1", 12, 4),
-    ]
-    assert stream.closed == 1
-    assert client.chat.completions.calls == [
-        {
-            "model": "gpt-chat",
-            "messages": [
-                {"role": "system", "content": "你是桌面助手"},
-                {"role": "assistant", "content": "你好"},
-                {"role": "user", "content": "继续"},
-            ],
-            "max_tokens": 512,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-    ]
 
 
-def test_chat_provider_aggregates_tool_fragments_and_maps_definition():
-    stream = FakeStream(
-        [
-            SimpleNamespace(
-                id="chat-tool-1",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            content=None,
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id="call-1",
-                                    function=SimpleNamespace(
-                                        name="open_app",
-                                        arguments='{"name":',
-                                    ),
-                                )
-                            ],
-                        )
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                id="chat-tool-1",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            content=None,
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id=None,
-                                    function=SimpleNamespace(
-                                        name=None,
-                                        arguments='"calc"}',
-                                    ),
-                                )
-                            ],
-                        )
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-    )
-    client = FakeChatClient(stream)
-    provider = OpenAIChatCompletionsProvider(client=client)
-
-    events = asyncio.run(
-        collect(
-            provider,
-            LlmRequest("你是桌面助手", "打开计算器", tools=(strict_tool(),)),
-        )
-    )
-
-    assert events == [
-        LlmToolCall("call-1", "open_app", {"name": "calc"}),
-        LlmCompleted("chat-tool-1", 0, 0),
-    ]
-    assert client.chat.completions.calls[0]["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "open_app",
-                "description": "打开一个允许的应用",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        }
-    ]
-    assert client.chat.completions.calls[0]["parallel_tool_calls"] is False
 
 
-def test_chat_provider_translates_responses_tool_history():
-    stream = FakeStream(
-        [SimpleNamespace(id="chat-history-1", choices=[], usage=None)]
-    )
-    client = FakeChatClient(stream)
-    provider = OpenAIChatCompletionsProvider(client=client)
-    request = LlmRequest(
-        "你是桌面助手",
-        "根据结果继续",
-        history=(
-            {
-                "type": "function_call",
-                "call_id": "call-1",
-                "name": "open_app",
-                "arguments": '{"name":"calc"}',
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call-1",
-                "output": '{"status":"success"}',
-            },
-        ),
-    )
-
-    asyncio.run(collect(provider, request))
-
-    assert client.chat.completions.calls[0]["messages"] == [
-        {"role": "system", "content": "你是桌面助手"},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {
-                        "name": "open_app",
-                        "arguments": '{"name":"calc"}',
-                    },
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": '{"status":"success"}',
-        },
-        {"role": "user", "content": "根据结果继续"},
-    ]
 
 
-def test_cancelled_chat_stream_closes_and_discards_later_events():
-    source = CancellationSource()
-
-    class CancellingChatStream(FakeStream):
-        async def __anext__(self):
-            event = await super().__anext__()
-            source.cancel("user_interrupt")
-            return event
-
-    stream = CancellingChatStream(
-        [
-            SimpleNamespace(
-                id="chat-cancelled",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="过期", tool_calls=None)
-                    )
-                ],
-                usage=None,
-            )
-        ]
-    )
-    provider = OpenAIChatCompletionsProvider(client=FakeChatClient(stream))
-
-    with pytest.raises(CancelledError):
-        asyncio.run(collect(provider, LlmRequest("system", "hello"), source))
-    assert stream.closed == 1
 
 
-def test_chat_stream_without_response_id_is_protocol_error():
-    stream = FakeStream(
-        [
-            SimpleNamespace(
-                id=None,
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="partial", tool_calls=None)
-                    )
-                ],
-                usage=None,
-            )
-        ]
-    )
-    provider = OpenAIChatCompletionsProvider(client=FakeChatClient(stream))
-
-    with pytest.raises(LlmProtocolError, match="响应标识"):
-        asyncio.run(collect(provider, LlmRequest("system", "hello")))
-    assert stream.closed == 1
 
 
-@pytest.mark.parametrize("arguments", ["not-json", "[]", "null"])
-def test_chat_tool_arguments_must_be_json_object(arguments):
-    stream = FakeStream(
-        [
-            SimpleNamespace(
-                id="chat-tool-invalid",
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            content=None,
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id="call-1",
-                                    function=SimpleNamespace(
-                                        name="open_app",
-                                        arguments=arguments,
-                                    ),
-                                )
-                            ],
-                        )
-                    )
-                ],
-                usage=None,
-            )
-        ]
-    )
-    provider = OpenAIChatCompletionsProvider(client=FakeChatClient(stream))
-
-    with pytest.raises(LlmProtocolError):
-        asyncio.run(collect(provider, LlmRequest("system", "hello")))
-    assert stream.closed == 1
 
 
-@pytest.mark.parametrize(
-    ("error_name", "status_code", "expected_error"),
-    [
-        ("APIConnectionError", None, LlmNetworkError),
-        ("RateLimitError", 429, LlmNetworkError),
-        ("AuthenticationError", 401, LlmConfigurationError),
-        ("PermissionDeniedError", 403, LlmConfigurationError),
-        ("BadRequestError", 400, LlmConfigurationError),
-    ],
-)
-def test_chat_provider_maps_errors_without_leaking_response_body(
-    error_name,
-    status_code,
-    expected_error,
-):
-    error_type = type(error_name, (RuntimeError,), {})
-    error = error_type("包含不应泄漏的请求正文")
-    error.status_code = status_code
-    provider = OpenAIChatCompletionsProvider(client=FailingChatClient(error))
-
-    with pytest.raises(expected_error) as captured:
-        asyncio.run(collect(provider, LlmRequest("system", "hello")))
-
-    assert "请求正文" not in str(captured.value)
 
 
 @pytest.mark.parametrize(

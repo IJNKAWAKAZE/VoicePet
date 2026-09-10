@@ -1,4 +1,4 @@
-"""VoicePet Qt 主进程与 Tool Worker 的统一入口"""
+"""VoicePet Qt 主进程与 Agent Worker 的统一入口"""
 
 from __future__ import annotations
 
@@ -69,12 +69,6 @@ def _run_frozen_smoke() -> int:
     return 0
 
 
-def _run_worker() -> int:
-    from core.worker_entry import run_worker
-
-    return run_worker()
-
-
 def _run_agent_worker() -> int:
     """进入独立 Agent Worker 进程，避免加载 Qt 主线程"""
 
@@ -122,7 +116,6 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     ui_entry: Callable[[bool], int] = _run_ui,
-    worker_entry: Callable[[], int] = _run_worker,
     agent_worker_entry: Callable[[], int] = _run_agent_worker,
     reset_entry: Callable[[], int] = _run_memory_reset,
 ) -> int:
@@ -131,13 +124,10 @@ def main(
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="VoicePet")
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--tool-worker", action="store_true")
     modes.add_argument("--agent-worker", action="store_true")
     modes.add_argument("--smoke-test", action="store_true")
     modes.add_argument("--reset-test-memory", action="store_true")
     arguments = parser.parse_args(argv)
-    if arguments.tool_worker:
-        return worker_entry()
     if arguments.agent_worker:
         return agent_worker_entry()
     if arguments.reset_test_memory:

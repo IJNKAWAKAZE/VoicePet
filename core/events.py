@@ -164,34 +164,6 @@ class RecordingStarted:
 
 
 @dataclass(frozen=True, slots=True)
-class LlmUsageRecorded:
-    """不包含业务正文的单次 LLM 用量事件"""
-
-    turn_id: TurnId
-    correlation_id: CorrelationId
-    model: str
-    duration_ms: int
-    input_tokens: int
-    output_tokens: int
-    turn_total_tokens: int
-
-    def __post_init__(self) -> None:
-        validate_llm_model_name(self.model)
-        values = (
-            self.duration_ms,
-            self.input_tokens,
-            self.output_tokens,
-            self.turn_total_tokens,
-        )
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-            raise TypeError("LLM 用量字段类型无效")
-        if any(value < 0 for value in values):
-            raise ValueError("LLM 用量字段不能小于零")
-        if self.turn_total_tokens < self.input_tokens + self.output_tokens:
-            raise ValueError("单轮累计 token 不能小于本次用量")
-
-
-@dataclass(frozen=True, slots=True)
 class TextDelta:
     turn_id: TurnId
     correlation_id: CorrelationId
@@ -225,15 +197,6 @@ class AgentApprovalRequested:
     approval_id: str
     summary: str
     options: tuple[dict[str, str], ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ToolResultReady:
-    turn_id: TurnId
-    correlation_id: CorrelationId
-    tool_call_id: str
-    status: str
-    payload: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)

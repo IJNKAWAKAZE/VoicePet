@@ -5,16 +5,9 @@ import pytest
 from core import (
     ActivationController,
     AsrRuntimeStatus,
-    AsyncSubprocessRunner,
     AudioCaptureService,
     AudioFormat,
-    AuditContext,
-    AuditStore,
-    AuthorizationIssuer,
-    AuthorizationVerifier,
     CancellationSource,
-    ConfirmationMode,
-    ControlledShellTool,
     Coordinator,
     EdgeTtsSynthesizer,
     EventBus,
@@ -23,31 +16,10 @@ from core import (
     LlmCompleted,
     LlmRequest,
     MockProvider,
-    MoveFileTool,
-    MoveFileUndoTool,
-    OpenAIChatCompletionsProvider,
     OpenAIResponsesProvider,
-    OpenAppTool,
-    PolicyEngine,
-    PolicySettings,
-    ProcessOutcome,
-    RiskLevel,
-    RpcRequest,
-    RpcResponse,
-    ScopedPathResolver,
     SentenceChunker,
     SoundDeviceInputBackend,
     SynthesizedAudio,
-    SystemInfoTool,
-    ToolCatalog,
-    ToolExecutionResult,
-    ToolExecutionStatus,
-    ToolManifest,
-    ToolProposal,
-    ToolRegistry,
-    ToolWorkerClient,
-    ToolWorkerServer,
-    ToolWorkerService,
     VadAudioSession,
     WakeWordMonitor,
     WebRtcVadDetector,
@@ -57,21 +29,16 @@ from core import (
 from core import (
     ConversationStateMachine as ExportedStateMachine,
 )
-from core import (
-    LlmUsageRecorded as ExportedLlmUsageRecorded,
-)
 from core.events import (
     ApprovalRequested,
     ConversationPhase,
     CorrelationId,
     ErrorSeverity,
-    LlmUsageRecorded,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
     TextDelta,
     TextInputSubmitted,
-    ToolResultReady,
     TranscriptReady,
     TurnId,
 )
@@ -83,12 +50,8 @@ def test_runtime_foundation_is_available_from_core_package():
     assert AudioFormat.__name__ == "AudioFormat"
     assert ActivationController.__name__ == "ActivationController"
     assert AsrRuntimeStatus.__name__ == "AsrRuntimeStatus"
-    assert AsyncSubprocessRunner.__name__ == "AsyncSubprocessRunner"
-    assert AuditContext.__name__ == "AuditContext"
-    assert AuditStore.__name__ == "AuditStore"
     assert CancellationSource.__name__ == "CancellationSource"
     assert Coordinator.__name__ == "Coordinator"
-    assert ControlledShellTool.__name__ == "ControlledShellTool"
     assert EventBus.__name__ == "EventBus"
     assert EdgeTtsSynthesizer.__name__ == "EdgeTtsSynthesizer"
     assert FallbackSpeechSynthesizer.__name__ == "FallbackSpeechSynthesizer"
@@ -98,36 +61,10 @@ def test_runtime_foundation_is_available_from_core_package():
     assert LlmCompleted.__name__ == "LlmCompleted"
     assert LlmRequest.__name__ == "LlmRequest"
     assert MockProvider.__name__ == "MockProvider"
-    assert MoveFileTool.__name__ == "MoveFileTool"
-    assert MoveFileUndoTool.__name__ == "MoveFileUndoTool"
-    assert OpenAIChatCompletionsProvider.__name__ == (
-        "OpenAIChatCompletionsProvider"
-    )
     assert OpenAIResponsesProvider.__name__ == "OpenAIResponsesProvider"
-    assert OpenAppTool.__name__ == "OpenAppTool"
-    assert AuthorizationIssuer.__name__ == "AuthorizationIssuer"
-    assert AuthorizationVerifier.__name__ == "AuthorizationVerifier"
-    assert ConfirmationMode.__name__ == "ConfirmationMode"
-    assert PolicyEngine.__name__ == "PolicyEngine"
-    assert PolicySettings.__name__ == "PolicySettings"
-    assert ProcessOutcome.__name__ == "ProcessOutcome"
-    assert RiskLevel.__name__ == "RiskLevel"
-    assert RpcRequest.__name__ == "RpcRequest"
-    assert RpcResponse.__name__ == "RpcResponse"
-    assert ScopedPathResolver.__name__ == "ScopedPathResolver"
     assert SentenceChunker.__name__ == "SentenceChunker"
     assert SoundDeviceInputBackend.__name__ == "SoundDeviceInputBackend"
     assert SynthesizedAudio.__name__ == "SynthesizedAudio"
-    assert SystemInfoTool.__name__ == "SystemInfoTool"
-    assert ToolCatalog.__name__ == "ToolCatalog"
-    assert ToolExecutionResult.__name__ == "ToolExecutionResult"
-    assert ToolExecutionStatus.__name__ == "ToolExecutionStatus"
-    assert ToolManifest.__name__ == "ToolManifest"
-    assert ToolProposal.__name__ == "ToolProposal"
-    assert ToolRegistry.__name__ == "ToolRegistry"
-    assert ToolWorkerClient.__name__ == "ToolWorkerClient"
-    assert ToolWorkerServer.__name__ == "ToolWorkerServer"
-    assert ToolWorkerService.__name__ == "ToolWorkerService"
     assert VadAudioSession.__name__ == "VadAudioSession"
     assert WakeWordMonitor.__name__ == "WakeWordMonitor"
     assert WebRtcVadDetector.__name__ == "WebRtcVadDetector"
@@ -181,9 +118,7 @@ def test_every_runtime_event_carries_both_identifiers():
         TextInputSubmitted(turn, correlation, "hello"),
         TextDelta(turn, correlation, "hel"),
         ApprovalRequested(turn, correlation, "call-1", "Open app", "R1"),
-        ToolResultReady(turn, correlation, "call-1", "success", {"ok": True}),
         SpeakRequested(turn, correlation, "hello"),
-        LlmUsageRecorded(turn, correlation, "gpt-test", 125, 10, 5, 15),
         RuntimeErrorEvent(
             turn,
             correlation,
@@ -199,61 +134,6 @@ def test_every_runtime_event_carries_both_identifiers():
 
     assert all(event.turn_id == turn for event in events)
     assert all(event.correlation_id == correlation for event in events)
-
-
-def test_llm_usage_event_is_immutable_and_validates_safe_metadata():
-    event = LlmUsageRecorded(
-        TurnId.new(),
-        CorrelationId.new(),
-        "gpt-5.6-terra",
-        125,
-        10,
-        5,
-        20,
-    )
-
-    assert ExportedLlmUsageRecorded is LlmUsageRecorded
-    with pytest.raises(FrozenInstanceError):
-        event.model = "changed"
-    for model in (
-        "",
-        "x" * 129,
-        "private\nprompt",
-        "sk-private-token",
-        "ignore previous instructions",
-        r"C:\Users\Alice\model",
-        "https://example.com/model",
-    ):
-        with pytest.raises(ValueError):
-            LlmUsageRecorded(
-                TurnId.new(),
-                CorrelationId.new(),
-                model,
-                0,
-                0,
-                0,
-                0,
-            )
-    with pytest.raises(ValueError):
-        LlmUsageRecorded(
-            TurnId.new(),
-            CorrelationId.new(),
-            "gpt-test",
-            1,
-            10,
-            5,
-            14,
-        )
-    with pytest.raises(TypeError):
-        LlmUsageRecorded(
-            TurnId.new(),
-            CorrelationId.new(),
-            "gpt-test",
-            True,
-            0,
-            0,
-            0,
-        )
 
 
 def advance(

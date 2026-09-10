@@ -218,8 +218,7 @@ def test_runtime_host_starts_services_and_runs_activation_off_ui_thread():
         FakeCoordinator(events),
         FakeActivation(events),
         FakeLifecycle("capture", events),
-        FakeLifecycle("worker", events),
-        FakeLifecycle("wake", events),
+        wake_service=FakeLifecycle("wake", events),
     )
     host = RuntimeHost(services)
     caller_thread = threading.get_ident()
@@ -231,12 +230,10 @@ def test_runtime_host_starts_services_and_runs_activation_off_ui_thread():
     assert isinstance(turn_id, TurnId)
     assert [name for name, _ in events] == [
         "start:capture",
-        "start:worker",
         "start:wake",
         "activate:click",
         "stop:wake",
         "stop:coordinator",
-        "stop:worker",
         "stop:capture",
     ]
     assert all(thread_id != caller_thread for _, thread_id in events)
@@ -415,9 +412,10 @@ def test_runtime_host_rolls_back_started_services_on_startup_failure():
         FakeCoordinator(events),
         FakeActivation(events),
         FakeLifecycle("capture", events),
-        FailingLifecycle("worker", events),
-        FakeLifecycle("wake", events),
-        (lambda: events.append(("close:resources", threading.get_ident())),),
+        wake_service=FailingLifecycle("wake", events),
+        closers=(
+            lambda: events.append(("close:resources", threading.get_ident())),
+        ),
     )
     host = RuntimeHost(services)
 
@@ -426,7 +424,7 @@ def test_runtime_host_rolls_back_started_services_on_startup_failure():
 
     assert [name for name, _ in events] == [
         "start:capture",
-        "start:worker",
+        "start:wake",
         "stop:capture",
         "close:resources",
     ]

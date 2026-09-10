@@ -13,9 +13,6 @@ ScrollView {
     Connections {
         target: root.settings
         function onDraftRestored() {
-            apiSelector.currentIndex = Qt.binding(function() {
-                return apiSelector.model.indexOf(root.settings.draft.llm.api)
-            })
             baseUrlField.text = root.settings.draft.llm.base_url
             modelField.text = root.settings.draft.llm.model
             reasoningEffortSelector.currentIndex = Qt.binding(function() {
@@ -35,15 +32,6 @@ ScrollView {
         spacing: 14
         Text { text: "AI 服务"; color: root.theme.text; font.pixelSize: 24; font.bold: true }
         FieldLabel { theme: root.theme; text: "Codex Agent" }
-        FieldLabel { theme: root.theme; text: "API 协议" }
-        AppComboBox {
-            id: apiSelector
-            Layout.preferredWidth: 360
-            theme: root.theme
-            model: ["responses", "chat_completions"]
-            currentIndex: model.indexOf(root.settings.draft.llm.api)
-            onActivated: root.settings.set_field("llm", "api", currentText)
-        }
         FieldLabel { theme: root.theme; text: "API 地址（留空使用官方地址）" }
         AppTextField {
             id: baseUrlField

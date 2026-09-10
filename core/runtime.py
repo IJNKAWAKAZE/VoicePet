@@ -16,7 +16,6 @@ from .diagnostics import DiagnosticResult
 from .event_bus import EventBus
 from .events import MemoryChanged, TurnId
 from .llm import LlmAttachment
-from .policy import ConfirmationMode
 from .wake import WakeRuntimeStatus
 from .wake_models import WakeDownloadProgress, WakeModelState
 
@@ -42,7 +41,7 @@ class CoordinatorService(Protocol):
 
     async def stop(self) -> None: ...
 
-    async def approve_pending(self, mode: ConfirmationMode) -> None: ...
+    async def approve_pending(self) -> None: ...
 
     async def reject_pending(self) -> None: ...
 
@@ -210,7 +209,6 @@ class RuntimeServices:
     coordinator: CoordinatorService
     activation: ActivationService
     capture: AsyncLifecycle
-    worker: AsyncLifecycle | None = None
     wake_service: WakeWordRuntimeServiceProtocol | None = None
     closers: tuple[Callable[[], None], ...] = ()
     memory: MemoryDataService | None = None
@@ -414,8 +412,8 @@ class RuntimeHost:
         preparer = self._require_asr_preparer()
         return self._submit(preparer.preload())
 
-    def approve(self, mode: ConfirmationMode) -> Future[None]:
-        return self._submit(self._services.coordinator.approve_pending(mode))
+    def approve(self) -> Future[None]:
+        return self._submit(self._services.coordinator.approve_pending())
 
     def reject(self) -> Future[None]:
         return self._submit(self._services.coordinator.reject_pending())
@@ -756,7 +754,6 @@ class RuntimeHost:
         try:
             for service in (
                 self._services.capture,
-                self._services.worker,
                 self._services.wake_service,
                 self._services.scheduler,
             ):
@@ -797,7 +794,7 @@ class RuntimeHost:
         scheduler = self._services.scheduler
         if scheduler is not None and scheduler in self._started:
             await self._stop_service(scheduler, errors)
-        for service in (self._services.worker, self._services.capture):
+        for service in (self._services.capture,):
             if service is not None and service in self._started:
                 await self._stop_service(service, errors)
         self._close_sync_resources(errors)

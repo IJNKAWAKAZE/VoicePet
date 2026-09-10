@@ -6,6 +6,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 
 from core.config import AppConfig
 from core.events import (
+    AgentProgress,
     ApprovalRequested,
     ConversationPhase,
     CorrelationId,
@@ -13,7 +14,6 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
-    ToolResultReady,
     TurnId,
 )
 from core.window_state import WindowPosition
@@ -67,8 +67,8 @@ class Runtime:
         self.cancellations += 1
         return completed()
 
-    def approve(self, mode):
-        self.approvals.append(mode)
+    def approve(self):
+        self.approvals.append(None)
         return completed()
 
     def reject(self):
@@ -508,7 +508,7 @@ def test_hotkey_settings_replace_then_disable_registration(qapp):
     controller.close()
 
 
-def test_tool_result_does_not_create_a_chat_or_pet_message(qapp):
+def test_agent_progress_only_updates_the_pet_bubble(qapp):
     controller, _runtime, _tray, qml, _shell, chat, *_ = build_controller(qapp)
     controller.start()
     turn_id = TurnId.new()
@@ -517,16 +517,10 @@ def test_tool_result_does_not_create_a_chat_or_pet_message(qapp):
 
     controller.handle_runtime_event(TextDelta(turn_id, correlation, "正在处理"))
     controller.handle_runtime_event(
-        ToolResultReady(
-            turn_id,
-            correlation,
-            "call-1",
-            "success",
-            {"message": "已经完成"},
-        )
+        AgentProgress(turn_id, correlation, "已经完成")
     )
 
-    assert pet.property("speech") == "正在处理"
+    assert pet.property("speech") == "已经完成"
     assert chat.message_model.rowCount() == 1
     assert pet.findChild(QObject, "petSpeechBubble") is not None
     controller.close()

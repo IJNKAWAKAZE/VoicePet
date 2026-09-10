@@ -4,7 +4,6 @@ import sys
 import pytest
 
 import app
-from core.worker_entry import run_worker
 
 
 def test_main_calls_freeze_support_and_dispatches_ui(monkeypatch):
@@ -17,37 +16,36 @@ def test_main_calls_freeze_support_and_dispatches_ui(monkeypatch):
     assert calls == ["freeze", ("ui", False)]
 
 
-def test_main_dispatches_smoke_without_worker(monkeypatch):
+def test_main_dispatches_smoke_to_ui_entry(monkeypatch):
     calls = []
     monkeypatch.setattr(multiprocessing, "freeze_support", lambda: calls.append("freeze"))
 
     result = app.main(
         ["--smoke-test"],
         ui_entry=lambda smoke: calls.append(("ui", smoke)) or 0,
-        worker_entry=lambda: calls.append("worker") or 0,
     )
 
     assert result == 0
     assert calls == ["freeze", ("ui", True)]
 
 
-def test_main_dispatches_tool_worker_without_importing_ui(monkeypatch):
+def test_main_dispatches_agent_worker_without_importing_ui(monkeypatch):
     calls = []
     monkeypatch.setattr(multiprocessing, "freeze_support", lambda: calls.append("freeze"))
 
     result = app.main(
-        ["--tool-worker"],
+        ["--agent-worker"],
         ui_entry=lambda smoke: calls.append("ui") or 0,
-        worker_entry=lambda: calls.append("worker") or 9,
+        agent_worker_entry=lambda: calls.append("agent") or 9,
     )
 
     assert result == 9
-    assert calls == ["freeze", "worker"]
+    assert calls == ["freeze", "agent"]
 
 
 def test_main_rejects_conflicting_modes():
     with pytest.raises(SystemExit):
-        app.main(["--tool-worker", "--smoke-test"])
+        app.main(["--agent-worker", "--smoke-test"])
 
 
 def test_frozen_smoke_checks_bundled_pet_and_user_data_directory(
@@ -105,9 +103,3 @@ def test_frozen_smoke_loads_qml_after_resource_validation(monkeypatch, tmp_path)
 
     assert app._run_ui(True) == 0
     assert calls == ["files", ("qml", True)]
-
-
-def test_worker_rejection_handles_windowed_build_without_stderr(monkeypatch):
-    monkeypatch.setattr(sys, "stderr", None)
-
-    assert run_worker() == 2

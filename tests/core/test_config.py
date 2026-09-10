@@ -99,7 +99,6 @@ def test_default_config_matches_product_defaults_and_is_immutable():
     assert config.wake_word.sensitivity == 0.5
     assert config.asr.model == "small"
     assert config.llm.model == "gpt-5.6-terra"
-    assert config.llm.api == "responses"
     assert config.llm.base_url == ""
     assert config.llm.system_prompt == ""
     assert config.llm.store is False
@@ -122,17 +121,15 @@ def test_default_config_matches_product_defaults_and_is_immutable():
         config.config_version = 2
 
 
-def test_llm_config_accepts_chat_protocol_and_loopback_endpoint():
+def test_llm_config_accepts_custom_base_url():
     config = replace(
         AppConfig(),
         llm=replace(
             AppConfig().llm,
-            api="chat_completions",
             base_url="http://localhost:11434/v1",
         ),
     )
 
-    assert config.llm.api == "chat_completions"
     assert config.llm.base_url == "http://localhost:11434/v1"
 
 
@@ -361,11 +358,6 @@ def test_llm_config_accepts_http_internal_network_base_url():
     )
 
     assert config.llm.base_url == "http://192.168.1.20:8080/v1"
-
-
-def test_llm_config_rejects_unknown_api_protocol():
-    with pytest.raises(ConfigError, match="协议"):
-        replace(AppConfig(), llm=replace(AppConfig().llm, api="automatic"))
 
 
 def test_config_round_trip_uses_exact_schema_and_contains_no_secret_fields(tmp_path):

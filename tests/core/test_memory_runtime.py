@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from core.agent_types import AgentEventType
 from core.config import PrivacyConfig
 from core.coordinator import Coordinator
 from core.event_bus import EventBus
@@ -17,12 +18,10 @@ from core.events import (
     MemoryChanged,
     MemoryResultReady,
 )
-from core.llm import LlmCompleted, LlmTextDelta
 from core.memory import MemoryConfigurationError, MemoryStore
 from core.memory_data import MemoryDataManager
 from core.memory_facts import MemoryChange
 from core.memory_intents import MemoryOperationService
-from core.policy import ConfirmationMode
 from core.runtime import RuntimeHost, RuntimeServices
 from core.session_archive import SessionArchiveStore
 from core.session_context import SessionContext
@@ -68,22 +67,38 @@ class RuntimeCoordinator:
         return None
 
 
-class ImmediateLlm:
-    async def stream(self, request, token):
-        yield LlmTextDelta("完整回复")
-        yield LlmCompleted("response", 2, 2)
+def _agent_text(text):
+    return SimpleNamespace(type=AgentEventType.TEXT_DELTA, payload={"text": text})
 
 
-class DelayedLlm:
+def _agent_completed():
+    return SimpleNamespace(
+        type=AgentEventType.TURN_COMPLETED, payload={"status": "completed"}
+    )
+
+
+class ImmediateGateway:
+    async def run_turn(self, session, text, **kwargs):
+        yield _agent_text("完整回复")
+        yield _agent_completed()
+
+    async def cancel(self):
+        return None
+
+
+class DelayedGateway:
     def __init__(self):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def stream(self, request, token):
+    async def run_turn(self, session, text, **kwargs):
         self.started.set()
         await self.release.wait()
-        yield LlmTextDelta("完整回复")
-        yield LlmCompleted("response", 2, 2)
+        yield _agent_text("完整回复")
+        yield _agent_completed()
+
+    async def cancel(self):
+        return None
 
 
 async def wait_idle(coordinator):
@@ -100,12 +115,12 @@ def test_coordinator_enqueues_completed_archive_for_captured_session(tmp_path):
         captured_session_id = context.session_id
         archive = SessionArchiveStore(tmp_path / "assistant.db")
         queued = []
-        llm = DelayedLlm()
+        llm = DelayedGateway()
         coordinator = Coordinator(
             Audio(),
             Transcript(),
             EventBus(),
-            llm_provider=llm,
+            agent_gateway=llm,
             session_context=context,
             session_archive=archive,
             archive_completion=lambda session_id, turn_id: queued.append(
@@ -135,12 +150,12 @@ def test_coordinator_does_not_enqueue_cancelled_completion(tmp_path):
         context = SessionContext()
         archive = SessionArchiveStore(tmp_path / "assistant.db")
         queued = []
-        llm = DelayedLlm()
+        llm = DelayedGateway()
         coordinator = Coordinator(
             Audio(),
             Transcript(),
             EventBus(),
-            llm_provider=llm,
+            agent_gateway=llm,
             session_context=context,
             session_archive=archive,
             archive_completion=lambda session_id, turn_id: queued.append(
@@ -176,7 +191,7 @@ def test_archive_failure_does_not_prevent_ordinary_reply_completion():
             Audio(),
             Transcript(),
             EventBus(),
-            llm_provider=ImmediateLlm(),
+            agent_gateway=ImmediateGateway(),
             session_context=SessionContext(),
             session_archive=FailingArchive(),
             archive_completion=lambda session_id, turn_id: (_ for _ in ()).throw(
@@ -505,7 +520,7 @@ def test_disabled_memory_explicit_remember_reports_not_enabled(tmp_path):
             if approvals:
                 break
             await asyncio.sleep(0)
-        await coordinator.approve_pending(ConfirmationMode.UI)
+        await coordinator.approve_pending()
 
         assert results[-1].status == "failed"
         assert results[-1].message == "记忆功能未启用，未保存这条内容"
@@ -516,9 +531,8 @@ def test_disabled_memory_explicit_remember_reports_not_enabled(tmp_path):
     asyncio.run(scenario())
 
 
-def test_factory_wires_background_pipeline_without_main_memory_tools(tmp_path):
+def test_factory_wires_background_memory_pipeline(tmp_path):
     from core.config import AppConfig
-    from core.llm import ResilientLlmProvider
     from core.runtime_factory import build_default_runtime
 
     services = build_default_runtime(
@@ -528,17 +542,8 @@ def test_factory_wires_background_pipeline_without_main_memory_tools(tmp_path):
         api_key="isolated-test-key",
     )
     try:
-        tool_names = {item.name for item in services.coordinator._llm_tools}
-        assert "propose_memory" not in tool_names
-        assert "update_daily_summary" not in tool_names
-        assert services.coordinator._memory_candidates is None
-        assert services.coordinator._short_term_summaries is None
         assert services.scheduler is not None
-        assert isinstance(services.coordinator._llm_provider, ResilientLlmProvider)
-        assert (
-            services.scheduler._extractor._provider
-            is services.coordinator._llm_provider._provider
-        )
+        assert services.scheduler._extractor is not None
         assert services.memory_context is services.coordinator._memory_context
         assert services.session_archive._retention_days == 7
         assert services.session_archive._summary_retention_days == 7
@@ -579,7 +584,6 @@ def test_factory_validates_legacy_memory_schema_before_opening_other_resources(
         raise AssertionError("旧记忆结构校验前不应打开其他持久资源")
 
     monkeypatch.setattr("core.runtime_factory.StructuredLogStore", unexpected_resource)
-    monkeypatch.setattr("core.runtime_factory.AuditStore", unexpected_resource)
 
     with pytest.raises(MemorySchemaError, match="旧记忆结构"):
         build_default_runtime(AppConfig(), EventBus(), data_root)

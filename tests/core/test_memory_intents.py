@@ -21,7 +21,6 @@ from core.memory_intents import (
     MemoryIntentParser,
     MemoryOperationService,
 )
-from core.policy import ConfirmationMode
 from core.session_archive import SessionArchiveStore
 
 
@@ -169,7 +168,7 @@ def test_coordinator_requires_confirmation_before_explicit_memory_write(tmp_path
         assert store.list_all() == ()
         assert approvals[0].risk == "隐私"
 
-        await coordinator.approve_pending(ConfirmationMode.UI)
+        await coordinator.approve_pending()
         assert store.list_all()[0].content == "我喜欢低音量播报"
         assert results[-1].status == "success"
         await coordinator.stop()
@@ -210,7 +209,7 @@ def test_expired_turn_rejects_approved_memory_write(tmp_path):
                 break
             await asyncio.sleep(0)
         current[0] = 0.02
-        await coordinator.approve_pending(ConfirmationMode.UI)
+        await coordinator.approve_pending()
 
         assert store.list_all() == ()
         assert errors[-1].error_code == "runtime.budget"
@@ -271,7 +270,7 @@ def test_interrupt_discards_completed_explicit_memory_result(tmp_path):
         old_turn = await coordinator.start_listening()
         await asyncio.wait_for(first_approval.wait(), timeout=1)
         approval_task = asyncio.create_task(
-            coordinator.approve_pending(ConfirmationMode.UI)
+            coordinator.approve_pending()
         )
         assert await asyncio.to_thread(started.wait, 1)
 
@@ -336,7 +335,7 @@ def test_expired_started_memory_write_reports_result_then_recovers(tmp_path):
             if approvals:
                 break
             await asyncio.sleep(0)
-        await coordinator.approve_pending(ConfirmationMode.UI)
+        await coordinator.approve_pending()
 
         assert len(store.list_all()) == 1
         assert results[-1].status == "success"

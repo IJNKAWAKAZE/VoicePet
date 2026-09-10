@@ -14,14 +14,12 @@ from typing import Any
 from .event_bus import EventBus, Subscription
 from .events import (
     ApprovalRequested,
-    LlmUsageRecorded,
     MemoryResultReady,
     RecordingStarted,
     RuntimeErrorEvent,
     SpeakRequested,
     StateChanged,
     TextInputSubmitted,
-    ToolResultReady,
     TranscriptReady,
     WakeCommandPending,
 )
@@ -184,9 +182,7 @@ RuntimeLogEvent = (
     StateChanged
     | TextInputSubmitted
     | TranscriptReady
-    | LlmUsageRecorded
     | ApprovalRequested
-    | ToolResultReady
     | MemoryResultReady
     | SpeakRequested
     | RuntimeErrorEvent
@@ -202,9 +198,7 @@ class RuntimeEventLogger:
         StateChanged,
         TextInputSubmitted,
         TranscriptReady,
-        LlmUsageRecorded,
         ApprovalRequested,
-        ToolResultReady,
         MemoryResultReady,
         SpeakRequested,
         RuntimeErrorEvent,
@@ -260,32 +254,12 @@ class RuntimeEventLogger:
             return "info", "wake", "唤醒后等待补充指令", {}
         if isinstance(event, RecordingStarted):
             return "info", "audio", "录音已开始", {}
-        if isinstance(event, LlmUsageRecorded):
-            return (
-                "info",
-                "llm",
-                "LLM 请求完成",
-                {
-                    "model": event.model,
-                    "duration_ms": event.duration_ms,
-                    "input_tokens": event.input_tokens,
-                    "output_tokens": event.output_tokens,
-                    "turn_total_tokens": event.turn_total_tokens,
-                },
-            )
         if isinstance(event, ApprovalRequested):
             return (
                 "info",
                 "policy",
                 "等待用户确认",
                 {"tool_call_id": event.tool_call_id, "risk": event.risk},
-            )
-        if isinstance(event, ToolResultReady):
-            return (
-                "info",
-                "tool_worker",
-                "工具执行结束",
-                {"tool_call_id": event.tool_call_id, "status": event.status},
             )
         if isinstance(event, MemoryResultReady):
             return (

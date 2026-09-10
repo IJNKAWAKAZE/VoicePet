@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-SUPPORTED_LLM_APIS = frozenset({"responses", "chat_completions"})
 SUPPORTED_REASONING_EFFORTS = frozenset(
     {"auto", "minimal", "low", "medium", "high", "xhigh"}
 )
@@ -88,7 +87,6 @@ class AsrConfig:
 @dataclass(frozen=True, slots=True)
 class LlmConfig:
     provider: str = "openai"
-    api: str = "responses"
     base_url: str = ""
     model: str = "gpt-5.6-terra"
     reasoning_effort: str = "low"
@@ -96,8 +94,6 @@ class LlmConfig:
     store: bool = False
 
     def __post_init__(self) -> None:
-        if self.api not in SUPPORTED_LLM_APIS:
-            raise ConfigError("LLM API 协议不受支持")
         if self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
             raise ConfigError("LLM 思考强度不受支持")
         validate_llm_base_url(self.base_url)
@@ -244,7 +240,6 @@ class AppConfig:
             self.asr.language,
             self.wake_word.keyword,
             self.llm.provider,
-            self.llm.api,
             self.llm.model,
             self.llm.reasoning_effort,
             self.tts.online,

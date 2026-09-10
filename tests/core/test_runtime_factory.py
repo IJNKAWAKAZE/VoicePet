@@ -10,7 +10,6 @@ from core.config import AppConfig
 from core.coordinator import Coordinator
 from core.event_bus import EventBus
 from core.events import ConversationPhase, CorrelationId, StateChanged, TurnId
-from core.llm import ResilientLlmProvider
 from core.runtime import RuntimeHost
 from core.runtime_factory import build_default_runtime
 from core.session_archive import SessionArchiveStore
@@ -19,14 +18,13 @@ from core.tts import FallbackSpeechSynthesizer, ResilientSpeechSynthesizer
 from core.turn_budget import TurnBudgetLimits
 from core.wake import WakeRuntimeStatus, WakeWordRuntimeService
 from core.wake_models import WAKE_MODEL_NAME
-from core.worker_process import ToolWorkerProcessManager
 
 
 def test_default_runtime_factory_is_publicly_exported():
     assert core.build_default_runtime is build_default_runtime
 
 
-def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_path):
+def test_default_runtime_factory_wires_local_fallback(tmp_path):
     event_bus = EventBus()
 
     services = build_default_runtime(
@@ -40,15 +38,14 @@ def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_pat
         assert isinstance(services.capture, AudioCaptureService)
         assert services.capture.audio_format.sample_rate == 16_000
         assert isinstance(services.coordinator, Coordinator)
-        assert isinstance(services.worker, ToolWorkerProcessManager)
         assert services.memory is not None
         assert services.diagnostics is not None
         assert services.memory.list_records() == ()
         assert isinstance(services.wake_service, WakeWordRuntimeService)
         assert services.wake_service.status is WakeRuntimeStatus.MISSING
         assert not (tmp_path / "VoicePet" / "models" / "wake").exists()
-        assert services.coordinator._llm_provider is None
         assert services.llm_configured is False
+        assert services.agent_gateway is None
         assert services.asr_preparer is services.coordinator._transcript_adapter
         assert services.asr_preparer._model_directory == (
             tmp_path / "VoicePet" / "models" / "asr" / "small"
@@ -83,7 +80,6 @@ def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_pat
             "asr",
             "llm",
             "tts",
-            "tool_worker",
             "database",
             "pet",
         ]
@@ -92,52 +88,22 @@ def test_default_runtime_factory_wires_local_fallback_and_private_worker(tmp_pat
             "asr": 120.0,
             "llm": 15.0,
             "tts": 15.0,
-            "tool_worker": 5.0,
             "database": 5.0,
             "pet": 10.0,
         }
-
-        bootstrap = services.worker._bootstrap
-        assert len(bootstrap.secret) == 32
-        assert bootstrap.audit_database == (
-            tmp_path / "VoicePet" / "data" / "assistant.db"
-        ).resolve()
-        assert bootstrap.allowed_roots == ((tmp_path / "VoicePet").resolve(),)
         assert (tmp_path / "VoicePet" / "cache").is_dir()
-        command_text = " ".join(services.worker.command)
-        assert bootstrap.secret.hex() not in command_text
-        assert {
-            definition.name for definition in services.coordinator._llm_tools
-        } == {
-            "system_info",
-            "move_file",
-            "undo_move_file",
-        }
-        assert services.coordinator._memory_candidates is None
-        assert services.coordinator._short_term_summaries is None
-        assert "update_daily_summary" not in services.coordinator._llm_instructions
-        assert "candidate" not in services.coordinator._llm_instructions
         assert "1～3 句" in services.coordinator._llm_instructions
-        assert "明确要求" in services.coordinator._llm_instructions
-        assert "详细" in services.coordinator._llm_instructions
-        assert all(Path(root).is_absolute() for root in bootstrap.allowed_roots)
     finally:
         RuntimeHost(services).close()
 
 
-def test_default_runtime_factory_wires_model_and_turn_budget_defaults(tmp_path):
-    config = AppConfig()
-    config = replace(
-        config,
-        llm=replace(config.llm, model="gpt-runtime-budget-test"),
-    )
+def test_default_runtime_factory_wires_turn_budget_defaults(tmp_path):
     services = build_default_runtime(
-        config,
+        AppConfig(),
         EventBus(),
         tmp_path / "VoicePet",
     )
     try:
-        assert services.coordinator._llm_model == "gpt-runtime-budget-test"
         assert services.coordinator._budget_limits == TurnBudgetLimits()
     finally:
         RuntimeHost(services).close()
@@ -175,30 +141,6 @@ def test_default_runtime_factory_appends_persona_after_builtin_rules(tmp_path):
         assert "1～3 句" in instructions
         assert "不能修改安全、工具或记忆规则" in instructions
         assert instructions.index(persona) > instructions.index("1～3 句")
-    finally:
-        RuntimeHost(services).close()
-
-
-def test_default_runtime_factory_hides_candidate_tool_when_memory_is_disabled(
-    tmp_path,
-):
-    config = AppConfig()
-    config = replace(
-        config,
-        privacy=replace(config.privacy, memory_enabled=False),
-    )
-    services = build_default_runtime(
-        config,
-        EventBus(),
-        tmp_path / "VoicePet",
-    )
-    try:
-        assert "propose_memory" not in {
-            definition.name for definition in services.coordinator._llm_tools
-        }
-        assert services.coordinator._memory_candidates is None
-        assert services.coordinator._short_term_summaries is None
-        assert "update_daily_summary" not in services.coordinator._llm_instructions
     finally:
         RuntimeHost(services).close()
 
@@ -251,13 +193,10 @@ def test_default_runtime_factory_wraps_network_services_without_sdk_retries(
         api_key="sk-private",
     )
     try:
-        llm = services.coordinator._llm_provider
         speech = services.coordinator._speech_synthesizer
 
-        assert isinstance(llm, ResilientLlmProvider)
         assert services.llm_configured is True
         assert services.asr_preparer is services.coordinator._transcript_adapter
-        assert isinstance(llm._provider, LlmProvider)
         assert seen["llm_settings"]["max_retries"] == 0
         assert seen["llm_settings"]["base_url"] is None
         assert isinstance(speech, FallbackSpeechSynthesizer)
@@ -266,7 +205,6 @@ def test_default_runtime_factory_wraps_network_services_without_sdk_retries(
         assert seen["tts_settings"] == {
             "voice": AppConfig().tts.voice,
         }
-        assert llm._resilience is not speech._primary._resilience
     finally:
         RuntimeHost(services).close()
 
@@ -293,20 +231,10 @@ def test_runtime_factory_selects_responses_provider_with_custom_base_url(
 
             return events()
 
-    class ChatProvider(ResponsesProvider):
-        def __init__(self, **settings):
-            created.append(("chat", settings))
-
     monkeypatch.setattr(
         runtime_factory_module,
         "OpenAIResponsesProvider",
         ResponsesProvider,
-    )
-    monkeypatch.setattr(
-        runtime_factory_module,
-        "OpenAIChatCompletionsProvider",
-        ChatProvider,
-        raising=False,
     )
     config = replace(
         AppConfig(),
@@ -340,64 +268,6 @@ def test_runtime_factory_selects_responses_provider_with_custom_base_url(
         RuntimeHost(services).close()
 
 
-def test_runtime_factory_selects_chat_provider_for_keyless_loopback(
-    tmp_path,
-    monkeypatch,
-):
-    created = []
-
-    class Provider:
-        def __init__(self, **settings):
-            created.append(settings)
-
-        async def probe(self):
-            return {"model": "fake"}
-
-        def stream(self, request, token):
-            del request, token
-
-            async def events():
-                if False:
-                    yield None
-
-            return events()
-
-    monkeypatch.setattr(
-        runtime_factory_module,
-        "OpenAIChatCompletionsProvider",
-        Provider,
-        raising=False,
-    )
-    config = replace(
-        AppConfig(),
-        llm=replace(
-            AppConfig().llm,
-            api="chat_completions",
-            base_url="http://localhost:11434/v1",
-        ),
-    )
-
-    services = build_default_runtime(
-        config,
-        EventBus(),
-        tmp_path / "VoicePet",
-        api_key=None,
-    )
-    try:
-        assert services.llm_configured is True
-        assert created == [
-            {
-                "api_key": "voicepet-local",
-                "base_url": "http://localhost:11434/v1",
-                "model": config.llm.model,
-                "reasoning_effort": config.llm.reasoning_effort,
-                "max_retries": 0,
-            }
-        ]
-    finally:
-        RuntimeHost(services).close()
-
-
 def test_runtime_factory_requires_key_for_public_custom_endpoint(tmp_path):
     config = replace(
         AppConfig(),
@@ -415,7 +285,6 @@ def test_runtime_factory_requires_key_for_public_custom_endpoint(tmp_path):
     )
     try:
         assert services.llm_configured is False
-        assert services.coordinator._llm_provider is None
     finally:
         RuntimeHost(services).close()
 

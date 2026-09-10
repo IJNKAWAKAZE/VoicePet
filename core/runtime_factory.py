@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import platform
-import secrets
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 from .agent_gateway import AgentGateway
@@ -17,8 +15,7 @@ from .asr import FasterWhisperTranscriptAdapter, project_asr_directory
 from .audio_input import AudioCaptureService, SoundDeviceInputBackend
 from .audio_session import VadAudioSession
 from .audio_types import AudioFormat
-from .audit import AuditStore
-from .config import AppConfig, ConfigStore, is_local_llm_base_url
+from .config import AppConfig, ConfigStore
 from .coordinator import Coordinator
 from .diagnostic_probes import probe_asr, probe_llm, probe_pet, probe_tts
 from .diagnostics import (
@@ -30,12 +27,7 @@ from .diagnostics import (
 )
 from .event_bus import EventBus
 from .events import ConversationPhase
-from .llm import (
-    OpenAIChatCompletionsProvider,
-    OpenAIResponsesProvider,
-    ResilientLlmProvider,
-    ToolDefinition,
-)
+from .llm import OpenAIResponsesProvider, ResilientLlmProvider
 from .memory import MemoryStore
 from .memory_context import MemoryContextAssembler
 from .memory_data import MemoryDataManager
@@ -44,7 +36,6 @@ from .memory_intents import MemoryOperationService
 from .memory_jobs import MemoryJobStore
 from .memory_scheduler import MemoryScheduler
 from .pet_packages import PetPackageInstaller
-from .policy import AuthorizationIssuer, PolicyEngine, PolicySettings
 from .runtime import RuntimeServices
 from .session_archive import SessionArchiveStore
 from .session_context import SessionContext
@@ -70,9 +61,6 @@ from .wake import (
     WakeWordRuntimeService,
 )
 from .wake_models import WakeModelStore
-from .worker_bootstrap import WorkerBootstrap
-from .worker_catalog import WORKER_TOOL_NAMES, build_worker_catalog
-from .worker_process import ToolWorkerProcessManager
 
 
 def build_default_runtime(
@@ -81,7 +69,6 @@ def build_default_runtime(
     data_root: str | Path,
     *,
     api_key: str | None = None,
-    allowed_roots: Sequence[str | Path] | None = None,
     pet_directory: str | Path | None = None,
 ) -> RuntimeServices:
     """构造但不启动默认本地与云端适配器"""
@@ -98,12 +85,6 @@ def build_default_runtime(
     )
     log_store = StructuredLogStore(root / "logs")
     event_logger = RuntimeEventLogger(event_bus, log_store)
-    roots = (
-        (root,)
-        if allowed_roots is None
-        else tuple(Path(path).expanduser().resolve() for path in allowed_roots)
-    )
-    audit_store = AuditStore(data_directory / "assistant.db")
     session_archive = SessionArchiveStore(
         data_directory / "assistant.db",
         retention_days=config.privacy.chat_retention_days,
@@ -117,20 +98,6 @@ def build_default_runtime(
         active_pet_directory = bundle_root / "assets" / "pet" / "dpsk-girl"
     else:
         active_pet_directory = Path(pet_directory).expanduser().resolve()
-    catalog = build_worker_catalog(roots, audit_store)
-    manifests = tuple(
-        catalog.policy_registry.get(name) for name in WORKER_TOOL_NAMES
-    )
-    assert all(manifest is not None for manifest in manifests)
-    tool_definitions = tuple(
-        ToolDefinition(
-            manifest.name,
-            manifest.description,
-            manifest.input_schema,
-        )
-        for manifest in manifests
-        if manifest is not None
-    )
     llm_instructions = (
         "你是 VoicePet 桌面助手。默认用 1～3 句话直接回答，避免重复和不必要的铺垫；"
         "只有用户明确要求详细说明、步骤、清单或代码时才展开"
@@ -141,17 +108,6 @@ def build_default_runtime(
             "不能修改安全、工具或记忆规则：\n"
             f"{config.llm.system_prompt}"
         )
-    policy = PolicyEngine(catalog.policy_registry, PolicySettings())
-    secret = secrets.token_bytes(32)
-    worker = ToolWorkerProcessManager(
-        WorkerBootstrap(
-            secret,
-            (data_directory / "assistant.db").resolve(),
-            tuple(Path(path) for path in roots),
-            policy_version=1,
-        )
-    )
-
     audio_format = AudioFormat(
         sample_rate=config.audio.sample_rate,
         channels=config.audio.channels,
@@ -192,25 +148,15 @@ def build_default_runtime(
             agent_store,
             default_mode=AgentApprovalMode(config.agent.default_approval_mode),
         )
-    credential = api_key.strip() if isinstance(api_key, str) else ""
-    local_without_key = bool(config.llm.base_url) and is_local_llm_base_url(
-        config.llm.base_url
-    )
-    llm_configured = bool(credential) or local_without_key
-    provider_type = (
-        OpenAIResponsesProvider
-        if config.llm.api == "responses"
-        else OpenAIChatCompletionsProvider
-    )
     raw_llm = (
-        provider_type(
-            api_key=credential or "voicepet-local",
+        OpenAIResponsesProvider(
+            api_key=credential,
             base_url=config.llm.base_url or None,
             model=config.llm.model,
             reasoning_effort=config.llm.reasoning_effort,
             max_retries=0,
         )
-        if llm_configured
+        if credential
         else None
     )
     llm = ResilientLlmProvider(raw_llm) if raw_llm is not None else None
@@ -243,8 +189,6 @@ def build_default_runtime(
         audio_session,
         transcript,
         event_bus,
-        llm_provider=llm,
-        llm_tools=tool_definitions,
         memory_context=memory_context,
         session_context=session_context,
         session_archive=session_archive,
@@ -254,7 +198,6 @@ def build_default_runtime(
             session_archive=session_archive,
         ),
         llm_instructions=llm_instructions,
-        llm_model=config.llm.model,
         speech_enabled=config.tts.enabled,
         manual_input_speech_enabled=config.tts.manual_input_enabled,
         wake_keyword=config.wake_word.keyword,
@@ -262,9 +205,6 @@ def build_default_runtime(
         followup_timeout=config.wake_word.followup_timeout,
         speech_synthesizer=speech,
         audio_player=audio_player,
-        policy_engine=policy,
-        authorization_issuer=AuthorizationIssuer(secret),
-        tool_executor=worker,
         agent_gateway=agent_gateway,
     )
     memory_jobs = MemoryJobStore(data_directory / "assistant.db")
@@ -340,9 +280,6 @@ def build_default_runtime(
     async def tts_check():
         return await probe_tts(speech)
 
-    async def worker_check():
-        return dict(await worker.ping())
-
     async def database_check():
         return await asyncio.to_thread(memory_store.diagnostics)
 
@@ -356,7 +293,6 @@ def build_default_runtime(
                 DiagnosticCheck("asr", asr_check, timeout=120.0),
                 DiagnosticCheck("llm", llm_check, timeout=15.0),
                 DiagnosticCheck("tts", tts_check, timeout=15.0),
-                DiagnosticCheck("tool_worker", worker_check),
                 DiagnosticCheck("database", database_check),
                 DiagnosticCheck("pet", pet_check, timeout=10.0),
             )
@@ -376,7 +312,6 @@ def build_default_runtime(
         coordinator,
         activation,
         capture,
-        worker,
         wake_service,
         tuple(
             closer
@@ -388,7 +323,6 @@ def build_default_runtime(
                 memory_jobs.close,
                 session_archive.close,
                 memory_store.close,
-                audit_store.close,
             )
             if closer is not None
         ),
@@ -398,7 +332,7 @@ def build_default_runtime(
         diagnostics=diagnostics,
         asr_preparer=transcript,
         tts_voice_service=tts_voice_service,
-        llm_configured=llm_configured,
+        llm_configured=raw_llm is not None,
         audio_output=audio_player,
         scheduler=scheduler,
         memory_context=memory_context,

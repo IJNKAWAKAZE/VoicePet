@@ -9,15 +9,15 @@ import pytest
 import app
 
 
-def test_reset_mode_dispatches_without_ui_or_worker():
+def test_reset_mode_dispatches_without_ui_or_agent_worker():
     calls = []
     assert app.main(["--reset-test-memory"], reset_entry=lambda: calls.append("reset") or 2,
                     ui_entry=lambda smoke: calls.append("ui"),
-                    worker_entry=lambda: calls.append("worker")) == 2
+                    agent_worker_entry=lambda: calls.append("agent")) == 2
     assert calls == ["reset"]
 
 
-@pytest.mark.parametrize("other", ["--tool-worker", "--smoke-test"])
+@pytest.mark.parametrize("other", ["--agent-worker", "--smoke-test"])
 def test_reset_mode_is_exclusive(other):
     with pytest.raises(SystemExit):
         app.main(["--reset-test-memory", other], reset_entry=lambda: 0)

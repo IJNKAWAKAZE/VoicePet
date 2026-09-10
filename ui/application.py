@@ -27,7 +27,6 @@ from core.events import (
     StateChanged,
     TextDelta,
     TextInputSubmitted,
-    ToolResultReady,
     TranscriptReady,
     WakeCommandPending,
 )
@@ -65,7 +64,6 @@ _RUNTIME_EVENT_TYPES = (
     TextInputSubmitted,
     TextDelta,
     ApprovalRequested,
-    ToolResultReady,
     SpeakRequested,
     RuntimeErrorEvent,
     MemoryResultReady,

@@ -9,6 +9,10 @@ datas = [
     (str(root / "assets" / "pet"), "assets/pet"),
     (str(root / "assets" / "ui"), "assets/ui"),
     (str(root / "ui" / "qml"), "ui/qml"),
+    (str(root / "LICENSE"), "licenses"),
+    (str(root / "NOTICE"), "licenses"),
+    (str(root / "THIRD_PARTY_NOTICES.md"), "licenses"),
+    (str(root / "packaging" / "licenses" / "LGPL-3.0.txt"), "licenses"),
 ]
 datas += collect_data_files("faster_whisper", includes=["assets/*.onnx"])
 datas += collect_data_files("opencc")
