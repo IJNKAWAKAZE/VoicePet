@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from PySide6.QtCore import QObject, QPoint, QRectF, QSize, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QJSValue
 
@@ -115,6 +115,7 @@ class QmlApplicationController(QObject):
         self._position_store = position_store
         self._main_window: QObject | None = None
         self._pet_window: QObject | None = None
+        self._pet_drag_position: QPointF | None = None
         self._pet_speech_window: QObject | None = None
         self._pet_menu_window: QObject | None = None
         self._confirmation_window: QObject | None = None
@@ -134,6 +135,7 @@ class QmlApplicationController(QObject):
         pet_interaction.listenToggleRequested.connect(self._toggle_listening)
         pet_interaction.showMainRequested.connect(lambda: self.show_main("chat"))
         pet_interaction.positionChanged.connect(self._move_pet)
+        pet_interaction.dragFinished.connect(self._finish_pet_drag)
         app_shell.showMainRequested.connect(self._show_main_window)
         app_shell.hideMainRequested.connect(self._hide_main_window)
         chat.errorOccurred.connect(lambda message: self._dialogs.toast(message, "warning"))
@@ -557,11 +559,27 @@ class QmlApplicationController(QObject):
     def _move_pet(self, delta_x: float, delta_y: float) -> None:
         if self._pet_window is None:
             return
-        raw = QPoint(
-            int(self._pet_window.property("x") + delta_x),
-            int(self._pet_window.property("y") + delta_y),
+        if self._pet_drag_position is None:
+            self._pet_drag_position = QPointF(
+                self._pet_window.property("x"), self._pet_window.property("y")
+            )
+        # 保留缩放屏幕产生的小数位移，避免每帧取整累积跟手误差。
+        self._pet_drag_position += QPointF(delta_x, delta_y)
+        # 拖动过程中允许跨越屏幕接缝；逐帧约束会吞掉越界增量，卡在原屏。
+        self._set_pet_position(self._pet_drag_position.toPoint())
+
+    @Slot()
+    def _finish_pet_drag(self) -> None:
+        self._pet_drag_position = None
+        if self._pet_window is None:
+            return
+        position = QPoint(
+            int(self._pet_window.property("x")),
+            int(self._pet_window.property("y")),
         )
-        position = self._clamp_pet_position(raw)
+        self._set_pet_position(self._clamp_pet_position(position))
+
+    def _set_pet_position(self, position: QPoint) -> None:
         self._pet_window.setProperty("x", position.x())
         self._pet_window.setProperty("y", position.y())
         if self._position_store is None:

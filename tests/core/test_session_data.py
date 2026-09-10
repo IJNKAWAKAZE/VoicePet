@@ -4,6 +4,8 @@ from uuid import uuid4
 from core.session_archive import SessionArchiveStore
 from core.session_context import SessionContext
 from core.session_data import SessionDataManager
+from core.agent_store import AgentStore
+from core.codex_session_files import CodexSessionFiles
 
 
 def test_session_data_lists_latest_first_and_clears_live_context(tmp_path):
@@ -87,4 +89,27 @@ def test_session_data_exposes_summary_deletion_and_minimal_source_labels(tmp_pat
     }
     assert manager.delete_summary(summary.id) is True
     assert manager.delete_summary(summary.id) is False
+    archive.close()
+
+
+def test_delete_session_removes_bound_codex_rollout(tmp_path):
+    archive = SessionArchiveStore(tmp_path / "assistant.db")
+    context = SessionContext()
+    agent_store = AgentStore(tmp_path / "assistant.db")
+    manager = SessionDataManager(
+        archive,
+        context,
+        agent_store=agent_store,
+        codex_files=CodexSessionFiles(tmp_path / "codex"),
+    )
+    session_id = context.session_id
+    archive.archive_turn(str(uuid4()), "问题", "回答", session_id)
+    thread_id = "12345678-1234-5678-1234-567812345678"
+    agent_store.bind_thread(session_id, thread_id, "codex")
+    rollout = tmp_path / "codex" / "sessions" / f"rollout-2026-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("session", encoding="utf-8")
+    assert manager.delete(session_id) is True
+    assert not rollout.exists()
+    assert agent_store.binding(session_id) is None
     archive.close()

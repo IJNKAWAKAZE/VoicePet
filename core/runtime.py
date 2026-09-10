@@ -492,11 +492,18 @@ class RuntimeHost:
 
     def delete_session(self, turn_id: str) -> Future[bool]:
         sessions = self._require_sessions()
-        return self._submit(asyncio.to_thread(sessions.delete, turn_id))
+        return self._submit(self._remove_sessions(sessions.delete, turn_id))
 
     def clear_sessions(self) -> Future[int]:
         sessions = self._require_sessions()
-        return self._submit(asyncio.to_thread(sessions.clear))
+        return self._submit(self._remove_sessions(sessions.clear))
+
+    async def _remove_sessions(self, operation, *args):
+        gateway = self._services.agent_gateway
+        if gateway is None:
+            return await asyncio.to_thread(operation, *args)
+        async with gateway.session_maintenance():
+            return await asyncio.to_thread(operation, *args)
 
     def list_summaries(
         self,

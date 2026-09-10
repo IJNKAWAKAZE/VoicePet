@@ -141,6 +141,7 @@ class PetInteractionController(QObject):
     showMainRequested = Signal()
     quickMenuRequested = Signal(float, float)
     positionChanged = Signal(float, float)
+    dragFinished = Signal()
 
     def __init__(
         self,
@@ -200,7 +201,18 @@ class PetInteractionController(QObject):
             self._single_click.stop()
         elif button == 1 and not self._dragging:
             self._single_click.start(self._double_click_interval)
+        elif button == 1 and self._dragging:
+            self.dragFinished.emit()
         self._button = 0
+        self._dragging = False
+
+    @Slot()
+    def pointer_cancel(self) -> None:
+        self._single_click.stop()
+        if self._dragging:
+            self.dragFinished.emit()
+        self._button = 0
+        self._dragging = False
 
     @Slot(float, float, int)
     def double_click(self, x: float, y: float, button: int) -> None:

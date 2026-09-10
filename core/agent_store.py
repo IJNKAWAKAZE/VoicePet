@@ -198,6 +198,18 @@ class AgentStore:
             connection.execute("DELETE FROM agent_turns WHERE session_id=?", (session_id,))
             connection.execute("DELETE FROM agent_session_bindings WHERE session_id=?", (session_id,))
 
+    def thread_id(self, session_id: str) -> str | None:
+        binding = self.binding(session_id)
+        return binding.codex_thread_id if binding else None
+
+    def session_ids(self) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT session_id FROM agent_session_bindings "
+                "UNION SELECT session_id FROM agent_turns"
+            ).fetchall()
+        return tuple(row[0] for row in rows)
+
     def clear(self) -> None:
         with self._connect(write=True) as connection:
             for table in ("agent_events", "agent_turns", "agent_session_bindings", "agent_preferences"):

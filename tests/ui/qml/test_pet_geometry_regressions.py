@@ -4,6 +4,71 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 from test_qml_application import build_controller
 
+from core.window_state import WindowPosition
+
+
+@pytest.mark.parametrize("destination", [
+    QPoint(900, 100), QPoint(-700, 100), QPoint(100, -500), QPoint(100, 700),
+])
+def test_small_drag_steps_can_cross_screen_boundaries(qapp, monkeypatch, destination):
+    controller, service, _tray, qml, _, _, _, interaction, _, store = build_controller(qapp)
+    controller.start()
+    areas = [
+        QRect(0, 0, 800, 600), QRect(800, 0, 800, 600),
+        QRect(-800, 0, 800, 600), QRect(0, -600, 800, 600),
+        QRect(0, 600, 800, 600),
+    ]
+
+    class Screen:
+        def __init__(self, area):
+            self.area = area
+
+        def availableGeometry(self):
+            return self.area
+
+    monkeypatch.setattr(QGuiApplication, "screens", lambda: [Screen(area) for area in areas])
+    try:
+        pet = qml.root_objects[0].findChild(QObject, "petWindow")
+        pet.setPosition(100, 100)
+        interaction.pointer_press(150, 150, 1)
+        for step in range(1, 81):
+            interaction.pointer_move(
+                150 + (destination.x() - 100) * step / 80,
+                150 + (destination.y() - 100) * step / 80,
+            )
+        interaction.pointer_release(destination.x() + 50, destination.y() + 50, 1)
+        assert pet.position() == destination
+        assert store.saved[-1] == WindowPosition(destination.x(), destination.y())
+        assert service.activations == []
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_drag_end_recovers_pet_from_offscreen_area(qapp, monkeypatch, cancel):
+    controller, _, _, qml, _, _, _, interaction, _, store = build_controller(qapp)
+    controller.start()
+    area = QRect(0, 0, 800, 600)
+
+    class Screen:
+        def availableGeometry(self):
+            return area
+
+    monkeypatch.setattr(QGuiApplication, "screens", lambda: [Screen()])
+    try:
+        pet = qml.root_objects[0].findChild(QObject, "petWindow")
+        pet.setPosition(100, 100)
+        interaction.pointer_press(150, 150, 1)
+        interaction.pointer_move(1100, 1000)
+        if cancel:
+            interaction.pointer_cancel()
+        else:
+            interaction.pointer_release(1100, 1000, 1)
+        assert area.contains(pet.geometry())
+        assert store.saved[-1] == WindowPosition(pet.x(), pet.y())
+    finally:
+        controller.close()
+
 
 def test_drag_does_not_reverse_when_window_moves_under_cursor(qapp):
     controller, _service, _tray, qml, *_ = build_controller(qapp)

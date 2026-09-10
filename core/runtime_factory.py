@@ -15,6 +15,7 @@ from .asr import FasterWhisperTranscriptAdapter, project_asr_directory
 from .audio_input import AudioCaptureService, SoundDeviceInputBackend
 from .audio_session import VadAudioSession
 from .audio_types import AudioFormat
+from .codex_session_files import CodexSessionFiles
 from .config import AppConfig, ConfigStore
 from .coordinator import Coordinator
 from .diagnostic_probes import probe_asr, probe_llm, probe_pet, probe_tts
@@ -129,9 +130,9 @@ def build_default_runtime(
     credential = api_key.strip() if isinstance(api_key, str) else ""
     agent_gateway = None
     agent_manager = None
+    agent_store = AgentStore(data_directory / "assistant.db")
     # 配置凭据后统一使用 Codex Agent 处理对话
     if credential:
-        agent_store = AgentStore(data_directory / "assistant.db")
         agent_manager = AgentWorkerProcessManager(
             api_key=credential,
             data_directory=data_directory / "codex",
@@ -147,6 +148,7 @@ def build_default_runtime(
             agent_client_factory,
             agent_store,
             default_mode=AgentApprovalMode(config.agent.default_approval_mode),
+            stop_worker=agent_manager.stop,
         )
     raw_llm = (
         OpenAIResponsesProvider(
@@ -172,7 +174,12 @@ def build_default_runtime(
     )
     tts_voice_service = EdgeTtsVoiceService(audio_player)
     session_context = SessionContext()
-    session_manager = SessionDataManager(session_archive, session_context)
+    session_manager = SessionDataManager(
+        session_archive,
+        session_context,
+        agent_store=agent_store,
+        codex_files=CodexSessionFiles(data_directory / "codex"),
+    )
     session_manager.resume_latest()
     memory_context = MemoryContextAssembler(
         memory_store,

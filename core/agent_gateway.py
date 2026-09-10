@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from .agent_client import AgentWorkerClient
@@ -13,7 +14,9 @@ from .agent_types import AgentApprovalMode, AgentEvent, AgentEventType, AgentTur
 class AgentGatewayError(RuntimeError):
     code="agent.gateway"
 class AgentGateway:
-    def __init__(self, client_factory, store: AgentStore, *, default_mode: AgentApprovalMode=AgentApprovalMode.AUTO_EDIT):
+    def __init__(self, client_factory, store: AgentStore, *, default_mode: AgentApprovalMode=AgentApprovalMode.AUTO_EDIT, stop_worker=None):
+        self._stop_worker = stop_worker
+        self._session_maintenance = False
         self._client_factory=client_factory; self._store=store; self._default_mode=default_mode; self._global_mode=store.global_mode() or default_mode; self._client:AgentWorkerClient|None=None; self._active_turn: str|None=None; self._active_task: asyncio.Task|None=None; self._mode_overrides={}; self._capabilities=None
     async def initialize(self):
         if self._client is None:
@@ -21,12 +24,12 @@ class AgentGateway:
             self._capabilities=await self._client.initialize()
         return self._capabilities
     async def run_turn(self, session_id:str, text:str, *, mode:AgentApprovalMode|None=None, thread_id:str|None=None, turn_id:str|None=None, attachments=(), context:str="")->AsyncIterator[AgentEvent]:
+        if self._session_maintenance: raise AgentGatewayError("正在清理会话，请稍后重试")
         if self._active_turn is not None: raise AgentGatewayError("已有 Agent 轮次运行")
         chosen=mode or self._global_mode; current=turn_id or uuid4().hex
         if thread_id is None:
             binding = self._store.binding(session_id)
             thread_id = binding.codex_thread_id if binding else None
-        await self.initialize()
         # 轮次使用全局模式快照并复用当前会话的原生线程
         request=AgentTurnRequest(session_id,thread_id,current,text,chosen,attachments=attachments,context=context); self._store.start_turn(current,session_id,chosen); self._active_turn=current
         try:
@@ -97,4 +100,22 @@ class AgentGateway:
         self._store.set_global_mode(None)
     async def close(self):
         if self._client: await self._client.close(); self._client=None
+
+    @asynccontextmanager
+    async def session_maintenance(self):
+        if self._active_turn is not None or self._session_maintenance:
+            raise AgentGatewayError("当前回复完成后才能删除会话")
+        self._session_maintenance = True
+        try:
+            # 先关闭线程持有者，避免文件仍被占用或被缓冲写入重新创建。
+            if self._stop_worker is not None:
+                await self._stop_worker()
+                self._client = None
+                self._capabilities = None
+            else:
+                await self.close()
+            yield
+            self._mode_overrides.clear()
+        finally:
+            self._session_maintenance = False
 

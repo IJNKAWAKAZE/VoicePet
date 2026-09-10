@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from .agent_store import AgentStore
+from .codex_session_files import CodexSessionFiles
 from .session_archive import (
     SessionArchiveStore,
     SessionRecord,
@@ -20,9 +22,14 @@ class SessionDataManager:
         self,
         archive: SessionArchiveStore,
         context: SessionContext,
+        *,
+        agent_store: AgentStore | None = None,
+        codex_files: CodexSessionFiles | None = None,
     ) -> None:
         self._archive = archive
         self._context = context
+        self._agent_store = agent_store
+        self._codex_files = codex_files
 
     @property
     def current_session_id(self) -> str:
@@ -93,7 +100,10 @@ class SessionDataManager:
     def delete(self, session_id: str) -> bool:
         """删除整个会话并在必要时创建空白当前会话"""
 
+        self._delete_codex_thread(session_id)
         deleted = self._archive.discard_session(session_id)
+        if self._agent_store is not None:
+            self._agent_store.delete_session(session_id)
         if deleted and session_id == self._context.session_id:
             self._context.clear()
         return deleted
@@ -101,6 +111,19 @@ class SessionDataManager:
     def clear(self) -> int:
         """删除全部会话并清空当前上下文"""
 
+        session_ids = self._agent_store.session_ids() if self._agent_store is not None else ()
+        for session_id in session_ids:
+            self._delete_codex_thread(session_id)
         affected = self._archive.clear_all()
+        if self._agent_store is not None:
+            for session_id in session_ids:
+                self._agent_store.delete_session(session_id)
         self._context.clear()
         return affected
+
+    def _delete_codex_thread(self, session_id: str) -> None:
+        if self._agent_store is None or self._codex_files is None:
+            return
+        thread_id = self._agent_store.thread_id(session_id)
+        if thread_id:
+            self._codex_files.delete_thread(thread_id)

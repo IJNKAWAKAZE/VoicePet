@@ -48,6 +48,7 @@ ApplicationWindow {
             const point = petMouse.mapToGlobal(mouse.x, mouse.y)
             petWindow.interaction.pointer_release(point.x, point.y, mouse.button)
         }
+        onCanceled: petWindow.interaction.pointer_cancel()
         onDoubleClicked: mouse => petWindow.interaction.double_click(mouse.x, mouse.y, mouse.button)
     }
 
