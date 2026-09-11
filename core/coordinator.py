@@ -957,7 +957,16 @@ class Coordinator:
     ) -> None:
         correlation_id = CorrelationId.new()
         assert self._active_source is not None
-        if operation.requires_confirmation:
+        # 全自动模式下，用户明确说“记住/忘记”时直接执行本地记忆操作；
+        # 其它模式保留隐私确认弹窗。
+        full_auto = False
+        if self._agent_gateway is not None:
+            try:
+                from .agent_types import AgentApprovalMode
+                full_auto = self._agent_gateway.global_mode() is AgentApprovalMode.FULL_AUTO
+            except (AttributeError, TypeError, ValueError):
+                full_auto = False
+        if operation.requires_confirmation and not full_auto:
             awaiting = self._state_machine.transition(
                 ConversationPhase.AWAITING_APPROVAL,
                 turn_id,

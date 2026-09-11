@@ -14,10 +14,10 @@ ApplicationWindow {
     visible: false
     transientParent: null
     color: "transparent"
-    flags: Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    // 使用独立自绘工具窗口，避免 Qt.Popup 在 shell 切换时自动关闭。
+    // 外部点击和键盘收起由 TrayMenuDismissal 统一处理。
+    flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
     onVisibleChanged: if (visible) quickMenu.forceActiveFocus()
-    // 点击菜单外部或切换到其他应用时收起托盘菜单
-    onActiveChanged: if (!active && visible) hide()
 
     Shortcut {
         sequence: "Escape"

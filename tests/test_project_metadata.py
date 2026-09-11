@@ -67,14 +67,6 @@ def test_tts_optional_dependencies_are_pinned_to_compatible_ranges():
     ]
 
 
-def test_tools_optional_dependency_is_pinned_to_compatible_range():
-    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-
-    assert metadata["project"]["optional-dependencies"]["tools"] == [
-        "jsonschema>=4.25,<5",
-    ]
-
-
 def test_ui_optional_dependency_is_pinned_to_compatible_range():
     metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 

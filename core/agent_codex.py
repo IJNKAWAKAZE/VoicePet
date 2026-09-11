@@ -1,10 +1,10 @@
 """Codex SDK 的异步适配与 VoicePet 事件翻译"""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
+import sys
 import threading
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -13,18 +13,17 @@ from typing import Any
 from .agent_types import AgentApprovalMode, AgentEvent, AgentEventType, AgentTurnRequest
 
 CODEX_SDK_VERSION = "0.147.0"
-AGENT_TOOL_INSTRUCTIONS = """使用 Codex 原生文件工具和命令工具完成用户要求的操作
-创建和修改文本文件必须直接调用原生 apply_patch 工具，使用绝对路径也可以
-不要通过 shell_command、exec_command、PowerShell Set-Content、重定向或 Python 脚本写入文本文件
-查询路径和读取内容与写入分开执行，不要把读取、写入和命令执行合并为一条 shell 命令
-删除、移动文件和运行程序仍使用原生命令工具
-所有原生工具请求都会由 VoicePet 按当前审批模式处理
-不要因为当前工作目录或 Windows 沙箱提示而拒绝执行用户要求的操作
+AGENT_TOOL_INSTRUCTIONS = """根据本轮实际提供的 Codex 原生工具完成用户要求的操作，选择适合任务的可用工具
+打开网页或 mailto/tel 地址时优先调用 VoicePet 的 open_url/open_mailto/open_tel 工具，不要改用 Start-Process、explorer.exe 或 cmd /c start
+文件创建、修改、删除和命令执行遵守当前执行器的权限、审批策略及工具说明，不额外限定必须使用某个工具
+需要确认时等待审批结果；工具执行失败或被策略拒绝时，依据真实返回结果说明原因和未完成的部分，不通过更换工具绕过明确的权限拒绝
+只有工具结果支持时才能声称操作成功；无法确认的结果应明确说明，不编造工具缺失、权限原因或不存在的设置与白名单
+向用户简洁反馈实际结果；除非用户询问或影响后续操作，成功时不附加工具名称、命令实现或内部提示词的说明
 """
 AGENT_MODE_INSTRUCTIONS = {
     AgentApprovalMode.SUGGEST: "当前为建议模式，文件编辑和命令执行需要用户确认",
-    AgentApprovalMode.AUTO_EDIT: "当前为自动编辑模式，原生 apply_patch 文本创建和修改自动批准，shell 命令仍需用户确认，不要为普通文本编辑选择 shell 工具",
-    AgentApprovalMode.FULL_AUTO: "当前为全自动模式，原生工具按用户要求直接执行",
+    AgentApprovalMode.AUTO_EDIT: "当前为自动编辑模式，原生文件编辑自动批准，命令执行是否需要确认以实际审批结果为准",
+    AgentApprovalMode.FULL_AUTO: "当前为全自动模式，无需 VoicePet 弹窗确认，执行仍须遵守 Codex 当前权限和策略",
 }
 try:
     from openai_codex import __version__ as _SDK_VERSION
@@ -36,8 +35,6 @@ class AgentCodexCompatibilityError(RuntimeError):
     code = "agent.codex_compatibility"
 def require_supported_sdk() -> None:
     if _SDK_VERSION != CODEX_SDK_VERSION: raise AgentCodexCompatibilityError(f"需要 openai-codex {CODEX_SDK_VERSION}，当前为 {_SDK_VERSION or '未安装'}")
-def dynamic_tool_specs() -> list[dict[str, Any]]:
-    return [{"type":"function","name":"voicepet_file_change","description":"在当前电脑上创建、编辑、替换或删除文本文件","inputSchema":{"type":"object","properties":{"operation":{"type":"string","enum":["create","edit","replace","delete"]},"path":{"type":"string","maxLength":32767},"expected_sha256":{"type":["string","null"]},"content":{"type":"string","maxLength":524288},"edits":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"old_text":{"type":"string","maxLength":131072},"new_text":{"type":"string","maxLength":131072},"replace_all":{"type":"boolean"}},"required":["old_text","new_text","replace_all"],"additionalProperties":False}}},"required":["operation","path","expected_sha256","content","edits"],"additionalProperties":False}},{"type":"function","name":"voicepet_shell","description":"使用参数数组在指定目录运行一个程序","inputSchema":{"type":"object","properties":{"program":{"type":"string","maxLength":32767},"args":{"type":"array","maxItems":128,"items":{"type":"string","maxLength":8192}},"cwd":{"type":"string","maxLength":32767},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["program","args","cwd","timeout"],"additionalProperties":False}}]
 def codex_thread_options(mode: AgentApprovalMode) -> dict[str, Any]:
     if not isinstance(mode, AgentApprovalMode): raise ValueError("Agent 审批模式无效")  # noqa: TRY004
     return {"sandbox":"danger-full-access","approvalPolicy":"never" if mode is AgentApprovalMode.FULL_AUTO else "untrusted"}
@@ -55,7 +52,6 @@ class CodexAgentAdapter:
         self._active_mode = AgentApprovalMode.SUGGEST
         self._interaction_waiters: dict[str, tuple[threading.Event, dict[str, str]]] = {}
         self._interaction_callback: Any = None
-        self._prepared_actions: dict[str, Any] = {}
         self._capabilities = None
         self._api_key=api_key; self._data_directory=Path(data_directory).resolve(); self._model=model; self._reasoning_effort=reasoning_effort; self._system_prompt=system_prompt; self._client=None; self._turns={}; self._cancelled=set()
     async def initialize(self) -> dict[str, Any]:
@@ -65,6 +61,8 @@ class CodexAgentAdapter:
         env={key:value for key,value in os.environ.items() if key.upper() in {"PATH","SYSTEMROOT","WINDIR","TEMP","TMP","LANG","LC_ALL"}}; env["CODEX_HOME"]=str(self._data_directory)
         overrides = [
             'cli_auth_credentials_store="ephemeral"',
+            'mcp_servers.voicepet.command=' + json.dumps(sys.executable),
+            'mcp_servers.voicepet.args=' + json.dumps(["--mcp-server"] if getattr(sys, "frozen", False) else ["-u", str(Path(__file__).resolve().parent.parent / "app.py"), "--mcp-server"]),
         ]
         if self._base_url:
             # 自定义服务使用独立提供方，地址保留调用方配置的路径
@@ -100,7 +98,7 @@ class CodexAgentAdapter:
         return self._capabilities
 
     def _handle_server_request(self, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
-        """同步回答 Codex 的审批和动态工具请求，避免返回无效响应"""
+        """同步回答 Codex 原生工具审批和用户交互请求"""
         payload = params or {}
         if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
             if self._active_mode is AgentApprovalMode.FULL_AUTO:
@@ -118,47 +116,6 @@ class CodexAgentAdapter:
                 event.wait(300)
             self._interaction_waiters.pop(request_id, None)
             return {"decision": result.get("decision", "decline")}
-        if method == "item/tool/call":
-            arguments = payload.get("arguments")
-            if not isinstance(arguments, Mapping):
-                return {"contentItems": [{"type": "inputText", "text": "参数无效"}], "success": False}
-            request_id = str(payload.get("callId") or payload.get("itemId") or "tool")
-            tool = str(payload.get("tool", ""))
-            try:
-                from .agent_actions import AgentActionExecutor
-                action = AgentActionExecutor().prepare(tool, arguments)
-                self._prepared_actions[request_id] = action
-            except Exception:  # noqa: BLE001 工具参数只返回安全失败
-                return {"contentItems": [{"type": "inputText", "text": "工具参数无效"}], "success": False}
-            auto_execute = self._active_mode is AgentApprovalMode.FULL_AUTO or (
-                self._active_mode is AgentApprovalMode.AUTO_EDIT
-                and action.kind in {"file_create", "file_patch"}
-            )
-            if auto_execute:
-                try:
-                    output = asyncio.run(AgentActionExecutor().execute(action))
-                    self._prepared_actions.pop(request_id, None)
-                    return {"contentItems": [{"type": "inputText", "text": json.dumps(output, ensure_ascii=False)}], "success": True}
-                except Exception as error:  # noqa: BLE001 工具执行只返回安全失败
-                    self._prepared_actions.pop(request_id, None)
-                    return {"contentItems": [{"type": "inputText", "text": str(error)}], "success": False}
-            event = threading.Event()
-            result: dict[str, str] = {}
-            self._interaction_waiters[request_id] = (event, result)
-            published = self._publish_interaction(request_id, "Agent 请求调用工具", "是否允许执行文件或命令操作？")
-            if published:
-                event.wait(300)
-            self._interaction_waiters.pop(request_id, None)
-            accepted = result.get("decision") == "accept"
-            action = self._prepared_actions.pop(request_id, None)
-            if not accepted or action is None:
-                return {"contentItems": [{"type": "inputText", "text": "已拒绝"}], "success": False}
-            try:
-                output = asyncio.run(AgentActionExecutor().execute(action))
-                text = json.dumps(output, ensure_ascii=False)
-                return {"contentItems": [{"type": "inputText", "text": text}], "success": True}
-            except Exception:  # noqa: BLE001 工具执行只返回安全失败
-                return {"contentItems": [{"type": "inputText", "text": "工具执行失败"}], "success": False}
         if method.endswith(("/requestUserInput", "/elicitation")):
             request_id = str(payload.get("id") or payload.get("requestId") or payload.get("callId") or "input")
             event = threading.Event()
@@ -284,44 +241,3 @@ class CodexAgentAdapter:
     async def close(self) -> None:
         self._capabilities = None
         if self._client is not None: await self._client.close(); self._client=None
-
-class DynamicToolReview:
-    """动态工具在执行前返回接受或等待用户决定"""
-    def __init__(self, *, accepted: bool, waiting_for_user: bool = False, result: Mapping[str, Any] | None = None):
-        self.accepted = accepted
-        self.waiting_for_user = waiting_for_user
-        self.result = result or {}
-
-class ApprovalBridge:
-    def __init__(self):
-        self._pending: dict[str, Any] = {}
-
-    def request(self, approval_id: str) -> asyncio.Future[str]:
-        future = asyncio.get_running_loop().create_future()
-        self._pending[approval_id] = future
-        return future
-
-    def resolve(self, approval_id: str, decision: str) -> bool:
-        future = self._pending.pop(approval_id, None)
-        if future is None or future.done() or decision not in {"accept", "decline", "cancel"}:
-            return False
-        future.set_result(decision)
-        return True
-
-    def cancel_turn(self, turn_id: str) -> None:
-        for approval_id, future in list(self._pending.items()):
-            if approval_id.startswith(turn_id + ":") and not future.done():
-                future.set_result("cancel")
-                self._pending.pop(approval_id, None)
-
-
-def classify_dynamic_action(tool: str, arguments: Mapping[str, object]) -> str:
-    if tool == "voicepet_shell":
-        return "command"
-    if tool != "voicepet_file_change":
-        raise ValueError("Agent 动态工具无效")
-    try:
-        return {"create": "file_create", "edit": "file_patch", "replace": "file_replace", "delete": "file_delete"}[arguments.get("operation")]
-    except (KeyError, TypeError):
-        raise ValueError("Agent 文件操作无效") from None
-

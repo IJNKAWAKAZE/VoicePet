@@ -60,7 +60,8 @@ class MemoryOperationResult:
 class MemoryIntentParser:
     """只识别明确记忆动词且拒绝模糊普通对话"""
 
-    _REMEMBER = re.compile(r"^(?:请)?记住(?:一下)?[：:，,\s]*(.+)$")
+    # 用户常用“记得这个喜好”“记下……”表达保存意图；这些属于明确记忆请求。
+    _REMEMBER = re.compile(r"^(?:请)?(?:记住|记得|记下)(?:一下|这个|这点)?[：:，,\s]*(.+)$")
     _FORGET = re.compile(r"^(?:请)?(?:忘掉|忘记)[：:，,\s]*(.+)$")
     _LIST = frozenset({"你记得什么", "查看记忆", "列出记忆"})
     _CLEAR = frozenset({"清空今天对话", "清除今天对话"})
@@ -79,6 +80,11 @@ class MemoryIntentParser:
             if match is None:
                 continue
             content = match.group(1).strip()
+            # “记得这个喜好：……”中的说明性前缀不属于记忆内容。
+            if action is MemoryIntentAction.REMEMBER and "：" in content:
+                content = content.split("：", 1)[1].strip()
+            elif action is MemoryIntentAction.REMEMBER and ":" in content:
+                content = content.split(":", 1)[1].strip()
             if 0 < len(content) <= 4096:
                 return MemoryIntent(action, content)
         return None

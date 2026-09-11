@@ -36,18 +36,7 @@ class AgentEventType(str, Enum):
     ERROR = "error"
 
 
-_OPERATIONS = frozenset({"file_patch", "file_create", "file_delete", "file_replace", "command"})
 TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "outcome_unknown"})
-
-
-def approval_action(mode: AgentApprovalMode, operation: str) -> str:
-    if not isinstance(mode, AgentApprovalMode) or not isinstance(operation, str) or operation not in _OPERATIONS:
-        raise ValueError("Agent 操作类别无效")
-    if mode is AgentApprovalMode.FULL_AUTO:
-        return "accept"
-    if mode is AgentApprovalMode.AUTO_EDIT and operation in {"file_patch", "file_create"}:
-        return "accept"
-    return "prompt"
 
 
 def validate_identifier(value: str) -> None:
@@ -224,28 +213,6 @@ class AgentEvent:
 
     def to_mapping(self) -> dict[str, Any]:
         return {"session_id": self.session_id, "turn_id": self.turn_id, "seq": self.seq, "type": self.type.value, "payload": thaw_json(self.payload), "thread_id": self.thread_id, "codex_turn_id": self.codex_turn_id, "item_id": self.item_id, "timestamp": self.timestamp}
-
-
-@dataclass(frozen=True, slots=True)
-class AgentApprovalRequest:
-    approval_id: str
-    session_id: str
-    turn_id: str
-    approval_mode: AgentApprovalMode
-    kind: str
-    details: Mapping[str, Any] = field(repr=False)
-    allowed_decisions: tuple[str, ...] = ("accept", "decline", "cancel")
-
-    def __post_init__(self) -> None:
-        for value in (self.approval_id, self.session_id, self.turn_id):
-            validate_identifier(value)
-        approval_action(self.approval_mode, self.kind)
-        if not isinstance(self.details, Mapping):
-            raise ValueError("Agent 审批详情无效")  # noqa: TRY004
-        if not isinstance(self.allowed_decisions, (list, tuple)) or not self.allowed_decisions or any(item not in ("accept", "decline", "cancel") for item in self.allowed_decisions) or len(set(self.allowed_decisions)) != len(self.allowed_decisions):
-            raise ValueError("Agent 审批决定无效")
-        object.__setattr__(self, "details", freeze_json(self.details))
-        object.__setattr__(self, "allowed_decisions", tuple(self.allowed_decisions))
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,6 +28,7 @@ def test_memory_intent_parser_recognizes_bounded_chinese_commands():
     parser = MemoryIntentParser()
 
     remember = parser.parse("请记住：我喜欢低音量播报")
+    remember_colloquial = parser.parse("记得这个喜好：我喜欢低音量播报")
     forget = parser.parse("忘掉低音量播报")
     listing = parser.parse("你记得什么")
     clear = parser.parse("清空今天对话")
@@ -36,6 +37,7 @@ def test_memory_intent_parser_recognizes_bounded_chinese_commands():
         MemoryIntentAction.REMEMBER,
         "我喜欢低音量播报",
     )
+    assert remember_colloquial.content == "我喜欢低音量播报"
     assert (forget.action, forget.content) == (
         MemoryIntentAction.FORGET,
         "低音量播报",

@@ -919,6 +919,9 @@ class ChatViewModel(QObject):
         if processing == self._processing:
             return
         self._processing = processing
+        if not processing and self._agent_mode_pending:
+            self._agent_mode_pending = False
+            self.agentModeChanged.emit()
         self.processingChanged.emit()
 
     def _set_session_loading(self, loading: bool) -> None:

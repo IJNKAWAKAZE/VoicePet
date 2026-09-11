@@ -28,7 +28,6 @@ hiddenimports = [
     "webrtcvad",
     "_webrtcvad",
     "faster_whisper",
-    "jsonschema",
     "pypinyin",
     "sentencepiece",
     "sherpa_onnx",
@@ -38,6 +37,11 @@ hiddenimports = [
     "win32com.client",
     "pythoncom",
     "pywintypes",
+    "psutil",
+    "send2trash",
+    "screen_brightness_control",
+    "pycaw",
+    "comtypes",
 ]
 for package in ("openai_codex", "codex_cli_bin"):
     package_datas, package_binaries, package_hidden = collect_all(package)

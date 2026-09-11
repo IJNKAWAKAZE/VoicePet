@@ -230,10 +230,10 @@ Rectangle {
         anchors.left: attachmentMenuButton.right
         anchors.leftMargin: 4
         anchors.verticalCenter: toolbar.verticalCenter
-        width: 92
+        width: Math.max(112, implicitWidth)
         height: 28
         theme: root.theme
-        text: root.agentModePending ? root.agentModeLabel + "（下一轮）" : root.agentModeLabel
+        text: ({suggest: "◉", auto_edit: "✎", full_auto: "⚡"}[root.agentMode] || "✎") + "  " + root.agentModeLabel + (root.agentModePending ? "（下一轮）" : "")
         kind: "ghost"
         Accessible.name: "Agent 审批模式"
         onClicked: agentModeMenu.visible ? agentModeMenu.close() : agentModeMenu.open()

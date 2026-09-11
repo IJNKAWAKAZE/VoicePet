@@ -1,4 +1,4 @@
-"""核对固定 SDK 的参数和执行前动态工具回调"""
+"""核对固定 SDK 的参数和原生工具审批回调"""
 
 import json
 import sys
@@ -53,7 +53,7 @@ def test_auto_edit_accepts_native_file_change_but_keeps_shell_confirmation():
     assert adapter._handle_server_request("item/commandExecution/requestApproval", {"command": "Remove-Item file.txt"}) == {"decision": "decline"}
 
 
-def test_fake_server_waits_for_dynamic_tool_response(tmp_path):
+def test_fake_server_waits_for_native_file_approval(tmp_path):
     marker = tmp_path / "completed.json"
     server = tmp_path / "server.py"
     server.write_text('''import json, sys
@@ -71,7 +71,7 @@ for line in sys.stdin:
             "thread": {"id": "thread", "sessionId": "session", "cliVersion": "0.147.0", "createdAt": 1, "updatedAt": 1, "cwd": "C:/", "ephemeral": True, "modelProvider": "openai", "preview": "", "source": "appServer", "status": {"type": "idle"}, "turns": []}}})
     elif method == "turn/start":
         send({"id": request["id"], "result": {"turn": {"id": "turn", "items": [], "status": "inProgress"}}})
-        send({"id": "approval", "method": "item/tool/call", "params": {"threadId": "thread", "turnId": "turn", "itemId": "item", "callId": "call", "tool": "voicepet_file_change", "arguments": {"operation": "create"}}})
+        send({"id": "approval", "method": "item/fileChange/requestApproval", "params": {"threadId": "thread", "turnId": "turn", "itemId": "item", "reason": "创建文件"}})
     elif request.get("id") == "approval":
         with open(sys.argv[1], "w") as output:
             json.dump(request["result"], output)
@@ -80,11 +80,11 @@ for line in sys.stdin:
     entered, release = Event(), Event()
 
     def handler(method, params):
-        assert method == "item/tool/call"
-        assert params["tool"] == "voicepet_file_change"
+        assert method == "item/fileChange/requestApproval"
+        assert params["itemId"] == "item"
         entered.set()
         assert release.wait(5)
-        return {"contentItems": [{"type": "inputText", "text": "已拒绝"}], "success": False}
+        return {"decision": "decline"}
 
     client = CodexClient(CodexConfig(launch_args_override=(sys.executable, str(server), str(marker))), approval_handler=handler)
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -100,7 +100,7 @@ for line in sys.stdin:
             assert not marker.exists()
             release.set()
             assert result.result(timeout=5).method == "turn/completed"
-            assert json.loads(marker.read_text())["success"] is False
+            assert json.loads(marker.read_text()) == {"decision": "decline"}
         finally:
             release.set()
             client.close()

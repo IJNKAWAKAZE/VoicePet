@@ -17,7 +17,6 @@ VoicePet 以 Apache License 2.0 发布，完整条款见 `LICENSE`。程序运�
 | sounddevice | 音频采集与播放 | MIT |
 | webrtcvad-wheels | 语音活动检测 | MIT |
 | numpy | 数值计算 | BSD-3-Clause |
-| jsonschema | 工具调用参数校验 | MIT |
 | pywin32 | Windows 系统集成 | PSF-2.0 |
 | openai-codex | Codex Agent Worker | Apache-2.0 |
 | PyInstaller | 打包工具（仅构建期使用） | GPL-2.0-or-later，含允许分发专有程序的 bootloader 例外 |

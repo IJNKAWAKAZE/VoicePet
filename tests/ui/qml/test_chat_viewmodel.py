@@ -17,6 +17,17 @@ def completed(value=None):
     return future
 
 
+def test_mode_change_stops_showing_next_turn_after_reply(qapp):
+    chat = ChatViewModel(FakeRuntime())
+    chat.begin_turn()
+    chat.set_agent_mode("full_auto")
+    assert chat.agentModePending
+    chat.finish_assistant()
+    assert not chat.agentModePending
+    chat.begin_turn()
+    assert not chat.agentModePending
+
+
 @dataclass
 class Session:
     id: str

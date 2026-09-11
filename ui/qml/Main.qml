@@ -244,6 +244,7 @@ ApplicationWindow {
     }
 
     PetMenuWindow {
+        id: trayMenuWindow
         objectName: "trayMenuWindow"
         theme: themeViewModel
     }

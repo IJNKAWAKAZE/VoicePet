@@ -21,7 +21,6 @@ def test_pyinstaller_spec_collects_required_optional_runtime_packages():
         "sounddevice",
         "webrtcvad",
         "faster_whisper",
-        "jsonschema",
         "pypinyin",
         "sentencepiece",
         "sherpa_onnx",

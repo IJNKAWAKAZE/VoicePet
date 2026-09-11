@@ -127,9 +127,14 @@ def main(
     modes.add_argument("--agent-worker", action="store_true")
     modes.add_argument("--smoke-test", action="store_true")
     modes.add_argument("--reset-test-memory", action="store_true")
+    modes.add_argument("--mcp-server", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.agent_worker:
         return agent_worker_entry()
+    if arguments.mcp_server:
+        from core.mcp_server import serve
+        serve()
+        return 0
     if arguments.reset_test_memory:
         return reset_entry()
     return ui_entry(arguments.smoke_test)

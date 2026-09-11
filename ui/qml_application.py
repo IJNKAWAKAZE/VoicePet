@@ -32,6 +32,7 @@ from .pet_animation import PetAssetError
 from .pet_animation_model import PetAnimationModel, PetInteractionController
 from .qml_resources import QmlResourceError
 from .qml_runtime import QmlRuntime
+from .tray_menu import TrayMenuDismissal
 from .viewmodels.app_shell import AppShellViewModel
 from .viewmodels.chat import ChatViewModel
 from .viewmodels.dialogs import (
@@ -118,6 +119,7 @@ class QmlApplicationController(QObject):
         self._pet_drag_position: QPointF | None = None
         self._pet_speech_window: QObject | None = None
         self._pet_menu_window: QObject | None = None
+        self._tray_menu_dismissal = None
         self._confirmation_window: QObject | None = None
         self._phase = ConversationPhase.IDLE
         self._phase_turn_id: TurnId | None = None
@@ -218,6 +220,7 @@ class QmlApplicationController(QObject):
             QObject, "toolConfirmationWindow"
         )
         if self._pet_menu_window is not None:
+            self._tray_menu_dismissal = TrayMenuDismissal(self._pet_menu_window, self)
             action_signal = getattr(self._pet_menu_window, "actionRequested", None)
             if action_signal is not None:
                 action_signal.connect(self._handle_pet_menu_action)
@@ -301,7 +304,7 @@ class QmlApplicationController(QObject):
         if callable(raise_window):
             raise_window()
         activate = getattr(self._pet_menu_window, "requestActivate", None)
-        if callable(activate):
+        if callable(activate) and QGuiApplication.platformName() != "windows":
             activate()
 
     @Slot(str)
@@ -799,6 +802,8 @@ class QmlApplicationController(QObject):
         if self._closed:
             return
         self._closed = True
+        if self._tray_menu_dismissal is not None:
+            self._tray_menu_dismissal.close()
         if self._runtime_host is not None:
             try:
                 self._runtime_host.close()

@@ -5,7 +5,7 @@ param(
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $root
 try {
-    & $Python -m pip install -e ".[audio,asr,wake,llm,tts,tools,ui,agent,build]"
+    & $Python -m pip install -e ".[audio,asr,wake,llm,tts,ui,agent,build]"
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

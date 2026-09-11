@@ -34,7 +34,7 @@ VoicePet 是一个面向 Windows 的桌面语音助手。它以桌宠形式常�
 **Agent**
 
 - 对话统一由 Codex Agent 在独立 Worker 进程中处理，需要先在设置中配置 API Key
-- Agent 可用 `voicepet_file_change`（创建、编辑、替换、删除文本文件）与 `voicepet_shell`（按参数数组运行程序）两个动态工具
+- 文件修改与命令执行使用 Codex SDK 的原生工具，由 Codex 执行器管理执行策略
 - Agent 需要确认时弹出“Agent 请求确认”窗口，是否逐步确认由聊天输入框的审批模式决定
 - Codex Agent 会话线程可恢复，主进程只接收脱敏事件
 
@@ -60,7 +60,7 @@ Set-Location VoicePet
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[audio,asr,wake,llm,tts,tools,ui,agent,build]"
+python -m pip install -e ".[audio,asr,wake,llm,tts,ui,agent,build]"
 
 python app.py
 ```
@@ -74,7 +74,6 @@ python app.py
 | `wake` | Sherpa-ONNX 中文唤醒 |
 | `llm` | OpenAI 协议客户端 |
 | `tts` | Edge TTS 与 Windows SAPI 回退 |
-| `tools` | Agent 动态工具的参数校验 |
 | `ui` | PySide6 与 QML 界面 |
 | `agent` | Codex Agent Worker，配置 API Key 时必需 |
 | `build` | PyInstaller 打包 |

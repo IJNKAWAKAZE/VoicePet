@@ -119,11 +119,18 @@ Item {
                 color: root.theme.text
                 elide: Text.ElideRight
             }
-            AppButton { theme: root.theme; text: "查看"; kind: "ghost"; onClicked: root.chat.open_memory() }
+            AppButton {
+                theme: root.theme
+                text: "查看"
+                kind: "secondary"
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.chat.open_memory()
+            }
             Text { visible: root.chat.memoryActionResult.length > 0; text: root.chat.memoryActionResult; color: root.theme.textMuted; anchors.verticalCenter: parent.verticalCenter }
             ListView {
                 width: Math.max(100, memoryChanges.width - 420)
-                height: 48
+                height: 40
+                anchors.verticalCenter: parent.verticalCenter
                 orientation: ListView.Horizontal
                 spacing: 6
                 clip: true

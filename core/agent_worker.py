@@ -30,7 +30,6 @@ class AgentWorkerServer:
         self._write_lock = asyncio.Lock()
         self._active_turn: str | None = None
         self._turn_task: asyncio.Task[None] | None = None
-        self._approvals: dict[str, Any] = {}
         self._closed = False
 
     async def serve(self) -> None:
@@ -78,12 +77,7 @@ class AgentWorkerServer:
                 if not resolver(approval_id, decision):
                     raise AgentWorkerError("审批请求无效")
                 return {"accepted": True}
-            if approval_id not in self._approvals or decision not in {"accept", "decline", "cancel"}:
-                raise AgentWorkerError("审批请求无效")
-            future = self._approvals.pop(approval_id)
-            if not future.done():
-                future.set_result(decision)
-            return {"accepted": True}
+            raise AgentWorkerError("审批请求无效")
         if request.method == "agent.shutdown":
             if self._active_turn is not None:
                 await self._adapter.cancel(self._active_turn)
