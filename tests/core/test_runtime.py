@@ -5,9 +5,10 @@ import pytest
 
 import core
 from core.asr import AsrModelState
+from core.audio_types import AudioDeviceError
 from core.config import WakeWordConfig
 from core.event_bus import EventBus
-from core.events import TurnId
+from core.events import RuntimeErrorEvent, TurnId
 from core.runtime import RuntimeHost, RuntimeHostError, RuntimeServices
 from core.tts import TtsVoiceOption
 from core.wake import WakeRuntimeStatus
@@ -36,6 +37,12 @@ class FailingLifecycle(FakeLifecycle):
     async def start(self):
         await super().start()
         raise RuntimeError("startup failed")
+
+
+class DegradedAudioLifecycle(FakeLifecycle):
+    async def start(self):
+        await super().start()
+        raise AudioDeviceError("麦克风启动失败: Error querying device -1")
 
 
 class BlockingLifecycle(FakeLifecycle):
@@ -591,3 +598,39 @@ def test_runtime_host_dispatches_managed_wake_operations_off_ui_thread():
     assert wake.configurations == [config]
     assert progress == [WakeDownloadProgress(5, 10)]
     assert all(thread_id != caller_thread for _, thread_id in wake_events)
+
+
+def test_runtime_host_degrades_missing_microphone_and_keeps_running():
+    events = []
+    bus = EventBus()
+    published = []
+    bus.subscribe(RuntimeErrorEvent, published.append)
+    services = RuntimeServices(
+        bus,
+        FakeCoordinator(events),
+        FakeActivation(events),
+        DegradedAudioLifecycle("capture", events),
+        wake_service=FakeLifecycle("wake", events),
+        scheduler=FakeLifecycle("scheduler", events),
+    )
+    host = RuntimeHost(services)
+
+    host.start()
+    try:
+        assert host.is_running is True
+        assert host.audio_available is False
+        # 采集失败后跳过依赖麦克风的唤醒监听，其余服务照常启动
+        assert [name for name, _ in events] == ["start:capture", "start:scheduler"]
+        assert [event.error_code for event in published] == ["audio.device"]
+        with pytest.raises(RuntimeHostError, match="麦克风不可用") as failure:
+            host.activate("click")
+        assert "麦克风不可用" in failure.value.safe_message
+    finally:
+        host.close()
+
+    assert [name for name, _ in events] == [
+        "start:capture",
+        "start:scheduler",
+        "stop:coordinator",
+        "stop:scheduler",
+    ]

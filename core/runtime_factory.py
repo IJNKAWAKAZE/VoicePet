@@ -213,6 +213,7 @@ def build_default_runtime(
         speech_synthesizer=speech,
         audio_player=audio_player,
         agent_gateway=agent_gateway,
+        max_turn_duration=float(config.agent.max_turn_minutes) * 60.0,
     )
     memory_jobs = MemoryJobStore(data_directory / "assistant.db")
     scheduler = MemoryScheduler(

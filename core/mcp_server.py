@@ -1,16 +1,19 @@
 """VoicePet 本地 MCP stdio 服务。"""
 from __future__ import annotations
 
+import base64
+import glob
 import json
 import os
 import shutil
 import subprocess
-import sys
 import webbrowser
 import zipfile
-import glob
 from pathlib import Path
 from urllib.parse import urlparse
+
+from . import computer_use
+from .agent_types import AgentApprovalMode
 
 TOOLS = [
     {"name":"open_url","description":"用默认浏览器打开 HTTP/HTTPS 地址","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},
@@ -38,14 +41,49 @@ TOOLS = [
     {"name":"media_control","description":"发送媒体播放控制","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["play_pause","next","previous","stop"]}},"required":["action"]}},
     {"name":"set_volume","description":"设置系统音量 0-100","inputSchema":{"type":"object","properties":{"percent":{"type":"integer","minimum":0,"maximum":100}},"required":["percent"]}},
     {"name":"set_brightness","description":"设置显示器亮度 0-100","inputSchema":{"type":"object","properties":{"percent":{"type":"integer","minimum":0,"maximum":100}},"required":["percent"]}},
-    {"name":"type_text","description":"向当前窗口输入文字","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
+    {"name":"type_text","description":"向当前窗口输入文字，默认用剪贴板粘贴以避免输入法串字，粘贴失败才退回逐字注入；输入后截图确认一次即可","inputSchema":{"type":"object","properties":{"text":{"type":"string"},"method":{"type":"string","enum":["auto","keys","clipboard"]}},"required":["text"]}},
+    {"name":"list_windows","description":"列出当前可见的桌面窗口（句柄、标题、进程、位置），用于定位要操作的窗口","inputSchema":{"type":"object","properties":{"include_minimized":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}}}},
+    {"name":"get_window_state","description":"截取窗口或整屏图像供查看，坐标以该图像为准；操作前先用它观察界面","inputSchema":{"type":"object","properties":{"window":{"type":"string","description":"窗口标题关键字或句柄，省略或 active 表示当前活动窗口，screen 表示整屏"},"max_width":{"type":"integer","minimum":200,"maximum":3840}}}},
+    {"name":"click","description":"点击窗口内坐标，坐标相对窗口左上角（window 为 screen 时是屏幕坐标）；先用 get_window_state 观察","inputSchema":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"window":{"type":"string"},"button":{"type":"string","enum":["left","right","middle"]},"clicks":{"type":"integer","minimum":1,"maximum":3},"activate":{"type":"boolean"}},"required":["x","y"]}},
+    {"name":"scroll","description":"滚动鼠标滚轮，amount 为正向上、负向下","inputSchema":{"type":"object","properties":{"amount":{"type":"integer","minimum":-20,"maximum":20},"x":{"type":"integer"},"y":{"type":"integer"},"window":{"type":"string"}},"required":["amount"]}},
+    {"name":"drag","description":"按住鼠标从起点拖到终点，坐标相对窗口左上角","inputSchema":{"type":"object","properties":{"from_x":{"type":"integer"},"from_y":{"type":"integer"},"to_x":{"type":"integer"},"to_y":{"type":"integer"},"window":{"type":"string"},"button":{"type":"string","enum":["left","right","middle"]}},"required":["from_x","from_y","to_x","to_y"]}},
+    {"name":"press_key","description":"按下按键或组合键，例如 enter、ctrl+s、alt+F4、win+r","inputSchema":{"type":"object","properties":{"sequence":{"type":"string"}},"required":["sequence"]}},
 ]
+
+# 直接操作桌面或不可逆的工具只允许在全自动模式下执行
+RESTRICTED_TOOLS = frozenset({
+    "click","scroll","drag","press_key","type_text",
+    "delete_file","move_file","rename_file","lock_screen","sleep_computer","shutdown_computer",
+})
+MODE_LABELS = {AgentApprovalMode.SUGGEST:"建议模式",AgentApprovalMode.AUTO_EDIT:"自动编辑模式",AgentApprovalMode.FULL_AUTO:"全自动模式"}
 
 def result(value, error=False):
     return {"content":[{"type":"text","text":json.dumps(value,ensure_ascii=False) if not isinstance(value,str) else value}],"isError":error}
 
+def image_result(value, png):
+    return {"content":[{"type":"text","text":json.dumps(value,ensure_ascii=False)},{"type":"image","data":base64.b64encode(png).decode("ascii"),"mimeType":"image/png"}],"isError":False}
+
+def integer_argument(args, key, default, minimum, maximum):
+    value = args.get(key, default)
+    if value is None or isinstance(value, bool): value = default
+    try: number = int(value)
+    except (TypeError, ValueError): raise computer_use.ComputerUseError(f"参数 {key} 必须是整数")
+    return max(minimum, min(maximum, number))
+
+def approval_mode():
+    """读取 Agent 写入的共享模式文件；缺失或损坏时按最保守的建议模式处理"""
+    raw = os.environ.get("VOICEPET_MODE_FILE")
+    if not raw: return AgentApprovalMode.SUGGEST.value
+    try: data = json.loads(Path(raw).read_text(encoding="utf-8"))
+    except (OSError, ValueError): return AgentApprovalMode.SUGGEST.value
+    mode = data.get("mode") if isinstance(data,dict) and data.get("version") == 1 else None
+    return mode if mode in {item.value for item in AgentApprovalMode} else AgentApprovalMode.SUGGEST.value
+
 def call(name, args):
     try:
+        mode = approval_mode()
+        if name in RESTRICTED_TOOLS and mode != AgentApprovalMode.FULL_AUTO.value:
+            return result(f"{MODE_LABELS[AgentApprovalMode(mode)]}下不能执行 {name}，请让用户切换到全自动模式后重试",True)
         if name == "open_url":
             url=args["url"]
             if urlparse(url).scheme not in {"http","https"}: return result("只允许 HTTP/HTTPS 地址",True)
@@ -59,7 +97,8 @@ def call(name, args):
         if name == "delete_file":
             if not path or not path.is_file(): return result("目标不是文件",True)
             if args.get("use_recycle_bin",True):
-                from send2trash import send2trash; send2trash(str(path))
+                from send2trash import send2trash
+                send2trash(str(path))
             else: path.unlink()
             return result({"deleted":True,"path":str(path)})
         source=Path(args["source"]).expanduser() if "source" in args else None
@@ -103,9 +142,10 @@ def call(name, args):
                 import psutil
                 battery=psutil.sensors_battery()
                 return result({"available":battery is not None, "percent":battery.percent if battery else None, "plugged":battery.power_plugged if battery else None})
-            except Exception: return result({"available":False})
+            except Exception: return result({"available":False})  # noqa: BLE001 电池信息缺失时按不可用处理
         if name == "lock_screen":
-            import ctypes; ctypes.windll.user32.LockWorkStation(); return result({"locked":True})
+            import ctypes
+            ctypes.windll.user32.LockWorkStation(); return result({"locked":True})
         if name == "sleep_computer":
             if os.name == "nt":
                 ctypes.windll.kernel32.SetSystemPowerState(False, True)
@@ -116,10 +156,10 @@ def call(name, args):
             else: subprocess.Popen(["shutdown","/r" if action=="restart" else "/s","/t",str(args.get("delay_seconds",30))])
             return result({"requested":action})
         if name in {"clipboard_read","clipboard_write"}:
-            import tkinter as tk
-            root=tk.Tk(); root.withdraw()
-            if name == "clipboard_read": value=root.clipboard_get(); root.destroy(); return result(value)
-            root.clipboard_clear(); root.clipboard_append(args["text"]); root.update(); root.destroy(); return result({"written":True})
+            if name == "clipboard_read":
+                text=computer_use.read_clipboard_text()
+                return result(text if text is not None else "剪贴板没有文本内容",text is None)
+            computer_use.write_clipboard_text(str(args["text"])); return result({"written":True})
         if name == "media_control":
             import ctypes
             keys={"play_pause":0xB3,"next":0xB0,"previous":0xB1,"stop":0xB2}; ctypes.windll.user32.keybd_event(keys[args["action"]],0,0,0); ctypes.windll.user32.keybd_event(keys[args["action"]],0,2,0); return result({"sent":args["action"]})
@@ -127,29 +167,31 @@ def call(name, args):
             try:
                 from pycaw.pycaw import AudioUtilities
                 endpoint=AudioUtilities.GetSpeakers().EndpointVolume; endpoint.SetMasterVolumeLevelScalar(args["percent"]/100,None); return result({"percent":args["percent"]})
-            except Exception as exc: return result(f"音量设置失败：{exc}",True)
+            except Exception as exc: return result(f"音量设置失败：{exc}",True)  # noqa: BLE001 音频设备不可用时只回传失败原因
         if name == "set_brightness":
             try:
                 import screen_brightness_control as sbc
                 sbc.set_brightness(args["percent"]); return result({"percent":args["percent"]})
-            except Exception as exc: return result(f"亮度设置失败：{exc}",True)
+            except Exception as exc: return result(f"亮度设置失败：{exc}",True)  # noqa: BLE001 亮度接口不可用时只回传失败原因
         if name == "type_text":
-            import ctypes
-            ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p)==8 else ctypes.c_ulong
-            class KEYBDINPUT(ctypes.Structure):
-                _fields_=[("wVk",ctypes.c_ushort),("wScan",ctypes.c_ushort),("dwFlags",ctypes.c_ulong),("time",ctypes.c_ulong),("dwExtraInfo",ULONG_PTR)]
-            class INPUT(ctypes.Structure):
-                _fields_=[("type",ctypes.c_ulong),("ki",KEYBDINPUT)]
-            inputs=[]
-            for ch in args["text"]:
-                code=ord(ch)
-                units=[code] if code<=0xffff else [0xd800+((code-0x10000)>>10),0xdc00+((code-0x10000)&0x3ff)]
-                for unit in units:
-                    inputs.extend([INPUT(1,KEYBDINPUT(0,unit,0x0004,0,0)),INPUT(1,KEYBDINPUT(0,unit,0x0004|0x0002,0,0))])
-            sent=ctypes.windll.user32.SendInput(len(inputs),(INPUT*len(inputs))(*inputs),ctypes.sizeof(INPUT)) if inputs and os.name=="nt" else 0
-            return result({"typed":len(args["text"]),"sent":sent==len(inputs)})
+            return result(computer_use.type_text(str(args["text"]),method=str(args.get("method","auto"))))
+        if name == "list_windows":
+            windows=[item.to_mapping() for item in computer_use.list_windows(include_minimized=bool(args.get("include_minimized")),limit=integer_argument(args,"limit",60,1,200))]
+            return result({"count":len(windows),"windows":windows})
+        if name == "get_window_state":
+            handle=computer_use.resolve_window(args.get("window"))
+            capture=computer_use.capture_window(handle,max_width=integer_argument(args,"max_width",1400,200,3840))
+            return image_result({"window":handle,"width":capture.width,"height":capture.height,"scaled_by":capture.step},capture.png)
+        if name == "click":
+            return result(computer_use.click(integer_argument(args,"x",0,-100000,100000),integer_argument(args,"y",0,-100000,100000),window=args.get("window"),button=str(args.get("button","left")),clicks=integer_argument(args,"clicks",1,1,3),activate=args.get("activate",True) is not False))
+        if name == "scroll":
+            return result(computer_use.scroll(amount=integer_argument(args,"amount",0,-20,20),x=args.get("x"),y=args.get("y"),window=args.get("window")))
+        if name == "drag":
+            return result(computer_use.drag(integer_argument(args,"from_x",0,-100000,100000),integer_argument(args,"from_y",0,-100000,100000),integer_argument(args,"to_x",0,-100000,100000),integer_argument(args,"to_y",0,-100000,100000),window=args.get("window"),button=str(args.get("button","left"))))
+        if name == "press_key":
+            return result(computer_use.press_key(str(args["sequence"])))
         return result("未知工具",True)
-    except Exception as exc: return result(f"执行失败：{exc}",True)
+    except Exception as exc: return result(f"执行失败：{exc}",True)  # noqa: BLE001 单个工具失败只回传结果，不中断 MCP 服务
 
 def serve():
     # windowed 冻结程序的 sys.stdin/stdout 为 None，使用父进程匿名管道。

@@ -549,21 +549,22 @@ def test_pet_listening_hint_waits_for_audio_and_clears_when_recording_ends(qapp)
         controller.close()
 
 
-def test_replacing_pet_speech_restarts_auto_hide_timer(qapp):
+def test_replacing_pet_speech_restarts_auto_hide_timer(qapp, wait_for):
     controller, _runtime, _tray, qml, *_ = build_controller(qapp)
     controller.start()
     pet = qml.root_objects[0].findChild(QObject, "petWindow")
     bubble = pet.findChild(QObject, "petSpeechBubble")
-    bubble.setProperty("timeoutMs", 40)
+    bubble.setProperty("timeoutMs", 1000)
 
     pet.setProperty("speech", "第一条")
-    QTest.qWait(25)
+    QTest.qWait(400)
     pet.setProperty("speech", "第二条")
-    QTest.qWait(25)
+    # 第一条的定时器若没有随第二条重启，会在 600ms 内触发并清空文本；
+    # 这里等过它的触发点再检查，给慢机器留出足够余量
+    QTest.qWait(700)
 
     assert pet.property("speech") == "第二条"
-    QTest.qWait(30)
-    assert pet.property("speech") == ""
+    assert wait_for(lambda: pet.property("speech") == "")
     controller.close()
 
 

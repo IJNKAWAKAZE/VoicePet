@@ -35,6 +35,7 @@ VoicePet 是一个面向 Windows 的桌面语音助手。它以桌宠形式常�
 
 - 对话统一由 Codex Agent 在独立 Worker 进程中处理，需要先在设置中配置 API Key
 - 文件修改与命令执行使用 Codex SDK 的原生工具，由 Codex 执行器管理执行策略
+- 可枚举窗口、截取窗口截图并按坐标点击与输入，用自然语言让 Agent 操作桌面应用
 - Agent 需要确认时弹出“Agent 请求确认”窗口，是否逐步确认由聊天输入框的审批模式决定
 - Codex Agent 会话线程可恢复，主进程只接收脱敏事件
 
@@ -77,6 +78,7 @@ python app.py
 | `ui` | PySide6 与 QML 界面 |
 | `agent` | Codex Agent Worker，配置 API Key 时必需 |
 | `build` | PyInstaller 打包 |
+| `dev` | 测试与静态检查（pytest、Pillow、ruff） |
 
 ## 首次配置
 
@@ -152,6 +154,14 @@ python app.py
 
 Agent 复用“AI 服务”页配置的 API 地址、模型名称、思考强度与角色设定，密钥同样由 Windows DPAPI 加密保存，不支持 ChatGPT OAuth。Agent 运行在独立 Worker 进程中，运行数据保存在 `%LOCALAPPDATA%\VoicePet\data\codex`；它的文件改动与命令执行在 Worker 内完成，不写入 VoicePet 的会话数据库。取消时会尝试关闭受管理的命令进程树，但已经完成的外部写入不会自动撤销。
 
+Agent 通过 VoicePet 自带的 MCP 服务获得桌面能力：`list_windows` 枚举可见窗口，`get_window_state` 返回窗口或整屏截图，`click`、`scroll`、`drag`、`press_key`、`type_text` 完成鼠标与键盘操作。`click`、`drag` 的坐标相对目标窗口左上角，Agent 会先截图观察、再执行单个动作并重新截图确认。
+
+输入文字默认走剪贴板粘贴，避免逐字注入被输入法串字；剪贴板粘贴失败时才退回逐字注入，并在粘贴后还原用户原来的剪贴板文本。
+
+单轮操作的总时长由 `agent.max_turn_minutes` 决定（默认 30 分钟），超过后本轮会被中断并提示“本轮处理已达到资源上限”。
+
+为避免语音误触，桌面操作和 `shutdown_computer`、`delete_file` 等不可逆工具只允许在**全自动**模式下执行：建议模式与自动编辑模式下调用会被拒绝并提示切换模式，只读的窗口枚举、截图以及文件、剪贴板、启动应用等工具不受限制。
+
 ## 数据与配置
 
 运行数据默认保存在：
@@ -187,6 +197,7 @@ python app.py --reset-test-memory   # 确认后删除测试用的会话与记忆
 ## 测试
 
 ```powershell
+python -m pip install -e ".[dev]"
 python -m pytest -q
 python -m ruff check .
 ```

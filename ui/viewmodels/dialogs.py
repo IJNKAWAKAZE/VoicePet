@@ -19,6 +19,11 @@ from PySide6.QtCore import (
 
 _INVALID_INDEX = QModelIndex()
 
+# 阻塞确认按界面分流：主面板内嵌确认与独立确认窗口各自排队
+MAIN_CHANNEL = "main"
+WINDOW_CHANNEL = "window"
+CONFIRMATION_CHANNELS = (MAIN_CHANNEL, WINDOW_CHANNEL)
+
 
 @dataclass(frozen=True, slots=True)
 class ConfirmationRequest:
@@ -31,12 +36,18 @@ class ConfirmationRequest:
     timeout_ms: int = 30_000
     show_details: bool = True
     confirm_label: str = "确认"
+    channel: str = MAIN_CHANNEL
 
     def __post_init__(self) -> None:
         texts = (self.request_id, self.title, self.summary, self.impact, self.risk, self.confirm_label)
         if any(not isinstance(value, str) or not value.strip() for value in texts):
             raise ValueError("确认请求文本不能为空")
-        if type(self.reversible) is not bool or type(self.show_details) is not bool or self.timeout_ms <= 0:
+        if (
+            type(self.reversible) is not bool
+            or type(self.show_details) is not bool
+            or self.timeout_ms <= 0
+            or self.channel not in CONFIRMATION_CHANNELS
+        ):
             raise ValueError("确认请求参数无效")
 
     def to_map(self) -> dict[str, object]:
@@ -50,6 +61,7 @@ class ConfirmationRequest:
             "timeoutMs": self.timeout_ms,
             "showDetails": self.show_details,
             "confirmLabel": self.confirm_label,
+            "channel": self.channel,
         }
 
 
@@ -123,6 +135,7 @@ class DialogCoordinator(QObject):
     """把短反馈、长任务与阻塞确认分成独立通道"""
 
     confirmationChanged = Signal()
+    windowConfirmationChanged = Signal()
     confirmationResolved = Signal(str, bool)
     agentInteractionChanged = Signal()
     agentInteractionResolved = Signal(str, object)
@@ -139,16 +152,22 @@ class DialogCoordinator(QObject):
         self._task_model = _DictionaryListModel(
             ("taskId", "title", "progress", "cancellable"), self
         )
-        self._confirmations: list[ConfirmationRequest] = []
+        # 会话删除等主面板确认与工具审批确认分开排队，避免独立窗口误点危险动作
+        self._confirmations: dict[str, list[ConfirmationRequest]] = {
+            channel: [] for channel in CONFIRMATION_CHANNELS
+        }
         self._agent_interaction: AgentInteractionRequest | None = None
         self._confirmation_callbacks: dict[
             str, tuple[Callable[[], None] | None, Callable[[], None] | None]
         ] = {}
         self._task_cancel_actions: dict[str, Callable[[], None]] = {}
         self._page_errors: dict[str, str] = {}
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self._timeout_current)
+        self._timers: dict[str, QTimer] = {}
+        for channel in CONFIRMATION_CHANNELS:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda channel=channel: self._timeout_current(channel))
+            self._timers[channel] = timer
 
     @Property(QObject, constant=True)
     def toast_model(self) -> _DictionaryListModel:
@@ -168,13 +187,28 @@ class DialogCoordinator(QObject):
 
     @Property("QVariantMap", notify=confirmationChanged)
     def current_confirmation(self) -> dict[str, object]:
-        if not self._confirmations:
-            return {}
-        return self._confirmations[0].to_map()
+        """独立窗口确认优先，保证工具审批在任意界面都能立即处理"""
+
+        for channel in (WINDOW_CHANNEL, MAIN_CHANNEL):
+            pending = self._confirmations[channel]
+            if pending:
+                return pending[0].to_map()
+        return {}
 
     @Property("QVariantMap", notify=confirmationChanged)
     def currentConfirmation(self) -> dict[str, object]:
         return self.current_confirmation
+
+    @Property("QVariantMap", notify=windowConfirmationChanged)
+    def current_window_confirmation(self) -> dict[str, object]:
+        """独立确认窗口只显示工具审批，不显示会话删除等主面板确认"""
+
+        pending = self._confirmations[WINDOW_CHANNEL]
+        return {} if not pending else pending[0].to_map()
+
+    @Property("QVariantMap", notify=windowConfirmationChanged)
+    def currentWindowConfirmation(self) -> dict[str, object]:
+        return self.current_window_confirmation
 
     @Property("QVariantMap", notify=agentInteractionChanged)
     def current_agent_interaction(self) -> dict[str, object]:
@@ -280,26 +314,30 @@ class DialogCoordinator(QObject):
         approve: Callable[[], None] | None = None,
         reject: Callable[[], None] | None = None,
     ) -> None:
-        if any(item.request_id == request.request_id for item in self._confirmations):
+        pending = self._confirmations[request.channel]
+        if any(item.request_id == request.request_id for item in pending):
             return
-        was_empty = not self._confirmations
-        self._confirmations.append(request)
+        was_empty = not pending
+        pending.append(request)
         self._confirmation_callbacks[request.request_id] = (approve, reject)
         if was_empty:
             self._activate_current()
 
     @Slot(str, bool)
     def resolve_confirmation(self, request_id: str, approved: bool) -> None:
-        if not self._confirmations or self._confirmations[0].request_id != request_id:
+        for channel in CONFIRMATION_CHANNELS:
+            pending = self._confirmations[channel]
+            if not pending or pending[0].request_id != request_id:
+                continue
+            self._timers[channel].stop()
+            pending.pop(0)
+            callbacks = self._confirmation_callbacks.pop(request_id, (None, None))
+            self.confirmationResolved.emit(request_id, approved)
+            callback = callbacks[0] if approved else callbacks[1]
+            if callback is not None:
+                callback()
+            self._activate_current()
             return
-        self._timer.stop()
-        self._confirmations.pop(0)
-        callbacks = self._confirmation_callbacks.pop(request_id, (None, None))
-        self.confirmationResolved.emit(request_id, approved)
-        callback = callbacks[0] if approved else callbacks[1]
-        if callback is not None:
-            callback()
-        self._activate_current()
 
     @Slot(str)
     def cancel_task(self, task_id: str) -> None:
@@ -324,9 +362,13 @@ class DialogCoordinator(QObject):
 
     def _activate_current(self) -> None:
         self.confirmationChanged.emit()
-        if self._confirmations:
-            self._timer.start(self._confirmations[0].timeout_ms)
+        self.windowConfirmationChanged.emit()
+        for channel in CONFIRMATION_CHANNELS:
+            pending = self._confirmations[channel]
+            if pending:
+                self._timers[channel].start(pending[0].timeout_ms)
 
-    def _timeout_current(self) -> None:
-        if self._confirmations:
-            self.resolve_confirmation(self._confirmations[0].request_id, False)
+    def _timeout_current(self, channel: str) -> None:
+        pending = self._confirmations.get(channel)
+        if pending:
+            self.resolve_confirmation(pending[0].request_id, False)

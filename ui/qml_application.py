@@ -36,6 +36,7 @@ from .tray_menu import TrayMenuDismissal
 from .viewmodels.app_shell import AppShellViewModel
 from .viewmodels.chat import ChatViewModel
 from .viewmodels.dialogs import (
+    WINDOW_CHANNEL,
     AgentInteractionRequest,
     ConfirmationRequest,
     DialogCoordinator,
@@ -229,6 +230,8 @@ class QmlApplicationController(QObject):
                 enable_menu(True)
         if self._runtime_host is not None:
             self._runtime_host.start()
+            if not getattr(self._runtime_host, "audio_available", True):
+                self._dialogs.toast("麦克风不可用，语音输入已停用，可直接用文字对话", "warning")
         self._chat.load_global_agent_mode()
         self._chat.refresh_sessions()
         self._chat.restore_current_session()
@@ -271,8 +274,12 @@ class QmlApplicationController(QObject):
                 self._runtime_host.activate("click")
             else:
                 self._runtime_host.cancel_active_turn()
-        except RuntimeError:
-            self._dialogs.set_page_error("chat", "语音操作提交失败，请重试")
+        except RuntimeError as error:
+            # 麦克风缺失等已知原因使用运行时给出的安全说明
+            self._dialogs.set_page_error(
+                "chat",
+                getattr(error, "safe_message", "") or "语音操作提交失败，请重试",
+            )
 
     @Slot(QPoint)
     def _show_tray_menu(self, anchor: QPoint) -> None:
@@ -784,6 +791,7 @@ class QmlApplicationController(QObject):
             "操作将由本机工具执行",
             False,
             event.risk,
+            channel=WINDOW_CHANNEL,
         )
         approve = None
         reject = None

@@ -97,14 +97,34 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
         RuntimeHost(services).close()
 
 
-def test_default_runtime_factory_wires_turn_budget_defaults(tmp_path):
+def test_default_runtime_factory_wires_agent_turn_limit(tmp_path):
     services = build_default_runtime(
         AppConfig(),
         EventBus(),
         tmp_path / "VoicePet",
     )
     try:
-        assert services.coordinator._budget_limits == TurnBudgetLimits()
+        assert services.coordinator._budget_limits == TurnBudgetLimits(
+            max_duration=AppConfig().agent.max_turn_minutes * 60.0,
+        )
+    finally:
+        RuntimeHost(services).close()
+
+
+def test_default_runtime_factory_respects_custom_agent_turn_limit(tmp_path):
+    config = replace(
+        AppConfig(),
+        agent=replace(AppConfig().agent, max_turn_minutes=5),
+    )
+    services = build_default_runtime(
+        config,
+        EventBus(),
+        tmp_path / "VoicePet",
+    )
+    try:
+        assert services.coordinator._budget_limits == TurnBudgetLimits(
+            max_duration=300.0,
+        )
     finally:
         RuntimeHost(services).close()
 

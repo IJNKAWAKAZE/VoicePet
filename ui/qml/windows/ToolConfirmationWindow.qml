@@ -8,7 +8,8 @@ ApplicationWindow {
     objectName: "toolConfirmationWindow"
     required property QtObject theme
     required property QtObject dialogs
-    property var request: dialogs.currentConfirmation
+    // 独立窗口只承载工具审批，绝不显示会话删除等主面板确认
+    property var request: dialogs.currentWindowConfirmation
 
     width: 500
     height: request.showDetails === false ? 180 : 330
@@ -81,7 +82,7 @@ ApplicationWindow {
 
     Connections {
         target: confirmationWindow.dialogs
-        function onConfirmationChanged() {
+        function onWindowConfirmationChanged() {
             if (!confirmationWindow.request.requestId)
                 confirmationWindow.hide()
         }

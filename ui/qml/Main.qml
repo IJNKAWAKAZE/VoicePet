@@ -142,6 +142,17 @@ ApplicationWindow {
             dialogCoordinator.resolve_confirmation(requestId, approved)
     }
 
+    // 主面板隐藏时排队的确认在窗口重新显示后必须补弹，避免静默堆积
+    function syncConfirmationSheet() {
+        const request = dialogCoordinator.currentConfirmation
+        if (!request.requestId || !mainWindow.visible)
+            mainConfirmationSheet.close()
+        else
+            mainConfirmationSheet.open()
+    }
+
+    onVisibleChanged: syncConfirmationSheet()
+
     Connections {
         target: appShell
         function onCurrentSectionChanged() { dialogCoordinator.clear_toasts() }
@@ -160,14 +171,8 @@ ApplicationWindow {
 
     Connections {
         target: dialogCoordinator
-        function onConfirmationChanged() {
-            const request = dialogCoordinator.currentConfirmation
-            if (!request.requestId) {
-                mainConfirmationSheet.close()
-            } else if (mainWindow.visible) {
-                mainConfirmationSheet.open()
-            }
-        }
+        function onConfirmationChanged() { mainWindow.syncConfirmationSheet() }
+        function onWindowConfirmationChanged() { mainWindow.syncConfirmationSheet() }
     }
 
     ResizeHandle {

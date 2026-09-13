@@ -1,7 +1,11 @@
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy
 
-from ui.viewmodels.dialogs import ConfirmationRequest, DialogCoordinator
+from ui.viewmodels.dialogs import (
+    WINDOW_CHANNEL,
+    ConfirmationRequest,
+    DialogCoordinator,
+)
 
 
 def test_toast_queue_exposes_safe_rows_and_can_be_consumed():
@@ -43,6 +47,50 @@ def test_confirmation_requests_are_fifo_and_resolve_once():
     assert resolved.count() == 1
     assert resolved.at(0) == ["one", False]
     assert dialogs.current_confirmation["requestId"] == "two"
+
+
+def test_window_approval_cannot_resolve_pending_session_deletion():
+    dialogs = DialogCoordinator()
+    deleted: list[bool] = []
+    approved: list[bool] = []
+    dialogs.confirm(
+        ConfirmationRequest(
+            "delete-session:one",
+            "删除这段会话？",
+            "删除后无法恢复",
+            "仅删除会话历史",
+            False,
+            "本地数据",
+            show_details=False,
+            confirm_label="删除",
+        ),
+        lambda: deleted.append(True),
+    )
+    dialogs.confirm(
+        ConfirmationRequest(
+            "call-1",
+            "允许这项操作？",
+            "打开记事本",
+            "操作将由本机工具执行",
+            False,
+            "低",
+            channel=WINDOW_CHANNEL,
+        ),
+        lambda: approved.append(True),
+    )
+
+    # 独立窗口只看到工具审批，主面板确认仍然排队等待
+    assert dialogs.currentWindowConfirmation["requestId"] == "call-1"
+    assert dialogs.currentConfirmation["requestId"] == "call-1"
+
+    dialogs.resolve_confirmation("call-1", True)
+
+    assert approved == [True]
+    assert deleted == []
+    assert dialogs.currentWindowConfirmation == {}
+    assert dialogs.currentConfirmation["requestId"] == "delete-session:one"
+    dialogs.resolve_confirmation("delete-session:one", True)
+    assert deleted == [True]
 
 
 def test_confirmation_timeout_rejects_by_default(qapp):

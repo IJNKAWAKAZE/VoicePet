@@ -434,22 +434,22 @@ def test_immediate_settings_are_not_reported_as_discardable(qapp):
     assert settings.config.ui.pet_scale == 1.2
 
 
-def test_terminal_status_expires_but_pending_operation_does_not(qapp):
+def test_terminal_status_expires_but_pending_operation_does_not(qapp, wait_for):
     runtime = Runtime()
     settings = SettingsViewModel(AppConfig(), Store(), runtime=runtime)
     settings._status_timer.setInterval(20)
     settings.save_draft()
-    QTest.qWait(40)
-    assert settings.statusMessage == ""
+    assert wait_for(lambda: settings.statusMessage == "设置已保存")
+    assert wait_for(lambda: settings.statusMessage == "")
     pending = Future()
     runtime.list_tts_voices = lambda: pending
     settings.refresh_voices()
+    assert wait_for(lambda: "正在" in settings.statusMessage)
     QTest.qWait(40)
     assert "正在" in settings.statusMessage
     pending.set_result(runtime.voices)
     assert "完成" in settings.statusMessage
-    QTest.qWait(40)
-    assert settings.statusMessage == ""
+    assert wait_for(lambda: settings.statusMessage == "")
 
 
 def test_asr_completion_names_running_model_when_selection_changes_mid_download(qapp):

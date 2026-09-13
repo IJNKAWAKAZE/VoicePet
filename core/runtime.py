@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from .asr import AsrModelState
+from .audio_types import AudioError
 from .config import PrivacyConfig, WakeWordConfig
 from .diagnostics import DiagnosticResult
 from .event_bus import EventBus
-from .events import MemoryChanged, TurnId
+from .events import CorrelationId, MemoryChanged, TurnId
 from .llm import LlmAttachment
+from .runtime_errors import runtime_error_event
 from .wake import WakeRuntimeStatus
 from .wake_models import WakeDownloadProgress, WakeModelState
 
@@ -26,6 +28,12 @@ class RuntimeHostError(RuntimeError):
     """Runtime 工作线程启动、调度或关闭失败"""
 
     code = "runtime.host"
+
+    def __init__(self, message: str, *, safe_message: str = "") -> None:
+        """safe_message 是可展示给用户的说明，缺省时调用方使用通用提示"""
+
+        super().__init__(message)
+        self.safe_message = safe_message
 
 
 class AsyncLifecycle(Protocol):
@@ -248,6 +256,7 @@ class RuntimeHost:
         self._thread_id: int | None = None
         self._startup_error: BaseException | None = None
         self._started: list[AsyncLifecycle] = []
+        self._audio_available = True
         self._memory_invalidated = False
         self._closed = False
         self._shutdown_complete = False
@@ -266,6 +275,12 @@ class RuntimeHost:
     @property
     def llm_configured(self) -> bool:
         return self._services.llm_configured
+
+    @property
+    def audio_available(self) -> bool:
+        """麦克风采集是否可用，不可用时语音入口直接给出提示"""
+
+        return self._audio_available
 
     @property
     def thread_id(self) -> int | None:
@@ -299,6 +314,11 @@ class RuntimeHost:
             raise RuntimeHostError("Runtime 服务启动失败") from self._startup_error
 
     def activate(self, source: str) -> Future[TurnId]:
+        if not self._audio_available:
+            raise RuntimeHostError(
+                "麦克风不可用，语音聆听已停用",
+                safe_message="麦克风不可用，语音聆听已停用，请改用文字输入",
+            )
         return self._submit(self._services.activation.activate(source))
 
     def speak_notice(self, text: str) -> Future[TurnId]:
@@ -314,6 +334,11 @@ class RuntimeHost:
         return self._submit(future)
 
     def capture_manual_transcript(self) -> Future[str]:
+        if not self._audio_available:
+            raise RuntimeHostError(
+                "麦克风不可用，语音输入已停用",
+                safe_message="麦克风不可用，语音输入已停用，请改用文字输入",
+            )
         return self._submit(self._services.coordinator.capture_manual_transcript())
 
     def cancel_active_turn(self) -> Future[None]:
@@ -758,6 +783,8 @@ class RuntimeHost:
                 self._thread_id = None
 
     async def _startup(self) -> None:
+        # 麦克风等音频设备缺失只降级语音入口，文字对话与桌面控制仍须可用
+        audio_degradation: BaseException | None = None
         try:
             for service in (
                 self._services.capture,
@@ -766,7 +793,17 @@ class RuntimeHost:
             ):
                 if service is None:
                     continue
-                await service.start()
+                if (
+                    service is self._services.wake_service
+                    and audio_degradation is not None
+                ):
+                    # 唤醒监听依赖麦克风帧，采集不可用时不再尝试订阅
+                    continue
+                try:
+                    await service.start()
+                except AudioError as error:
+                    audio_degradation = error
+                    continue
                 self._started.append(service)
         except BaseException as startup_error:
             rollback_errors: list[BaseException] = []
@@ -780,6 +817,19 @@ class RuntimeHost:
                     [startup_error, *rollback_errors],
                 )
             raise
+        if audio_degradation is not None:
+            self._audio_available = False
+            await self._report_audio_degradation(audio_degradation)
+
+    async def _report_audio_degradation(self, error: BaseException) -> None:
+        """语音输入不可用时给出安全提示，且不影响其余服务启动"""
+
+        try:
+            await self._services.event_bus.publish(
+                runtime_error_event(TurnId.new(), CorrelationId.new(), error)
+            )
+        except Exception:  # noqa: BLE001 提示失败不能阻止运行时启动
+            return
 
     async def _shutdown(self) -> None:
         if self._shutdown_complete:

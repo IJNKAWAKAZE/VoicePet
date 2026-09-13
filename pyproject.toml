@@ -50,6 +50,11 @@ ui = [
 build = [
     "pyinstaller>=6.15,<7",
 ]
+dev = [
+    "pillow>=11,<13",
+    "pytest>=8,<10",
+    "ruff>=0.16,<1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -312,10 +312,13 @@ class ChatViewModel(QObject):
             self.voiceRecordingChanged.emit()
             self.scrollToLatestRequested.emit()
             self._watch("voice_input", starter())
-        except (RuntimeError, ValueError, TypeError):
+        except (RuntimeError, ValueError, TypeError) as error:
             self._voice_recording = False
             self.voiceRecordingChanged.emit()
-            self.errorOccurred.emit("语音输入启动失败，请稍后重试")
+            # 麦克风缺失等已知原因使用运行时给出的安全说明
+            self.errorOccurred.emit(
+                getattr(error, "safe_message", "") or "语音输入启动失败，请稍后重试"
+            )
 
     @Slot(str)
     def copy_message(self, text: str) -> None:
