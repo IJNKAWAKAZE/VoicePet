@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import "../js/markdown.js" as MarkdownBlocks
 
 Rectangle {
     id: root
@@ -12,7 +13,7 @@ Rectangle {
 
     visible: message.length > 0
     implicitWidth: Math.min(320, availableScreenWidth - 32, Math.max(120, messageMetrics.advanceWidth + 28))
-    implicitHeight: Math.min(260, availableScreenHeight - 16, bubbleText.contentHeight + 28)
+    implicitHeight: Math.min(260, availableScreenHeight - 16, speechColumn.implicitHeight + 28)
     width: implicitWidth
     height: implicitHeight
     radius: 16
@@ -46,23 +47,71 @@ Rectangle {
             policy: ScrollBar.AsNeeded
         }
 
-        TextArea {
-            id: bubbleText
-            objectName: "petSpeechText"
+        // 代码块必须交给纯文本控件换行，Markdown 控件里的代码行不会按宽度折行
+        Column {
+            id: speechColumn
             width: speechScroll.availableWidth
-            text: root.message
-            textFormat: TextEdit.MarkdownText
-            readOnly: true
-            selectByMouse: true
-            wrapMode: TextEdit.Wrap
-            color: root.theme.text
-            font.pixelSize: 14
-            font.family: "Microsoft YaHei UI"
-            leftPadding: 4
-            rightPadding: 4
-            topPadding: 4
-            bottomPadding: 4
-            background: null
+            spacing: 4
+
+            Repeater {
+                model: MarkdownBlocks.splitBlocks(root.message)
+
+                delegate: Item {
+                    required property var modelData
+                    width: speechColumn.width
+                    implicitHeight: modelData.kind === "code" ? speechCode.implicitHeight : bubbleText.implicitHeight
+                    height: implicitHeight
+
+                    TextArea {
+                        id: bubbleText
+                        objectName: "petSpeechText"
+                        visible: modelData.kind !== "code"
+                        width: parent.width
+                        height: implicitHeight
+                        text: modelData.text
+                        textFormat: TextEdit.MarkdownText
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.Wrap
+                        color: root.theme.text
+                        font.pixelSize: 14
+                        font.family: "Microsoft YaHei UI"
+                        leftPadding: 4
+                        rightPadding: 4
+                        topPadding: 4
+                        bottomPadding: 4
+                        background: null
+                    }
+
+                    Rectangle {
+                        id: speechCode
+                        objectName: "petSpeechCodeBlock"
+                        visible: modelData.kind === "code"
+                        width: parent.width
+                        implicitHeight: speechCodeText.implicitHeight + 12
+                        height: implicitHeight
+                        radius: 6
+                        color: root.theme.codeBlock
+
+                        TextEdit {
+                            id: speechCodeText
+                            objectName: "petSpeechCodeText"
+                            x: 6
+                            y: 6
+                            width: parent.width - 12
+                            height: implicitHeight
+                            text: modelData.text
+                            textFormat: TextEdit.PlainText
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.Wrap
+                            color: root.theme.text
+                            font.pixelSize: 13
+                            font.family: "Consolas"
+                        }
+                    }
+                }
+            }
         }
     }
 

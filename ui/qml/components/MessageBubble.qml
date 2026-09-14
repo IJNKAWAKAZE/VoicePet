@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick
 import QtQuick.Controls
+import "../js/markdown.js" as MarkdownBlocks
 
 Rectangle {
     id: root
@@ -17,6 +18,9 @@ Rectangle {
     signal fileRequested(string path)
     property string previewSource: ""
     property bool actionsVisible: hoverHandler.hovered || copyMessageButton.visualFocus || playMessageButton.visualFocus
+
+    // Qt 的 Markdown 导入器把代码块段落标成不换行，整段交给一个控件渲染会画出气泡外
+    property var markdownBlocks: MarkdownBlocks.splitBlocks(root.markdown)
 
     width: Math.min(720, viewportWidth * 0.78)
     implicitHeight: messageColumn.implicitHeight + 24
@@ -126,19 +130,60 @@ Rectangle {
             }
         }
 
-        TextEdit {
-            id: messageText
-            width: parent.width
-            height: implicitHeight
-            text: root.markdown
-            textFormat: TextEdit.MarkdownText
-            readOnly: true
-            selectByMouse: true
-            wrapMode: TextEdit.Wrap
-            color: root.theme.text
-            font.pixelSize: 14
-            font.family: "Microsoft YaHei UI"
-            onLinkActivated: link => root.linkRequested(link)
+        Repeater {
+            model: root.markdownBlocks
+
+            delegate: Item {
+                required property var modelData
+                width: messageColumn.width
+                implicitHeight: modelData.kind === "code" ? codeBlock.implicitHeight : proseText.implicitHeight
+                height: implicitHeight
+
+                TextEdit {
+                    id: proseText
+                    objectName: "messageMarkdownText"
+                    visible: modelData.kind !== "code"
+                    width: parent.width
+                    height: implicitHeight
+                    text: modelData.text
+                    textFormat: TextEdit.MarkdownText
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.Wrap
+                    color: root.theme.text
+                    font.pixelSize: 14
+                    font.family: "Microsoft YaHei UI"
+                    onLinkActivated: link => root.linkRequested(link)
+                }
+
+                Rectangle {
+                    id: codeBlock
+                    objectName: "messageCodeBlock"
+                    visible: modelData.kind === "code"
+                    width: parent.width
+                    implicitHeight: codeText.implicitHeight + 16
+                    height: implicitHeight
+                    radius: 8
+                    color: root.theme.codeBlock
+
+                    TextEdit {
+                        id: codeText
+                        objectName: "messageCodeText"
+                        x: 8
+                        y: 8
+                        width: parent.width - 16
+                        height: implicitHeight
+                        text: modelData.text
+                        textFormat: TextEdit.PlainText
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.Wrap
+                        color: root.theme.text
+                        font.pixelSize: 13
+                        font.family: "Consolas"
+                    }
+                }
+            }
         }
     }
 

@@ -515,3 +515,30 @@ def test_streaming_does_not_pull_reader_away_from_older_messages(history_window,
     chat.append_assistant_delta("还有一些补充。" * 100)
     QTest.qWait(100)
     assert abs(messages.property("contentY") - before) <= 2
+
+
+def test_code_block_wraps_inside_bubble_instead_of_overflowing(history_window):
+    root, chat, _, _ = history_window
+    long_line = "Left 60%: " + "a flat opaque dark charcoal panel with chamfered corners, " * 3
+    chat.append_user_message("给我一段提示词")
+    chat.append_assistant_delta("①概念图\n```\n" + long_line.strip() + "\n```\n②底图\n")
+    QTest.qWait(150)
+
+    page = root.findChild(QQuickItem, "chatPage")
+    bubble = next(
+        item for item in visual_items(page)
+        if item.metaObject().className().startswith("MessageBubble")
+        and "```" in str(item.property("markdown"))
+    )
+    # Qt 的 Markdown 导入器把代码块段落标成不换行，必须换行渲染，否则文字会画出气泡外
+    visible = [item for item in visual_items(bubble) if item.property("visible")]
+    code = next(item for item in visible if item.objectName() == "messageCodeText")
+    assert code.property("contentWidth") <= code.width() + 1
+    assert code.height() == pytest.approx(code.property("implicitHeight"))
+
+    code_block = next(item for item in visible if item.objectName() == "messageCodeBlock")
+    assert code_block.y() + code_block.height() <= bubble.height()
+
+    prose = [item for item in visible if item.objectName() == "messageMarkdownText"]
+    assert len(prose) == 2
+    assert all(item.height() == pytest.approx(item.property("implicitHeight")) for item in prose)
