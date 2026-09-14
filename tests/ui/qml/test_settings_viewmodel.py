@@ -462,3 +462,41 @@ def test_asr_completion_names_running_model_when_selection_changes_mid_download(
     pending.set_result(None)
     assert "small" in settings.statusMessage
     assert "large-v3" not in settings.statusMessage
+
+
+def test_external_ui_config_updates_theme_without_touching_other_immediate_settings():
+    settings = SettingsViewModel(AppConfig(), Store())
+    settings.set_field("ui", "pet_scale", 1.5)
+    settings.set_field("ui", "start_at_login", True)
+    settings.set_field("llm", "model", "draft-model")
+
+    current = settings.config
+    settings.apply_external_config(
+        replace(
+            current,
+            ui=replace(current.ui, theme_id="sakura_coral", reduce_motion=True),
+        ),
+    )
+
+    assert settings.config.ui.theme_id == "sakura_coral"
+    assert settings.config.ui.reduce_motion is True
+    assert settings.config.ui.pet_scale == 1.5
+    assert settings.config.ui.start_at_login is True
+    assert settings.draft_value("ui", "theme_id") == "sakura_coral"
+    assert settings.draft_value("ui", "reduce_motion") is True
+    assert settings.draft_value("ui", "pet_scale") == 1.5
+    assert settings.draft_value("ui", "start_at_login") is True
+    assert settings.draft_value("llm", "model") == "draft-model"
+
+
+def test_external_config_merge_keeps_locally_edited_draft_field():
+    settings = SettingsViewModel(AppConfig(), Store())
+    settings.set_field("llm", "model", "draft-model")
+
+    settings.apply_external_config(
+        replace(settings.config, llm=replace(settings.config.llm, model="server-model")),
+    )
+
+    assert settings.config.llm.model == "server-model"
+    assert settings.draft_value("llm", "model") == "draft-model"
+    assert settings.hasDraftChanges

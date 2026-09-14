@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 import ui.application as application_module
+from core.config import ConfigStore, default_config_path
 from ui.application import run_ui
 
 
@@ -137,3 +138,55 @@ def test_run_ui_closes_resources_when_qml_controller_start_fails(tmp_path, monke
 
     assert runtime.closed == 1
     assert hotkey.closed == 1
+
+
+def test_run_ui_theme_switch_keeps_other_ui_settings_and_unsaved_draft(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    settings_viewmodels = []
+    themes = []
+    build_settings = application_module.SettingsViewModel
+    build_theme = application_module.ThemeViewModel
+
+    def capture_settings(*args, **kwargs):
+        viewmodel = build_settings(*args, **kwargs)
+        settings_viewmodels.append(viewmodel)
+        return viewmodel
+
+    def capture_theme(*args, **kwargs):
+        viewmodel = build_theme(*args, **kwargs)
+        themes.append(viewmodel)
+        return viewmodel
+
+    monkeypatch.setattr(application_module, "SettingsViewModel", capture_settings)
+    monkeypatch.setattr(application_module, "ThemeViewModel", capture_theme)
+
+    def event_loop():
+        settings_viewmodels[0].set_field("ui", "pet_scale", 1.5)
+        settings_viewmodels[0].set_field("ui", "start_at_login", True)
+        settings_viewmodels[0].set_field("llm", "model", "draft-model")
+        themes[0].set_theme("sakura_coral")
+        return 0
+
+    assert run_ui(
+        runtime_builder=lambda *args, **kwargs: object(),
+        runtime_host_factory=lambda services: FakeRuntimeHost(),
+        credential_store_factory=lambda path: type(
+            "Credentials",
+            (),
+            {"get": lambda self, name: None},
+        )(),
+        hotkey_factory=lambda: FakeHotkey(),
+        startup_manager_factory=FakeStartupManager,
+        event_loop=event_loop,
+    ) == 0
+
+    settings = settings_viewmodels[0]
+    assert settings.config.ui.theme_id == "sakura_coral"
+    assert settings.config.ui.pet_scale == 1.5
+    assert settings.config.ui.start_at_login is True
+    assert settings.draft_value("llm", "model") == "draft-model"
+
+    stored = ConfigStore(default_config_path()).load().config
+    assert stored.ui.theme_id == "sakura_coral"
+    assert stored.ui.pet_scale == 1.5
+    assert stored.ui.start_at_login is True

@@ -23,7 +23,9 @@ ApplicationWindow {
         border.width: 2
         border.color: themeViewModel.border
     }
+    // 无边框窗口默认缺少 WS_MINIMIZEBOX，任务栏点击不会切换最小化
     flags: Qt.Window | Qt.FramelessWindowHint
+        | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
 
     component ResizeHandle: MouseArea {
         required property int resizeEdges
@@ -245,7 +247,7 @@ ApplicationWindow {
         animation: petAnimation
         interaction: petInteraction
         theme: themeViewModel
-        petScale: settingsViewModel.draft_value("ui", "pet_scale")
+        petScale: settingsViewModel.draft.ui.pet_scale
     }
 
     PetMenuWindow {

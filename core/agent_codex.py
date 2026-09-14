@@ -47,6 +47,7 @@ def codex_thread_options(mode: AgentApprovalMode) -> dict[str, Any]:
 def codex_turn_options(mode: AgentApprovalMode) -> dict[str, Any]:
     if not isinstance(mode, AgentApprovalMode): raise ValueError("Agent 审批模式无效")  # noqa: TRY004
     return {"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"never" if mode is AgentApprovalMode.FULL_AUTO else "untrusted"}
+
 APPROVAL_MODE_FILENAME = "voicepet-agent-mode.json"
 
 def voicepet_mcp_overrides(mode_file: str | Path) -> tuple[str, ...]:
@@ -242,7 +243,13 @@ class CodexAgentAdapter:
                 inputs.append({"type":"localImage","path":attachment["path"]})
             else:
                 inputs.append({"type":"text","text":f"附件路径：{attachment['path']}，文件名：{attachment['name']}"})
-        started=await self._client.turn_start(thread_id,inputs,{**codex_turn_options(request.approval_mode),"model":self._model,"effort":self._reasoning_effort,"summary":"concise"}); codex_turn_id=started.turn.id; self._turns[request.turn_id]=(thread_id,codex_turn_id); seq=0
+        turn_options = {
+            **codex_turn_options(request.approval_mode),
+            "model": self._model,
+            "effort": self._reasoning_effort,
+            "summary": "concise",
+        }
+        started=await self._client.turn_start(thread_id,inputs,turn_options); codex_turn_id=started.turn.id; self._turns[request.turn_id]=(thread_id,codex_turn_id); seq=0
         active_progress = False
         while True:
             notification = await self._client.next_turn_notification(codex_turn_id)

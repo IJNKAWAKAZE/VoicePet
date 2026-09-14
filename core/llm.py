@@ -368,9 +368,8 @@ class OpenAIResponsesProvider:
                 "parallel_tool_calls": False,
                 "stream": True,
                 "store": False,
+                "reasoning": {"effort": self._reasoning_effort},
             }
-            if self._reasoning_effort != "auto":
-                settings["reasoning"] = {"effort": self._reasoning_effort}
             stream = await self._client.responses.create(**settings)
             completed = False
             async for event in stream:

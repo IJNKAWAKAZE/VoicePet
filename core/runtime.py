@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +90,8 @@ class MemoryDataService(Protocol):
     def undo(self, change_id: str) -> bool: ...
 
     def list_changes(self, session_id: str | None = None) -> tuple[Any, ...]: ...
+
+    def mark_changes_viewed(self, change_ids: Sequence[str]) -> int: ...
 
     def export_json(self, destination: str) -> int: ...
 
@@ -480,6 +482,12 @@ class RuntimeHost:
     ) -> Future[tuple[Any, ...]]:
         memory = self._require_memory()
         return self._submit(asyncio.to_thread(memory.list_changes, session_id))
+
+    def mark_memory_changes_viewed(self, change_ids: Sequence[str]) -> Future[int]:
+        memory = self._require_memory()
+        return self._submit(
+            asyncio.to_thread(memory.mark_changes_viewed, tuple(change_ids))
+        )
 
     def export_memories(self, destination: str) -> Future[int]:
         memory = self._require_memory()

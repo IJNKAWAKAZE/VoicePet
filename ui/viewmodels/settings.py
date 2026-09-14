@@ -342,6 +342,32 @@ class SettingsViewModel(QObject):
         self.draftChanged.emit()
         self.draftRestored.emit()
 
+    def apply_external_config(self, config: AppConfig) -> None:
+        """合并其他服务已保存的配置，保留用户未保存的草稿
+
+        主题回传的是整段 UiConfig，其中桌宠、启动与快捷键字段可能已经过期；
+        这里只采纳真正变化的字段，并且不覆盖用户正在编辑的草稿值。
+        """
+
+        previous = self._config
+        previous_data = previous.to_dict()
+        self._config = config
+        for section, fields in config.to_dict().items():
+            draft_section = self._draft.get(section)
+            previous_section = previous_data.get(section)
+            if not isinstance(fields, dict) or not isinstance(draft_section, dict):
+                continue
+            if not isinstance(previous_section, dict):
+                continue
+            for field, value in fields.items():
+                if field not in draft_section:
+                    continue
+                if draft_section[field] == previous_section.get(field):
+                    draft_section[field] = value
+        self._clear_errors()
+        self.configChanged.emit()
+        self.draftChanged.emit()
+
     # 使用 QVariant 接收 QML 的字符串、布尔值和数值
     @Slot(str, str, "QVariant")
     def set_field(self, section: str, field: str, value: object) -> None:

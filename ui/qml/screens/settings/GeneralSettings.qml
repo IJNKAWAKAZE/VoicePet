@@ -105,7 +105,7 @@ ScrollView {
             id: hotkeyField
             Layout.preferredWidth: 320
             theme: root.theme
-            text: root.settings.draft_value("ui", "global_hotkey")
+            text: root.settings.draft.ui.global_hotkey
             placeholderText: "全局快捷键"
             onEditingFinished: root.settings.set_field("ui", "global_hotkey", text)
         }

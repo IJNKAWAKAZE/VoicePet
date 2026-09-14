@@ -76,7 +76,7 @@ ScrollView {
             id: chatRetentionField
             Layout.preferredWidth: 240
             theme: root.theme
-            text: root.settings.draft_value("privacy", "chat_retention_days")
+            text: root.settings.draft.privacy.chat_retention_days
             placeholderText: "聊天记录保留天数"
             inputMethodHints: Qt.ImhDigitsOnly
             onTextEdited: root.settings.set_field("privacy", "chat_retention_days", text === "" ? "" : Number(text))
@@ -87,7 +87,7 @@ ScrollView {
             Layout.preferredWidth: 240
             theme: root.theme
             // 编辑中保留空值和光标位置，放弃时由 draftRestored 恢复
-            text: root.settings.draft_value("privacy", "summary_retention_days")
+            text: root.settings.draft.privacy.summary_retention_days
             placeholderText: "近期摘要保留天数"
             inputMethodHints: Qt.ImhDigitsOnly
             onTextEdited: root.settings.set_field("privacy", "summary_retention_days", text === "" ? "" : Number(text))

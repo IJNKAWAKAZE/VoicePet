@@ -163,6 +163,22 @@ def test_submit_rejects_attachment_without_text(tmp_path):
     assert messages == ["请先输入文字后再发送附件"]
 
 
+def test_submit_rejects_more_attachments_than_limit(tmp_path):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    path = tmp_path / "a.txt"
+    path.write_text("内容", encoding="utf-8")
+    payload = [{"path": str(path), "name": "a.txt", "kind": "file"}] * 17
+
+    messages = []
+    chat.errorOccurred.connect(messages.append)
+    chat.submit("请读取", payload)
+
+    assert runtime.submitted == []
+    assert chat.message_model.rowCount() == 0
+    assert messages == ["最多只能添加 16 个附件"]
+
+
 def test_open_attachment_uses_system_default_handler(monkeypatch):
     opened = []
     monkeypatch.setattr(

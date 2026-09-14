@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 MEMORY_COMPONENT = "memory_system"
-MEMORY_SCHEMA_VERSION = 3
+MEMORY_SCHEMA_VERSION = 4
 
 _AGENT_DDL = (
     """
@@ -113,7 +113,8 @@ _DDL = (
         before_json TEXT,
         after_version INTEGER NOT NULL,
         created_at TEXT NOT NULL,
-        undone INTEGER NOT NULL DEFAULT 0
+        undone INTEGER NOT NULL DEFAULT 0,
+        viewed INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -227,7 +228,7 @@ _REQUIRED_COLUMNS = {
     "memory_fts": {"id", "content", "keywords", "category"},
     "memory_changes": {
         "id", "memory_id", "session_id", "source_turn_id", "kind", "before_json",
-        "after_version", "created_at", "undone",
+        "after_version", "created_at", "undone", "viewed",
     },
     "memory_suppressions": {"source_turn_id", "fact_fingerprint", "created_at"},
     "memory_evidence": {"memory_id", "source_turn_id", "quote"},
@@ -308,11 +309,21 @@ def _ensure_memory_schema(connection: sqlite3.Connection) -> None:
     target_exists = any(_table_exists(connection, table_name) for table_name in _TARGET_TABLES)
     if component_version is None and target_exists:
         raise MemorySchemaError("检测到旧记忆结构，请显式执行一次性测试数据重置")
-    if component_version == 2:
-        # 先核对旧结构再事务迁移，旧会话和记忆正文保持原样
-        _validate_schema(connection, include_agent=False)
-        for statement in _AGENT_DDL:
-            connection.execute(statement)
+    if component_version in {2, 3}:
+        # 先核对旧结构再事务迁移，旧会话、记忆正文与变更正文保持原样
+        _validate_schema(
+            connection,
+            include_agent=component_version == 3,
+            include_viewed=False,
+        )
+        if component_version == 2:
+            for statement in _AGENT_DDL:
+                connection.execute(statement)
+        connection.execute(
+            "ALTER TABLE memory_changes ADD COLUMN viewed INTEGER NOT NULL DEFAULT 0"
+        )
+        # 旧结构没有已查看状态，历史变更此前每次启动都会重复提示，迁移时视为已提示
+        connection.execute("UPDATE memory_changes SET viewed=1")
         connection.execute(
             "UPDATE voicepet_components SET version=? WHERE name=?",
             (MEMORY_SCHEMA_VERSION, MEMORY_COMPONENT),
@@ -351,8 +362,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     )
 
 
-def _validate_schema(connection: sqlite3.Connection, *, include_agent: bool = True) -> None:
+def _validate_schema(
+    connection: sqlite3.Connection,
+    *,
+    include_agent: bool = True,
+    include_viewed: bool = True,
+) -> None:
     required = {**_REQUIRED_COLUMNS, **(_AGENT_COLUMNS if include_agent else {})}
+    if not include_viewed:
+        # 迁移前只核对上一版本结构，已查看字段允许缺失
+        required["memory_changes"] = required["memory_changes"] - {"viewed"}
     for table_name, required_columns in required.items():
         if not _table_exists(connection, table_name):
             raise MemorySchemaError("记忆结构缺少必要数据表")

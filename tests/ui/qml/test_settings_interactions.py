@@ -146,11 +146,14 @@ def test_ai_reasoning_effort_dropdown_tracks_draft_and_supports_six_levels(qapp)
     with page(qapp, "AiSettings", settings) as root:
         combo = root.findChild(QObject, "reasoningEffortSelector")
         assert combo is not None
-        assert combo.property("model") == ["自动", "最小", "低", "中", "高", "极高"]
-        assert combo.property("currentIndex") == 2
-        combo.setProperty("currentIndex", 4)
-        combo.activated.emit(4)
+        assert combo.property("model") == ["最小", "低", "中", "高", "极高", "最大"]
+        assert combo.property("currentIndex") == 1
+        combo.setProperty("currentIndex", 3)
+        combo.activated.emit(3)
         assert settings.draft_value("llm", "reasoning_effort") == "high"
+        combo.setProperty("currentIndex", 5)
+        combo.activated.emit(5)
+        assert settings.draft_value("llm", "reasoning_effort") == "max"
 
 
 def test_asr_dropdown_tracks_changed_model_options_after_discard(qapp):
@@ -377,3 +380,46 @@ def test_role_prompt_keeps_cursor_when_draft_updates_during_typing(qapp):
         assert editor.property("cursorPosition") == 3
         QTest.keyClick(root.window(), "y")
         assert settings.draft_value("llm", "system_prompt") == "abxycd"
+
+
+def test_pet_settings_controls_follow_tray_actions_and_draft_restore(qapp):
+    from test_qml_application import build_controller
+    built = build_controller(qapp)
+    controller, _runtime, _tray, qml, *_middle, settings, _store = built
+    controller.start()
+    try:
+        window = qml.root_objects[0]
+        page = next(item for item in visual_items(window.contentItem())
+                    if item.metaObject().indexOfProperty("category") >= 0)
+        page.setVisible(True)
+        page.setProperty("category", "pets")
+        qapp.processEvents()
+
+        def toggle(text):
+            return next(item for item in visual_items(page)
+                        if item.property("text") == text
+                        and item.metaObject().className().startswith("AppToggle"))
+
+        topmost = toggle("置顶")
+        click_through = toggle("鼠标穿透")
+        scale_label = next(item for item in visual_items(page)
+                           if str(item.property("text")).startswith("桌宠缩放 · "))
+        assert topmost.property("checked") is True
+        assert click_through.property("checked") is False
+
+        controller._handle_pet_menu_action("clickThrough")
+        controller._handle_pet_menu_action("topmost")
+        settings.set_field("ui", "pet_scale", 1.5)
+        qapp.processEvents()
+
+        assert settings.config.ui.pet_click_through is True
+        assert click_through.property("checked") is True
+        assert topmost.property("checked") is False
+        assert scale_label.property("text") == "桌宠缩放 · 150%"
+
+        topmost.setProperty("checked", True)
+        settings.discard_draft()
+        qapp.processEvents()
+        assert topmost.property("checked") is False
+    finally:
+        controller.close()

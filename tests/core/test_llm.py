@@ -134,7 +134,7 @@ class FakeClient:
         self.responses = FakeResponses(stream)
 
 
-def test_auto_reasoning_effort_omits_provider_override():
+def test_reasoning_effort_is_always_sent_as_provider_override():
     stream = FakeStream([
         SimpleNamespace(
             type="response.completed",
@@ -142,16 +142,11 @@ def test_auto_reasoning_effort_omits_provider_override():
         )
     ])
     client = FakeClient(stream)
-    provider = OpenAIResponsesProvider(client=client, reasoning_effort="auto")
+    provider = OpenAIResponsesProvider(client=client, reasoning_effort="max")
 
     asyncio.run(collect(provider, LlmRequest("system", "hello")))
 
-    assert "reasoning" not in client.responses.calls[0]
-
-
-
-
-
+    assert client.responses.calls[0]["reasoning"] == {"effort": "max"}
 
 
 

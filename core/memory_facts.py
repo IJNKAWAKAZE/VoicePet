@@ -68,6 +68,7 @@ class MemoryChange:
     after_version: int
     created_at: datetime
     undone: bool
+    viewed: bool = False
 
 
 def normalize_fact_value(value: str) -> str:

@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any
 
 MAX_PAYLOAD_BYTES = 900_000
+MAX_ATTACHMENTS = 16
 
 
 class AgentApprovalMode(str, Enum):
@@ -137,7 +138,7 @@ class AgentTurnRequest:
             raise ValueError("Agent 上下文无效")
         if not isinstance(self.approval_mode, AgentApprovalMode):
             raise ValueError("Agent 审批模式无效")  # noqa: TRY004
-        if not isinstance(self.attachments, (list, tuple)) or len(self.attachments) > 16:
+        if not isinstance(self.attachments, (list, tuple)) or len(self.attachments) > MAX_ATTACHMENTS:
             raise ValueError("Agent 附件数量无效")
         for item in self.attachments:
             if not isinstance(item, Mapping) or set(item) != {"name", "path", "media_type", "kind"}:

@@ -276,6 +276,8 @@ def test_main_window_is_frameless_resizable_and_pet_bubble_uses_screen_geometry(
     )
 
     assert "Qt.FramelessWindowHint" in main_source
+    assert "Qt.WindowMinimizeButtonHint" in main_source
+    assert "Qt.WindowMaximizeButtonHint" in main_source
     assert "startSystemResize" in main_source
     assert "Screen.desktopAvailableWidth" not in pet_source
     assert "availableArea: petWindow.availableArea" in pet_source

@@ -118,9 +118,17 @@ def run_ui(
     def persist_theme(ui_config: object) -> None:
         if not isinstance(ui_config, type(config.ui)):
             raise ConfigError("主题设置类型无效")
-        candidate = replace(settings_viewmodel.config, ui=ui_config)
+        current = settings_viewmodel.config
+        candidate = replace(
+            current,
+            ui=replace(
+                current.ui,
+                theme_id=ui_config.theme_id,
+                reduce_motion=ui_config.reduce_motion,
+            ),
+        )
         store.save(candidate)
-        settings_viewmodel.begin_edit(candidate)
+        settings_viewmodel.apply_external_config(candidate)
 
     theme_viewmodel = ThemeViewModel(config.ui, persist_theme)
     app_shell = AppShellViewModel()

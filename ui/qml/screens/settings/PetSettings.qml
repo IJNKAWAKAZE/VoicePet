@@ -10,6 +10,14 @@ Item {
     required property QtObject settings
     required property QtObject pets
     required property QtObject animationModel
+    Connections {
+        target: root.settings
+        function onDraftRestored() {
+            topmostToggle.checked = root.settings.draft.ui.always_on_top
+            clickThroughToggle.checked = root.settings.draft.ui.pet_click_through
+            petScaleSlider.value = root.settings.draft.ui.pet_scale
+        }
+    }
     onVisibleChanged: {
         if (!pets) return
         // 离页和返回时都清理已结束的提示，后台导入不受影响
@@ -201,15 +209,17 @@ Item {
                 Layout.fillWidth: true
                 spacing: 12
                 AppToggle {
+                    id: topmostToggle
                     theme: root.theme
                     text: "置顶"
-                    checked: root.settings.draft_value("ui", "always_on_top")
+                    checked: root.settings.draft.ui.always_on_top
                     onToggled: root.settings.set_field("ui", "always_on_top", checked)
                 }
                 AppToggle {
+                    id: clickThroughToggle
                     theme: root.theme
                     text: "鼠标穿透"
-                    checked: root.settings.draft_value("ui", "pet_click_through")
+                    checked: root.settings.draft.ui.pet_click_through
                     onToggled: root.settings.set_field("ui", "pet_click_through", checked)
                 }
                 Column {
@@ -222,7 +232,7 @@ Item {
                         theme: root.theme
                         from: 0.5
                         to: 2.0
-                        value: root.settings.draft_value("ui", "pet_scale")
+                        value: root.settings.draft.ui.pet_scale
                         onMoved: root.settings.set_field("ui", "pet_scale", value)
                     }
                 }

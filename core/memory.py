@@ -401,6 +401,25 @@ class MemoryStore:
             rows = self._connection.execute(sql + " ORDER BY created_at, rowid", parameters)
             return tuple(self._change(row) for row in rows)
 
+    def mark_changes_viewed(self, change_ids: Sequence[str]) -> int:
+        """记录变更已展示给用户，避免下次启动重复提示"""
+
+        identifiers = tuple(dict.fromkeys(str(item) for item in change_ids))
+        if not identifiers:
+            return 0
+        if len(identifiers) > 200:
+            raise MemoryConfigurationError("变更数量无效")
+        for change_id in identifiers:
+            self._validate_uuid(change_id, "变更 ID")
+        placeholders = ",".join("?" for _ in identifiers)
+        with self._write_transaction():
+            self._ensure_open()
+            cursor = self._connection.execute(
+                f"UPDATE memory_changes SET viewed=1 WHERE viewed=0 AND id IN ({placeholders})",
+                identifiers,
+            )
+            return int(cursor.rowcount)
+
     def get(self, memory_id: str) -> MemoryRecord | None:
         self._validate_uuid(memory_id, "记忆 ID")
         with self._lock:
@@ -866,7 +885,7 @@ class MemoryStore:
         return MemoryChange(
             row["id"], row["memory_id"], row["session_id"], row["source_turn_id"],
             row["kind"], row["after_version"], datetime.fromisoformat(row["created_at"]),
-            bool(row["undone"]),
+            bool(row["undone"]), bool(row["viewed"]),
         )
 
     @staticmethod

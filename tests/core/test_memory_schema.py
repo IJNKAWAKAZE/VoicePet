@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from core.memory_schema import (
+    MEMORY_SCHEMA_VERSION,
     MemorySchemaError,
     ensure_memory_schema,
     reset_test_memory_data,
@@ -90,6 +91,34 @@ def test_initializer_rejects_missing_required_field(tmp_path):
 
     with pytest.raises(MemorySchemaError, match="缺少"):
         ensure_memory_schema(connection)
+
+
+def test_initializer_upgrades_previous_component_version_in_place(tmp_path):
+    connection = sqlite3.connect(tmp_path / "assistant.db", isolation_level=None)
+    ensure_memory_schema(connection)
+    connection.execute(
+        "INSERT INTO memory_changes "
+        "(id, memory_id, session_id, source_turn_id, kind, before_json, after_version, "
+        "created_at, undone) VALUES ('change-1', 'memory-1', 'session-1', 'turn-1', "
+        "'create', NULL, 1, 'now', 0)"
+    )
+    # 模拟上一版本结构：变更表还没有已查看字段
+    connection.execute("ALTER TABLE memory_changes DROP COLUMN viewed")
+    connection.execute(
+        "UPDATE voicepet_components SET version=? WHERE name='memory_system'",
+        (MEMORY_SCHEMA_VERSION - 1,),
+    )
+
+    ensure_memory_schema(connection)
+
+    assert connection.execute(
+        "SELECT version FROM voicepet_components WHERE name='memory_system'"
+    ).fetchone() == (MEMORY_SCHEMA_VERSION,)
+    assert connection.execute(
+        "SELECT id, undone, viewed FROM memory_changes"
+    ).fetchone() == ("change-1", 0, 1)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(memory_changes)")}
+    assert "viewed" in columns
 
 
 def test_initializer_preserves_shared_user_version(tmp_path):
@@ -330,4 +359,4 @@ def test_concurrent_empty_database_initializers_create_one_valid_schema(tmp_path
     connection = sqlite3.connect(path, isolation_level=None)
     assert connection.execute(
         "SELECT version FROM voicepet_components WHERE name = 'memory_system'"
-     ).fetchone() == (3,)
+     ).fetchone() == (MEMORY_SCHEMA_VERSION,)

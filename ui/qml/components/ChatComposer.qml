@@ -192,7 +192,7 @@ Rectangle {
             Accessible.name: "消息输入"
             Keys.onPressed: event => {
                 if (event.matches(StandardKey.Paste) && root.pasteAttachments
-                        && root.pasteAttachments()) {
+                        && root.pasteAttachments(attachments.count)) {
                     event.accepted = true
                     return
                 }

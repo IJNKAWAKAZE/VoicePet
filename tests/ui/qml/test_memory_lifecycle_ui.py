@@ -47,6 +47,7 @@ class Change:
     after_version: int
     created_at: datetime
     undone: bool = False
+    viewed: bool = False
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,7 @@ class ChatRuntime:
     def __init__(self):
         self.change_futures = {}
         self.undos = []
+        self.viewed = []
 
     def list_memory_changes(self, session_id=None):
         future = Future()
@@ -241,6 +243,10 @@ class ChatRuntime:
     def undo_memory(self, change_id):
         self.undos.append(change_id)
         return completed(True)
+
+    def mark_memory_changes_viewed(self, change_ids):
+        self.viewed.append(tuple(change_ids))
+        return completed(len(tuple(change_ids)))
 
 
 def test_chat_open_memory_acknowledges_prompt_without_deleting_record(qapp):
@@ -256,6 +262,54 @@ def test_chat_open_memory_acknowledges_prompt_without_deleting_record(qapp):
 
     assert chat.memoryChangeCount == 0
     assert chat.memoryChangesModel.rowCount() == 0
+
+
+def test_chat_open_memory_persists_acknowledgement(qapp):
+    runtime = ChatRuntime()
+    chat = ChatViewModel(runtime)
+    chat.set_active_session_for_memory("session-1")
+    runtime.change_futures["session-1"].set_result(
+        (
+            Change("change-1", "m1", "session-1", "t1", "create", 1, datetime.now(UTC)),
+            Change("change-2", "m2", "session-1", "t1", "create", 1, datetime.now(UTC)),
+        )
+    )
+    qapp.processEvents()
+
+    chat.open_memory()
+    qapp.processEvents()
+
+    assert runtime.viewed == [("change-1", "change-2")]
+
+
+@pytest.mark.parametrize("handled", ["viewed", "undone"])
+def test_chat_skips_changes_already_handled_in_previous_run(qapp, handled):
+    # 上一轮已查看或已撤销的变更不应在每次启动时重新提示
+    runtime = ChatRuntime()
+    chat = ChatViewModel(runtime)
+    chat.set_active_session_for_memory("session-1")
+    runtime.change_futures["session-1"].set_result(
+        (
+            Change(
+                "handled",
+                "m1",
+                "session-1",
+                "t1",
+                "create",
+                1,
+                datetime.now(UTC),
+                **{handled: True},
+            ),
+            Change("pending", "m2", "session-1", "t2", "create", 1, datetime.now(UTC)),
+        )
+    )
+    qapp.processEvents()
+
+    assert chat.memoryChangeCount == 1
+    assert (
+        chat.memoryChangesModel.data(chat.memoryChangesModel.index(0), Qt.UserRole + 1)
+        == "pending"
+    )
 
 
 def test_chat_discards_late_other_session_changes_without_touching_stream(qapp):

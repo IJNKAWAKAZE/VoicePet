@@ -401,6 +401,59 @@ def test_ctrl_v_pastes_clipboard_content(history_window, tmp_path, monkeypatch, 
     clipboard.clear()
 
 
+def test_ctrl_v_pastes_folder_as_absolute_path(history_window, tmp_path):
+    root, chat, _, _ = history_window
+    editor = root.findChild(QQuickItem, "composerText")
+    composer = root.findChild(QQuickItem, "chatComposer")
+    errors = QSignalSpy(chat.errorOccurred)
+    folder = tmp_path / "旅行资料"
+    folder.mkdir()
+    document = tmp_path / "说明.txt"
+    document.write_bytes(b"test")
+    mime = QMimeData()
+    mime.setUrls([
+        QUrl.fromLocalFile(str(folder)),
+        QUrl.fromLocalFile(str(document)),
+    ])
+    QGuiApplication.clipboard().setMimeData(mime)
+
+    editor.forceActiveFocus()
+    QTest.keyClick(root, Qt.Key_V, Qt.ControlModifier)
+    QTest.qWait(50)
+
+    # 文件夹没有附件语义，改为把绝对路径插入输入框，文件仍然作为附件
+    assert Path(editor.property("text")) == folder.resolve()
+    payload = composer.attachmentPayload().toVariant()
+    assert [item["name"] for item in payload] == ["说明.txt"]
+    assert errors.count() == 0
+    QGuiApplication.clipboard().clear()
+
+
+def test_ctrl_v_warns_when_attachment_limit_reached(history_window, tmp_path):
+    root, chat, _, _ = history_window
+    editor = root.findChild(QQuickItem, "composerText")
+    composer = root.findChild(QQuickItem, "chatComposer")
+    errors = QSignalSpy(chat.errorOccurred)
+    document = tmp_path / "资料.txt"
+    document.write_bytes(b"test")
+    for _ in range(16):
+        composer.addAttachment(QUrl.fromLocalFile(str(document)), "file")
+    assert len(composer.attachmentPayload().toVariant()) == 16
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(document))])
+    QGuiApplication.clipboard().setMimeData(mime)
+
+    editor.forceActiveFocus()
+    QTest.keyClick(root, Qt.Key_V, Qt.ControlModifier)
+    QTest.qWait(50)
+
+    assert len(composer.attachmentPayload().toVariant()) == 16
+    assert editor.property("text") == ""
+    assert errors.count() == 1
+    assert "16" in errors.at(0)[0]
+    QGuiApplication.clipboard().clear()
+
+
 def test_message_actions_are_clickable_without_moving_next_message(history_window):
     root, chat, _, _ = history_window
     chat.append_user_message("复制这段文字")

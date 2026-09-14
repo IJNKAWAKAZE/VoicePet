@@ -56,8 +56,8 @@ ScrollView {
             objectName: "reasoningEffortSelector"
             Layout.preferredWidth: 360
             theme: root.theme
-            model: ["自动", "最小", "低", "中", "高", "极高"]
-            property var values: ["auto", "minimal", "low", "medium", "high", "xhigh"]
+            model: ["最小", "低", "中", "高", "极高", "最大"]
+            property var values: ["minimal", "low", "medium", "high", "xhigh", "max"]
             currentIndex: Math.max(0, values.indexOf(root.settings.draft.llm.reasoning_effort))
             onActivated: root.settings.set_field("llm", "reasoning_effort", values[currentIndex])
         }

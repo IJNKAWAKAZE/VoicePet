@@ -12,6 +12,7 @@ from core.memory import (
     MemoryStore,
 )
 from core.memory_facts import FactEvidence, FactProposal, MemoryChange
+from core.memory_schema import MEMORY_SCHEMA_VERSION
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
@@ -69,7 +70,10 @@ def test_fact_contracts_are_frozen_and_memory_schema_uses_component_version(tmp_
     connection.close()
 
     memory_store = MemoryStore(database, clock=lambda: NOW)
-    assert memory_store.diagnostics() == {"schema_version": 3, "fts5": True}
+    assert memory_store.diagnostics() == {
+        "schema_version": MEMORY_SCHEMA_VERSION,
+        "fts5": True,
+    }
     memory_store.close()
 
     connection = sqlite3.connect(database)
@@ -266,6 +270,28 @@ def test_undo_add_is_idempotent_and_suppresses_only_old_evidence(store):
     assert store.get(change.memory_id).content == ""
     assert store.save_fact(proposal(), source) is None
     assert store.save_fact(proposal(), evidence("我喜欢猫")) is not None
+
+
+def test_viewed_changes_are_recorded_once_and_survive_reopen(tmp_path):
+    path = tmp_path / "memory.db"
+    store = MemoryStore(path, clock=lambda: NOW)
+    change = store.save_fact(proposal(), evidence("我喜欢猫"))
+    assert store.list_changes()[0].viewed is False
+
+    assert store.mark_changes_viewed((change.id,)) == 1
+    assert store.mark_changes_viewed((change.id,)) == 0
+    assert store.list_changes()[0].viewed is True
+    store.close()
+
+    reopened = MemoryStore(path, clock=lambda: NOW)
+    assert reopened.list_changes()[0].viewed is True
+    reopened.close()
+
+
+def test_mark_changes_viewed_rejects_invalid_identifiers(store):
+    with pytest.raises(MemoryConfigurationError, match="变更 ID"):
+        store.mark_changes_viewed(("not-a-uuid",))
+    assert store.mark_changes_viewed(()) == 0
 
 
 def name_proposal(name, *, update=False):

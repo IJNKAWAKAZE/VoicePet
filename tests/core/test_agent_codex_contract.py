@@ -1,9 +1,11 @@
 """核对固定 SDK 的参数和原生工具审批回调"""
 
+import asyncio
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +23,7 @@ from core.agent_codex import (
     voicepet_mcp_overrides,
     write_approval_mode,
 )
-from core.agent_types import AgentApprovalMode
+from core.agent_types import AgentApprovalMode, AgentEventType, AgentTurnRequest
 
 
 def test_pinned_sdk_and_runtime():
@@ -78,6 +80,60 @@ def test_write_approval_mode_publishes_current_mode(tmp_path, mode):
 def test_write_approval_mode_ignores_invalid_input_and_unwritable_path(tmp_path):
     assert write_approval_mode(tmp_path / "mode.json", "full_auto") is False
     assert write_approval_mode(tmp_path / "missing" / "mode.json", AgentApprovalMode.FULL_AUTO) is False
+
+
+class FakeTurnClient:
+    """只回应一轮 turn，用于观察适配器真正发出的参数"""
+
+    def __init__(self):
+        self.turn_params = None
+
+    async def thread_start(self, params):
+        return SimpleNamespace(thread=SimpleNamespace(id="thread"))
+
+    async def turn_start(self, thread_id, inputs, params):
+        self.turn_params = params
+        return SimpleNamespace(turn=SimpleNamespace(id="turn"))
+
+    async def next_turn_notification(self, turn_id):
+        return SimpleNamespace(
+            method="turn/completed",
+            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
+        )
+
+
+async def collect_turn(adapter, request):
+    return [event async for event in adapter.run_turn(request)]
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max"])
+def test_adapter_sends_the_configured_reasoning_effort(tmp_path, effort):
+    client = FakeTurnClient()
+    adapter = object.__new__(CodexAgentAdapter)
+    adapter._data_directory = tmp_path
+    adapter._system_prompt = ""
+    adapter._model = "gpt-test"
+    adapter._reasoning_effort = effort
+    adapter._client = client
+    adapter._turns = {}
+    adapter._cancelled = set()
+    adapter._active_mode = AgentApprovalMode.SUGGEST
+    adapter._active_request = None
+    adapter._interaction_callback = None
+    adapter._interaction_waiters = {}
+    request = AgentTurnRequest(
+        session_id="session",
+        thread_id=None,
+        turn_id="turn",
+        input="你好",
+        approval_mode=AgentApprovalMode.SUGGEST,
+    )
+
+    events = asyncio.run(collect_turn(adapter, request))
+
+    assert events[-1].type is AgentEventType.TURN_COMPLETED
+    assert client.turn_params["summary"] == "concise"
+    assert client.turn_params["effort"] == effort
 
 
 def test_fake_server_waits_for_native_file_approval(tmp_path):

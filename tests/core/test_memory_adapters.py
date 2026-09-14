@@ -6,6 +6,7 @@ import pytest
 
 import core.session_archive as session_archive_module
 from core.memory import MemoryStore
+from core.memory_schema import MEMORY_SCHEMA_VERSION
 from core.session_archive import SessionArchiveError, SessionArchiveStore
 
 
@@ -28,7 +29,7 @@ def test_memory_and_archive_stores_share_schema_in_either_open_order(tmp_path, f
         for row in connection.execute("PRAGMA table_info(short_term_summaries)")
     }
 
-    assert component == (3,)
+    assert component == (MEMORY_SCHEMA_VERSION,)
     assert {"session_id", "source_turn_ids_json", "decisions_json"} <= columns
     connection.close()
     second_store.close()

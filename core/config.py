@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 SUPPORTED_REASONING_EFFORTS = frozenset(
-    {"auto", "minimal", "low", "medium", "high", "xhigh"}
+    {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 CURRENT_CONFIG_VERSION = 3
 SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
@@ -262,6 +262,13 @@ class AppConfig:
             privacy.pop("short_term_retention_days", None)
             privacy.setdefault("chat_history_enabled", privacy.get("memory_enabled", True))
             data = {**data, "privacy": privacy}
+        # 自动思考强度已下线，旧配置改写成显式默认档，避免整份配置被判无效
+        raw_llm = data.get("llm")
+        if isinstance(raw_llm, dict) and raw_llm.get("reasoning_effort") == "auto":
+            data = {
+                **data,
+                "llm": {**raw_llm, "reasoning_effort": LlmConfig().reasoning_effort},
+            }
         if unknown := set(data) - cls._FIELDS:
             raise ConfigError(f"配置包含未知字段: {len(unknown)}")
         defaults = cls()

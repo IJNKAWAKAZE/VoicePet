@@ -99,7 +99,7 @@ Item {
     AppCard {
         id: memoryChanges
         objectName: "chatMemoryChanges"
-        visible: root.chat.memoryChangeCount > 0
+        visible: root.chat.memoryChangeCount > 0 || root.chat.memoryActionResult.length > 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: composer.top
@@ -197,7 +197,7 @@ Item {
         onStopRequested: root.chat.stop_generation()
         onVoiceInputRequested: root.chat.start_voice_input()
         recording: root.chat.voiceRecording
-        pasteAttachments: () => root.chat.paste_attachments()
+        pasteAttachments: count => root.chat.paste_attachments(count)
         onModeRequested: mode => root.chat.set_agent_mode(mode)
     }
 
@@ -214,5 +214,6 @@ Item {
             composer.clearAttachments()
         }
         function onAttachmentPasted(url, kind) { composer.addAttachment(url, kind) }
+        function onFolderPathPasted(path) { composer.appendDraftText(path) }
     }
 }

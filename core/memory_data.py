@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,6 +63,9 @@ class MemoryDataManager:
         session_id: str | None = None,
     ) -> tuple[MemoryChange, ...]:
         return self._store.list_changes(session_id)
+
+    def mark_changes_viewed(self, change_ids: Sequence[str]) -> int:
+        return self._store.mark_changes_viewed(change_ids)
 
     def _with_source(self, record: MemoryRecord) -> MemoryRecord:
         if self._archive is None:

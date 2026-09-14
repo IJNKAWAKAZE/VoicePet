@@ -9,11 +9,12 @@ from core.config import (
     ConfigError,
     ConfigLoadStatus,
     ConfigStore,
+    LlmConfig,
     default_config_path,
 )
 
 
-@pytest.mark.parametrize("value", ["auto", "minimal", "low", "medium", "high", "xhigh"])
+@pytest.mark.parametrize("value", ["minimal", "low", "medium", "high", "xhigh", "max"])
 def test_llm_reasoning_effort_accepts_all_ui_values(value):
     data = AppConfig().to_dict()
     data["llm"]["reasoning_effort"] = value
@@ -25,6 +26,26 @@ def test_llm_reasoning_effort_rejects_unknown_value():
     data["llm"]["reasoning_effort"] = "turbo"
     with pytest.raises(ConfigError, match="思考强度"):
         AppConfig.from_dict(data)
+
+
+def test_retired_auto_reasoning_effort_falls_back_to_default():
+    # 旧配置里的自动档必须迁移到显式档位，否则整份配置会被判为无效
+    data = AppConfig().to_dict()
+    data["llm"]["reasoning_effort"] = "auto"
+
+    config = AppConfig.from_dict(data)
+
+    assert config.llm.reasoning_effort == LlmConfig().reasoning_effort
+
+
+def test_retired_auto_reasoning_effort_keeps_other_llm_settings():
+    data = AppConfig().to_dict()
+    data["llm"]["reasoning_effort"] = "auto"
+    data["llm"]["model"] = "custom-model"
+
+    config = AppConfig.from_dict(data)
+
+    assert config.llm.model == "custom-model"
 
 
 def legacy_config_dict():

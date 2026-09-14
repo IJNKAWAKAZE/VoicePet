@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import Future
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -21,7 +22,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtQml import QJSValue
 
-from core.attachments import inspect_attachment
+from core.agent_types import MAX_ATTACHMENTS
+from core.attachments import Attachment, inspect_attachment
 from core.config import default_config_path
 from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
@@ -49,6 +51,8 @@ class ChatRuntimeProtocol(Protocol):
     ) -> Future[tuple[Any, ...]]: ...
 
     def undo_memory(self, change_id: str) -> Future[bool]: ...
+
+    def mark_memory_changes_viewed(self, change_ids: tuple[str, ...]) -> Future[int]: ...
 
     def session_agent_mode(self, session_id: str) -> Future[str]: ...
 
@@ -148,6 +152,7 @@ class ChatViewModel(QObject):
     scrollToLatestRequested = Signal()
     agentModeChanged = Signal()
     attachmentPasted = Signal(str, str)
+    folderPathPasted = Signal(str)
     _futureFinished = Signal(str, object, object)
 
     def __init__(
@@ -215,16 +220,29 @@ class ChatViewModel(QObject):
     @Slot()
     def open_memory(self) -> None:
         # 查看仅收起已展示的提示，实际记忆和撤销记录仍保留在记忆页面
+        change_ids: list[str] = []
         for row in range(self._memory_changes_model.rowCount()):
             change_id = self._memory_changes_model.data(
                 self._memory_changes_model.index(row), Qt.UserRole + 1
             )
             self._viewed_memory_changes.add((self._active_session_id, str(change_id)))
+            change_ids.append(str(change_id))
         self._memory_changes_model.reset_items([])
         self._memory_action_result = ""
         self.memoryChangesChanged.emit()
         self.memoryActionResultChanged.emit()
+        self._persist_viewed_changes(tuple(change_ids))
         self.viewMemoryRequested.emit()
+
+    def _persist_viewed_changes(self, change_ids: tuple[str, ...]) -> None:
+        """把已查看状态写回存储，重启后不再重复提示同一批变更"""
+
+        if not change_ids:
+            return
+        try:
+            self._watch("memory-viewed", self._runtime.mark_memory_changes_viewed(change_ids))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return
 
     @Property(bool, notify=voiceRecordingChanged)
     def voiceRecording(self) -> bool:
@@ -332,8 +350,8 @@ class ChatViewModel(QObject):
         if self._dialogs is not None:
             self._dialogs.toast("已复制", "success")
 
-    @Slot(result=bool)
-    def paste_attachments(self) -> bool:
+    @Slot(int, result=bool)
+    def paste_attachments(self, existing: int = 0) -> bool:
         """接收剪贴板中的本地文件或截图，普通文字交回编辑器处理"""
 
         clipboard = QGuiApplication.clipboard()
@@ -343,9 +361,7 @@ class ChatViewModel(QObject):
         urls = [url for url in mime.urls() if url.isLocalFile()]
         try:
             if urls:
-                items = [inspect_attachment(url.toLocalFile()) for url in urls]
-                for item in items:
-                    self.attachmentPasted.emit(QUrl.fromLocalFile(item.path).toString(), item.kind)
+                self._paste_local_paths(urls, existing)
                 return True
             if not mime.hasImage():
                 return False
@@ -362,6 +378,31 @@ class ChatViewModel(QObject):
         except (OSError, ValueError, RuntimeError):
             self.errorOccurred.emit("无法粘贴附件，请确认文件可读取或重新复制图片")
         return True
+
+    def _paste_local_paths(self, urls: list[QUrl], existing: int) -> None:
+        """文件按剩余额度加入附件，文件夹改以绝对路径插入输入框"""
+
+        remaining = max(MAX_ATTACHMENTS - max(existing, 0), 0)
+        items: list[Attachment] = []
+        folders: list[str] = []
+        skipped = 0
+        for url in urls:
+            local = Path(url.toLocalFile())
+            if local.is_dir():
+                folders.append(str(local.resolve()))
+                continue
+            if len(items) >= remaining:
+                skipped += 1
+                continue
+            items.append(inspect_attachment(local))
+        for item in items:
+            self.attachmentPasted.emit(QUrl.fromLocalFile(item.path).toString(), item.kind)
+        for folder in folders:
+            self.folderPathPasted.emit(folder)
+        if skipped:
+            self.errorOccurred.emit(
+                f"最多只能添加 {MAX_ATTACHMENTS} 个附件，已忽略 {skipped} 个文件"
+            )
 
     @Slot(str)
     def open_attachment(self, path: str) -> None:
@@ -460,6 +501,9 @@ class ChatViewModel(QObject):
             self.errorOccurred.emit("附件不可读取，请重新选择文件")
             return
         normalized_attachments = tuple(normalized_attachments)
+        if len(normalized_attachments) > MAX_ATTACHMENTS:
+            self.errorOccurred.emit(f"最多只能添加 {MAX_ATTACHMENTS} 个附件")
+            return
         if not normalized and normalized_attachments:
             self.errorOccurred.emit("请先输入文字后再发送附件")
             return
@@ -856,7 +900,9 @@ class ChatViewModel(QObject):
                         "undone": bool(_read(change, "undone", False)),
                     }
                     for change in tuple(result or ())
-                    if (session_id, str(_read(change, "id", "")))
+                    if not bool(_read(change, "undone", False))
+                    and not bool(_read(change, "viewed", False))
+                    and (session_id, str(_read(change, "id", "")))
                     not in self._viewed_memory_changes
                 ]
             )
