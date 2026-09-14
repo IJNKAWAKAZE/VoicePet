@@ -7,6 +7,7 @@ import platform
 import sys
 from pathlib import Path
 
+from . import computer_use
 from .agent_gateway import AgentGateway
 from .agent_process import AgentWorkerProcessManager
 from .agent_store import AgentStore
@@ -18,7 +19,7 @@ from .audio_types import AudioFormat
 from .codex_session_files import CodexSessionFiles
 from .config import AppConfig, ConfigStore
 from .coordinator import Coordinator
-from .diagnostic_probes import probe_asr, probe_llm, probe_pet, probe_tts
+from .diagnostic_probes import probe_asr, probe_desktop, probe_llm, probe_pet, probe_tts
 from .diagnostics import (
     DiagnosticCheck,
     DiagnosticExporter,
@@ -294,6 +295,9 @@ def build_default_runtime(
     async def pet_check():
         return await probe_pet(pet_installer, active_pet_directory)
 
+    async def desktop_check():
+        return await probe_desktop(computer_use)
+
     diagnostics = DiagnosticService(
         DiagnosticRunner(
             (
@@ -303,6 +307,7 @@ def build_default_runtime(
                 DiagnosticCheck("tts", tts_check, timeout=15.0),
                 DiagnosticCheck("database", database_check),
                 DiagnosticCheck("pet", pet_check, timeout=10.0),
+                DiagnosticCheck("desktop", desktop_check, timeout=15.0),
             )
         ),
         DiagnosticExporter(),

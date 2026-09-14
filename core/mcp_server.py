@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import glob
 import json
 import os
@@ -35,7 +36,7 @@ TOOLS = [
     {"name":"get_battery_status","description":"查询电池状态","inputSchema":{"type":"object","properties":{}}},
     {"name":"lock_screen","description":"锁定 Windows 会话","inputSchema":{"type":"object","properties":{}}},
     {"name":"sleep_computer","description":"让电脑睡眠","inputSchema":{"type":"object","properties":{}}},
-    {"name":"shutdown_computer","description":"关机、重启或取消关机","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["shutdown","restart","cancel"]},"delay_seconds":{"type":"integer"}},"required":["action"]}},
+    {"name":"shutdown_computer","description":"关机、重启或取消关机","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["shutdown","restart","cancel"]},"delay_seconds":{"type":"integer","minimum":0,"maximum":315360000}},"required":["action"]}},
     {"name":"clipboard_read","description":"读取剪贴板文本","inputSchema":{"type":"object","properties":{}}},
     {"name":"clipboard_write","description":"写入剪贴板文本","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
     {"name":"media_control","description":"发送媒体播放控制","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["play_pause","next","previous","stop"]}},"required":["action"]}},
@@ -69,6 +70,15 @@ def integer_argument(args, key, default, minimum, maximum):
     try: number = int(value)
     except (TypeError, ValueError): raise computer_use.ComputerUseError(f"参数 {key} 必须是整数")
     return max(minimum, min(maximum, number))
+
+def shutdown_delay_seconds(value):
+    """关机延时校验：超出系统允许范围时明确报错，而不是静默改成别的时长"""
+    if value is None or isinstance(value, bool): value = 30
+    try: seconds = int(value)
+    except (TypeError, ValueError): raise computer_use.ComputerUseError("参数 delay_seconds 必须是整数秒") from None
+    if not 0 <= seconds <= computer_use.MAX_SHUTDOWN_DELAY_SECONDS:
+        raise computer_use.ComputerUseError(f"参数 delay_seconds 必须在 0 到 {computer_use.MAX_SHUTDOWN_DELAY_SECONDS} 秒之间")
+    return seconds
 
 def approval_mode():
     """读取 Agent 写入的共享模式文件；缺失或损坏时按最保守的建议模式处理"""
@@ -144,24 +154,20 @@ def call(name, args):
                 return result({"available":battery is not None, "percent":battery.percent if battery else None, "plugged":battery.power_plugged if battery else None})
             except Exception: return result({"available":False})  # noqa: BLE001 电池信息缺失时按不可用处理
         if name == "lock_screen":
-            import ctypes
-            ctypes.windll.user32.LockWorkStation(); return result({"locked":True})
+            return result(computer_use.lock_workstation())
         if name == "sleep_computer":
-            if os.name == "nt":
-                ctypes.windll.kernel32.SetSystemPowerState(False, True)
-            return result({"requested":True})
+            return result(computer_use.suspend_system())
         if name == "shutdown_computer":
-            action=args["action"]
-            if action=="cancel": subprocess.run(["shutdown","/a"],check=False)
-            else: subprocess.Popen(["shutdown","/r" if action=="restart" else "/s","/t",str(args.get("delay_seconds",30))])
-            return result({"requested":action})
+            action=str(args.get("action",""))
+            if action == "cancel": return result(computer_use.cancel_shutdown())
+            if action not in computer_use.SHUTDOWN_FLAGS: return result("action 只支持 shutdown、restart 或 cancel",True)
+            return result(computer_use.schedule_shutdown(action, shutdown_delay_seconds(args.get("delay_seconds"))))
         if name in {"clipboard_read","clipboard_write"}:
             if name == "clipboard_read":
                 text=computer_use.read_clipboard_text()
                 return result(text if text is not None else "剪贴板没有文本内容",text is None)
             computer_use.write_clipboard_text(str(args["text"])); return result({"written":True})
         if name == "media_control":
-            import ctypes
             keys={"play_pause":0xB3,"next":0xB0,"previous":0xB1,"stop":0xB2}; ctypes.windll.user32.keybd_event(keys[args["action"]],0,0,0); ctypes.windll.user32.keybd_event(keys[args["action"]],0,2,0); return result({"sent":args["action"]})
         if name == "set_volume":
             try:
@@ -193,20 +199,35 @@ def call(name, args):
         return result("未知工具",True)
     except Exception as exc: return result(f"执行失败：{exc}",True)  # noqa: BLE001 单个工具失败只回传结果，不中断 MCP 服务
 
+def error_response(request_id, code, message):
+    return {"jsonrpc":"2.0","id":request_id,"error":{"code":code,"message":message}}
+
+def respond(line):
+    """把一行请求翻译成响应；单行损坏只回错误，不中断服务"""
+    try: request=json.loads(line)
+    except ValueError: return error_response(None,-32700,"请求不是合法的 JSON")
+    if not isinstance(request,dict): return error_response(None,-32600,"请求必须是 JSON 对象")
+    method=request.get("method"); raw_params=request.get("params")
+    params=raw_params if isinstance(raw_params,dict) else {}
+    if method == "notifications/initialized": return None
+    if method == "initialize": response={"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"voicepet","version":"0.1.0"}}
+    elif method == "tools/list": response={"tools":TOOLS}
+    elif method == "tools/call":
+        raw_arguments=params.get("arguments")
+        response=call(str(params.get("name","")),raw_arguments if isinstance(raw_arguments,dict) else {})
+    else:
+        if "id" not in request: return None
+        return error_response(request["id"],-32601,"方法不支持")
+    return {"jsonrpc":"2.0","id":request["id"],"result":response} if "id" in request else None
+
 def serve():
     # windowed 冻结程序的 sys.stdin/stdout 为 None，使用父进程匿名管道。
     import io
-    input_stream = io.TextIOWrapper(os.fdopen(os.dup(0), "rb"), encoding="utf-8")
+    input_stream = io.TextIOWrapper(os.fdopen(os.dup(0), "rb"), encoding="utf-8", errors="replace")
     output_stream = io.TextIOWrapper(os.fdopen(os.dup(1), "wb"), encoding="utf-8", write_through=True)
     for line in input_stream:
-        request=json.loads(line); method=request.get("method"); params=request.get("params",{})
-        if method == "notifications/initialized": continue
-        if method == "initialize": response={"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"voicepet","version":"0.1.0"}}
-        elif method == "tools/list": response={"tools":TOOLS}
-        elif method == "tools/call": response=call(params.get("name",""),params.get("arguments",{}))
-        else:
-            if "id" in request: print(json.dumps({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"方法不支持"}},ensure_ascii=False),file=output_stream,flush=True)
-            continue
-        if "id" in request: print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":response},ensure_ascii=False),file=output_stream,flush=True)
+        if not line.strip(): continue
+        response = respond(line)
+        if response is not None: print(json.dumps(response,ensure_ascii=False),file=output_stream,flush=True)
 
 if __name__ == "__main__": serve()

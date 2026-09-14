@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import os
 import struct
+import subprocess
 import time
 import zlib
 from dataclasses import dataclass
@@ -160,6 +161,10 @@ def _user32() -> Any:
         library.SetForegroundWindow.restype = ctypes.c_bool
         library.ShowWindow.argtypes = (ctypes.c_void_p, ctypes.c_int)
         library.ShowWindow.restype = ctypes.c_bool
+        library.LockWorkStation.argtypes = ()
+        library.LockWorkStation.restype = ctypes.c_bool
+        library.PrintWindow.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint)
+        library.PrintWindow.restype = ctypes.c_bool
         library.AttachThreadInput.argtypes = (ctypes.c_ulong, ctypes.c_ulong, ctypes.c_bool)
         library.AttachThreadInput.restype = ctypes.c_bool
         library.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
@@ -195,6 +200,8 @@ def _kernel32() -> Any:
         library.GlobalUnlock.restype = ctypes.c_bool
         library.GlobalFree.argtypes = (ctypes.c_void_p,)
         library.GlobalFree.restype = ctypes.c_void_p
+        library.SetSystemPowerState.argtypes = (ctypes.c_bool, ctypes.c_bool)
+        library.SetSystemPowerState.restype = ctypes.c_bool
         library._voicepet_ready = True
     return library
 
@@ -214,11 +221,21 @@ def _gdi32() -> Any:
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_ulong,
         )
+        library.BitBlt.restype = ctypes.c_bool
         library.GetDIBits.argtypes = (
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
             ctypes.c_void_p, ctypes.POINTER(_BITMAPINFO), ctypes.c_uint,
         )
         library.GetDIBits.restype = ctypes.c_int
+        library._voicepet_ready = True
+    return library
+
+
+def _dwmapi() -> Any:
+    library = _library("dwmapi")
+    if not getattr(library, "_voicepet_ready", False):
+        library.DwmGetWindowAttribute.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint)
+        library.DwmGetWindowAttribute.restype = ctypes.c_long
         library._voicepet_ready = True
     return library
 
@@ -292,7 +309,7 @@ class WindowInfo:
 def _is_cloaked(handle: int) -> bool:
     try:
         value = ctypes.c_int(0)
-        result = _library("dwmapi").DwmGetWindowAttribute(
+        result = _dwmapi().DwmGetWindowAttribute(
             ctypes.c_void_p(handle), ctypes.c_uint(DWMWA_CLOAKED), ctypes.byref(value), ctypes.sizeof(value)
         )
     except (AttributeError, OSError, ComputerUseError):
@@ -330,24 +347,28 @@ def list_windows(*, include_minimized: bool = False, limit: int = 60) -> list[Wi
     found: list[WindowInfo] = []
 
     def visit(handle: int, _param: int) -> bool:
-        length = user32.GetWindowTextLengthW(handle)
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(handle, buffer, length + 1)
-        left, top, width, height = window_rect(handle)
-        minimized = bool(user32.IsIconic(handle))
-        if not window_usable(
-            title=buffer.value,
-            visible=bool(user32.IsWindowVisible(handle)),
-            cloaked=_is_cloaked(handle),
-            width=width,
-            height=height,
-            minimized=minimized,
-            include_minimized=include_minimized,
-        ):
+        try:
+            length = user32.GetWindowTextLengthW(handle)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(handle, buffer, length + 1)
+            left, top, width, height = window_rect(handle)
+            minimized = bool(user32.IsIconic(handle))
+            usable = window_usable(
+                title=buffer.value,
+                visible=bool(user32.IsWindowVisible(handle)),
+                cloaked=_is_cloaked(handle),
+                width=width,
+                height=height,
+                minimized=minimized,
+                include_minimized=include_minimized,
+            )
+            if usable:
+                found.append(
+                    WindowInfo(int(handle), buffer.value.strip(), _process_name(handle), left, top, width, height, minimized, int(handle) == foreground)
+                )
+        except (ComputerUseError, OSError, ValueError):
+            # 单个窗口读不到信息时跳过，不能让枚举整体中断
             return True
-        found.append(
-            WindowInfo(int(handle), buffer.value.strip(), _process_name(handle), left, top, width, height, minimized, int(handle) == foreground)
-        )
         return len(found) < limit
 
     callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(visit)
@@ -384,8 +405,27 @@ def resolve_window(reference: object = None) -> int:
     return matches[0].handle
 
 
+def _send_foreground(user32: Any, handle: int) -> None:
+    """直接请求系统把窗口切到前台"""
+    user32.SetForegroundWindow(ctypes.c_void_p(handle))
+
+
+def _send_foreground_with_attach(user32: Any, handle: int) -> None:
+    """系统只允许前台线程或与其共享输入队列的线程调用 SetForegroundWindow"""
+    caller = _current_thread_id()
+    foreground_thread = _window_thread(foreground_window())
+    attached = False
+    if foreground_thread and foreground_thread != caller:
+        attached = bool(user32.AttachThreadInput(caller, foreground_thread, True))
+    try:
+        user32.SetForegroundWindow(ctypes.c_void_p(handle))
+    finally:
+        if attached:
+            user32.AttachThreadInput(caller, foreground_thread, False)
+
+
 def focus_window(handle: int) -> None:
-    """把窗口带到前台；最小化的窗口先恢复"""
+    """把窗口带到前台；最小化的窗口先恢复，切换被系统拒绝时抛出 ComputerUseError"""
     user32 = _user32()
     if handle == 0:
         return
@@ -396,16 +436,11 @@ def focus_window(handle: int) -> None:
         time.sleep(0.2)
     if foreground_window() == handle:
         return
-    current = _window_thread(foreground_window())
-    target = _window_thread(handle)
-    attached = False
-    if current and target and current != _current_thread_id():
-        attached = bool(user32.AttachThreadInput(current, target, True))
-    try:
-        user32.SetForegroundWindow(ctypes.c_void_p(handle))
-    finally:
-        if attached:
-            user32.AttachThreadInput(current, target, False)
+    _send_foreground(user32, handle)
+    if foreground_window() != handle:
+        _send_foreground_with_attach(user32, handle)
+    if foreground_window() != handle:
+        raise ComputerUseError("系统拒绝了窗口切换，请先手动点一下目标窗口再试")
 
 
 def _window_thread(handle: int) -> int:
@@ -520,10 +555,14 @@ def _grab(handle: int) -> tuple[int, int, bytes]:
     previous = gdi32.SelectObject(ctypes.c_void_p(memory), ctypes.c_void_p(bitmap))
     try:
         if handle == 0:
-            gdi32.BitBlt(ctypes.c_void_p(memory), 0, 0, width, height, ctypes.c_void_p(source), left, top, SRCCOPY)
-        elif not user32.PrintWindow(ctypes.c_void_p(handle), ctypes.c_void_p(memory), PW_RENDERFULLCONTENT):
+            captured = gdi32.BitBlt(ctypes.c_void_p(memory), 0, 0, width, height, ctypes.c_void_p(source), left, top, SRCCOPY)
+        elif user32.PrintWindow(ctypes.c_void_p(handle), ctypes.c_void_p(memory), PW_RENDERFULLCONTENT):
+            captured = True
+        else:
             # 部分应用不支持 PrintWindow，退回屏幕拷贝（此时被遮挡区域会失真）
-            gdi32.BitBlt(ctypes.c_void_p(memory), 0, 0, width, height, ctypes.c_void_p(source), 0, 0, SRCCOPY)
+            captured = gdi32.BitBlt(ctypes.c_void_p(memory), 0, 0, width, height, ctypes.c_void_p(source), 0, 0, SRCCOPY)
+        if not captured:
+            raise ComputerUseError("整屏截图失败，请确认桌面会话处于活动状态" if handle == 0 else "窗口截图失败，请先激活目标窗口")
         return width, height, _bitmap_bytes(memory, bitmap, width, height)
     finally:
         gdi32.SelectObject(ctypes.c_void_p(memory), ctypes.c_void_p(previous))
@@ -719,13 +758,39 @@ _VIRTUAL_KEYS: dict[str, int] = {
     "prevtrack": 0xB1,
     "stop": 0xB2,
     "playpause": 0xB3,
+    ";": 0xBA,
+    "semicolon": 0xBA,
+    "=": 0xBB,
+    "equals": 0xBB,
+    ",": 0xBC,
+    "comma": 0xBC,
+    "-": 0xBD,
+    "minus": 0xBD,
+    "hyphen": 0xBD,
+    ".": 0xBE,
+    "period": 0xBE,
+    "dot": 0xBE,
+    "/": 0xBF,
+    "slash": 0xBF,
+    "`": 0xC0,
+    "backtick": 0xC0,
+    "grave": 0xC0,
+    "[": 0xDB,
+    "bracketleft": 0xDB,
+    "\\": 0xDC,
+    "backslash": 0xDC,
+    "]": 0xDD,
+    "bracketright": 0xDD,
+    "'": 0xDE,
+    "quote": 0xDE,
+    "apostrophe": 0xDE,
 }
 _VIRTUAL_KEYS.update({f"f{index}": 0x6F + index for index in range(1, 25)})
 _VIRTUAL_KEYS.update({f"numpad{index}": 0x60 + index for index in range(10)})
 
 
 def virtual_key(name: str) -> int:
-    """把按键名换成虚拟键码，支持字母、数字、功能键和常用控制键"""
+    """把按键名换成虚拟键码，支持字母、数字、功能键、常用控制键和标点键"""
     key = name.strip().casefold()
     if key in _VIRTUAL_KEYS:
         return _VIRTUAL_KEYS[key]
@@ -879,3 +944,61 @@ def type_text(text: str, *, method: str = "auto") -> dict[str, Any]:
         if method == "clipboard":
             raise
         return _type_keystrokes(text)
+
+
+MAX_SHUTDOWN_DELAY_SECONDS = 315360000
+NO_PENDING_SHUTDOWN_CODE = 1116
+SHUTDOWN_FLAGS = {"shutdown": "/s", "restart": "/r"}
+
+
+def lock_workstation() -> dict[str, Any]:
+    """锁定当前 Windows 会话，系统拒绝时抛出 ComputerUseError"""
+    if not _user32().LockWorkStation():
+        raise ComputerUseError("系统拒绝了锁屏请求")
+    return {"locked": True}
+
+
+def suspend_system() -> dict[str, Any]:
+    """让系统进入睡眠，系统拒绝时抛出 ComputerUseError"""
+    if not _kernel32().SetSystemPowerState(False, True):
+        raise ComputerUseError("系统拒绝了睡眠请求，请确认电源策略允许待机")
+    return {"sleeping": True}
+
+
+def _shutdown_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    """执行系统关机命令并取回输出，windowed 冻结程序也不会闪出控制台窗口"""
+    return subprocess.run(
+        ["shutdown", *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def _command_failure(completed: subprocess.CompletedProcess[str]) -> str:
+    text = (completed.stderr or "").strip() or (completed.stdout or "").strip()
+    detail = text.splitlines()[0].strip()[:200] if text else ""
+    return detail or f"退出码 {completed.returncode}"
+
+
+def schedule_shutdown(action: str, delay_seconds: int) -> dict[str, Any]:
+    """请求关机或重启，命令没被系统接受时抛出 ComputerUseError"""
+    flag = SHUTDOWN_FLAGS.get(action)
+    if flag is None:
+        raise ComputerUseError(f"不支持的关机动作：{action}")
+    completed = _shutdown_command([flag, "/t", str(delay_seconds)])
+    if completed.returncode != 0:
+        raise ComputerUseError(f"关机请求未被系统接受：{_command_failure(completed)}")
+    return {"action": action, "delay_seconds": delay_seconds}
+
+
+def cancel_shutdown() -> dict[str, Any]:
+    """取消挂起的关机，没有挂起任务时如实回报而不是谎报成功"""
+    completed = _shutdown_command(["/a"])
+    if completed.returncode == NO_PENDING_SHUTDOWN_CODE:
+        return {"cancelled": False, "reason": "当前没有等待执行的关机或重启任务"}
+    if completed.returncode != 0:
+        raise ComputerUseError(f"取消关机失败：{_command_failure(completed)}")
+    return {"cancelled": True}

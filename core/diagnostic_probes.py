@@ -89,3 +89,37 @@ async def probe_pet(
 
     pet_id = await asyncio.to_thread(target.validate_directory, directory)
     return DiagnosticStatus.HEALTHY, "桌宠资源有效", {"pet_id": pet_id}
+
+
+class DesktopCapture(Protocol):
+    """主动诊断所需的桌面截图边界"""
+
+    png: bytes
+    width: int
+    height: int
+
+
+class DesktopDiagnosticTarget(Protocol):
+    """主动诊断所需的桌面自动化最小边界"""
+
+    def list_windows(self, *, include_minimized: bool = False, limit: int = 60) -> list[object]: ...
+
+    def capture_window(self, handle: int, *, max_width: int = 0) -> DesktopCapture: ...
+
+
+async def probe_desktop(target: DesktopDiagnosticTarget) -> CheckOutput:
+    """枚举窗口并截取整屏，验证桌面自动化原语可用且不注入任何输入"""
+
+    windows = await asyncio.to_thread(target.list_windows, limit=5)
+    capture = await asyncio.to_thread(target.capture_window, 0, max_width=640)
+    context = {
+        "windows": len(windows),
+        "capture_width": capture.width,
+        "capture_height": capture.height,
+        "png_bytes": len(capture.png),
+    }
+    if capture.width <= 0 or capture.height <= 0 or not capture.png:
+        return DiagnosticStatus.UNAVAILABLE, "桌面截图返回空图像", context
+    if not windows:
+        return DiagnosticStatus.DEGRADED, "桌面自动化可用但没有找到可见窗口", context
+    return DiagnosticStatus.HEALTHY, "桌面自动化可用", context

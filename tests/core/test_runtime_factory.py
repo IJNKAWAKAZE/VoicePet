@@ -82,6 +82,7 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
             "tts",
             "database",
             "pet",
+            "desktop",
         ]
         assert {check.component: check.timeout for check in checks} == {
             "audio": 5.0,
@@ -90,6 +91,7 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
             "tts": 15.0,
             "database": 5.0,
             "pet": 10.0,
+            "desktop": 15.0,
         }
         assert (tmp_path / "VoicePet" / "cache").is_dir()
         assert "1～3 句" in services.coordinator._llm_instructions
@@ -365,10 +367,15 @@ def test_default_runtime_factory_registers_active_component_probes(
         seen.append(("pet", target, Path(directory)))
         return {"ok": True}
 
+    async def fake_desktop(target):
+        seen.append(("desktop", target))
+        return {"ok": True}
+
     monkeypatch.setattr(runtime_factory_module, "probe_asr", fake_asr)
     monkeypatch.setattr(runtime_factory_module, "probe_llm", fake_llm)
     monkeypatch.setattr(runtime_factory_module, "probe_tts", fake_tts)
     monkeypatch.setattr(runtime_factory_module, "probe_pet", fake_pet)
+    monkeypatch.setattr(runtime_factory_module, "probe_desktop", fake_desktop)
     pet_directory = Path("assets/pet/dpsk-girl").resolve()
     services = build_default_runtime(
         AppConfig(),
@@ -381,12 +388,13 @@ def test_default_runtime_factory_registers_active_component_probes(
             check.component: check
             for check in services.diagnostics._runner._checks
         }
-        for name in ("asr", "llm", "tts", "pet"):
+        for name in ("asr", "llm", "tts", "pet", "desktop"):
             asyncio.run(checks[name].check())
 
-        assert [item[0] for item in seen] == ["asr", "llm", "tts", "pet"]
+        assert [item[0] for item in seen] == ["asr", "llm", "tts", "pet", "desktop"]
         assert seen[1][1] is None
-        assert seen[-1][2] == pet_directory
+        assert seen[3][2] == pet_directory
+        assert seen[4][1] is runtime_factory_module.computer_use
     finally:
         RuntimeHost(services).close()
 

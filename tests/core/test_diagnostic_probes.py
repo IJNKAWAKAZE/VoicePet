@@ -1,9 +1,16 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 from core.asr import AsrRuntimeStatus
 from core.cancellation import CancellationToken
-from core.diagnostic_probes import probe_asr, probe_llm, probe_pet, probe_tts
+from core.diagnostic_probes import (
+    probe_asr,
+    probe_desktop,
+    probe_llm,
+    probe_pet,
+    probe_tts,
+)
 from core.diagnostics import DiagnosticStatus
 from core.tts import SynthesizedAudio
 
@@ -104,3 +111,56 @@ def test_pet_probe_validates_directory_outside_event_loop(tmp_path):
     assert status is DiagnosticStatus.HEALTHY
     assert "有效" in message
     assert context == {"pet_id": "pet-id"}
+
+
+def test_desktop_probe_reports_capture_without_injecting_input():
+    class Desktop:
+        def __init__(self):
+            self.calls = []
+
+        def list_windows(self, **kwargs):
+            self.calls.append(("list_windows", kwargs))
+            return [object(), object()]
+
+        def capture_window(self, handle, **kwargs):
+            self.calls.append(("capture_window", handle, kwargs))
+            return SimpleNamespace(width=640, height=360, png=b"\x89PNG\r\n\x1a\n")
+
+    desktop = Desktop()
+
+    status, message, context = asyncio.run(probe_desktop(desktop))
+
+    assert desktop.calls == [("list_windows", {"limit": 5}), ("capture_window", 0, {"max_width": 640})]
+    assert status is DiagnosticStatus.HEALTHY
+    assert "可用" in message
+    assert context == {"windows": 2, "capture_width": 640, "capture_height": 360, "png_bytes": 8}
+
+
+def test_desktop_probe_degrades_without_visible_windows():
+    class Desktop:
+        def list_windows(self, **kwargs):
+            return []
+
+        def capture_window(self, handle, **kwargs):
+            return SimpleNamespace(width=100, height=50, png=b"\x89PNG")
+
+    status, message, context = asyncio.run(probe_desktop(Desktop()))
+
+    assert status is DiagnosticStatus.DEGRADED
+    assert "窗口" in message
+    assert context["windows"] == 0
+
+
+def test_desktop_probe_reports_empty_capture_as_unavailable():
+    class Desktop:
+        def list_windows(self, **kwargs):
+            return [object()]
+
+        def capture_window(self, handle, **kwargs):
+            return SimpleNamespace(width=0, height=0, png=b"")
+
+    status, message, context = asyncio.run(probe_desktop(Desktop()))
+
+    assert status is DiagnosticStatus.UNAVAILABLE
+    assert "空图像" in message
+    assert context["png_bytes"] == 0
