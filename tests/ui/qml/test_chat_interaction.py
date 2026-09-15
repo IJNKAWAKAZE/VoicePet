@@ -150,30 +150,26 @@ def test_non_chat_pages_release_history_sidebar_space(history_window, section, q
     assert content.mapToScene(QPoint(0, 0)).x() + content.width() <= root.width() - 10
 
 
-def test_agent_activity_renders_command_output_inline(history_window, qapp):
+def test_execution_process_never_reaches_the_message_list(history_window, qapp):
     root, chat, shell, _ = history_window
     shell.navigate("chat")
     QTest.qWait(30)
 
-    chat.start_agent_activity("item-1", "command", "go vet ./...")
-    chat.append_agent_activity("item-1", "vet exit=0\n")
+    page = root.findChild(QQuickItem, "chatPage")
+    message_list = next(item for item in visual_items(page)
+                        if item.objectName() == "chatMessageList")
+    chat.activate_session("history-1")
+    QTest.qWait(120)
+    before = message_list.property("count")
+
+    chat.append_assistant_delta("先看目录结构", "message-1", "history-1")
+    chat.append_assistant_delta("go vet 通过", "message-2", "history-1")
+    chat.finish_assistant("history-1")
     QTest.qWait(60)
 
-    page = root.findChild(QQuickItem, "chatPage")
-    blocks = [item for item in visual_items(page)
-              if item.objectName() == "agentActivityBlock"
-              and item.property("visible") is True]
-    assert len(blocks) == 1
-    assert blocks[0].property("title") == "go vet ./..."
-    assert blocks[0].property("status") == "running"
-    assert blocks[0].height() > 24
-    output = next(item for item in visual_items(blocks[0])
-                  if item.objectName() == "agentActivityOutput")
-    assert output.property("text") == "vet exit=0\n"
-
-    chat.finish_agent_activity("item-1", "completed")
-    QTest.qWait(30)
-    assert blocks[0].property("status") == "complete"
+    # 聊天列表只增加模型自己说的话，思考与命令都不成条
+    assert chat.message_model.rowCount() == before + 2
+    assert message_list.property("count") == before + 2
 
 
 def test_loaded_history_scrolls_past_last_user_to_assistant_bottom(history_window):

@@ -526,6 +526,47 @@ def test_agent_progress_only_updates_the_pet_bubble(qapp):
     controller.close()
 
 
+def test_each_reply_segment_gets_its_own_pet_bubble(qapp):
+    controller, _runtime, _tray, qml, _shell, chat, *_ = build_controller(qapp)
+    controller.start()
+    turn_id = TurnId.new()
+    correlation = CorrelationId.new()
+    pet = qml.root_objects[0].findChild(QObject, "petWindow")
+
+    controller.handle_runtime_event(TextDelta(turn_id, correlation, "先看", "item-1"))
+    controller.handle_runtime_event(TextDelta(turn_id, correlation, "目录", "item-1"))
+    assert pet.property("speech") == "先看目录"
+
+    controller.handle_runtime_event(TextDelta(turn_id, correlation, "改完了", "item-2"))
+
+    # 同一轮的下一段另起一条气泡，不跟上一段拼成一大段
+    assert pet.property("speech") == "改完了"
+    assert chat.message_model.rowCount() == 2
+    controller.close()
+
+
+def test_spoken_segments_replace_the_pet_bubble_one_by_one(qapp):
+    controller, _runtime, _tray, qml, *_ = build_controller(qapp)
+    controller.start()
+    turn_id = TurnId.new()
+    correlation = CorrelationId.new()
+    pet = qml.root_objects[0].findChild(QObject, "petWindow")
+    controller.handle_runtime_event(StateChanged(
+        turn_id,
+        correlation,
+        ConversationPhase.SYNTHESIZING,
+        ConversationPhase.SPEAKING,
+    ))
+
+    controller.handle_runtime_event(SpeakRequested(turn_id, correlation, "第一段"))
+    assert pet.property("speech") == "第一段"
+    controller.handle_runtime_event(SpeakRequested(turn_id, correlation, "第二段"))
+
+    # 播报推进到哪一段，气泡就显示哪一段
+    assert pet.property("speech") == "第二段"
+    controller.close()
+
+
 def test_pet_listening_hint_waits_for_audio_and_clears_when_recording_ends(qapp):
     controller, _runtime, _tray, qml, *_ = build_controller(qapp)
     controller.start()

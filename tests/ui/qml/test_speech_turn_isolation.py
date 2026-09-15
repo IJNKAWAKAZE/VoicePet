@@ -161,7 +161,7 @@ def test_history_playback_displays_spoken_text_and_keeps_it_after_completion(spe
     assert chat.messageModel.rowCount() == 1
 
 
-def test_reply_playback_keeps_full_reply_and_ignores_stale_recording(speech_app):
+def test_reply_playback_shows_each_spoken_segment_and_ignores_stale_speech(speech_app):
     controller, _, _, pet = speech_app
     turn, correlation = TurnId.new(), CorrelationId.new()
     controller.handle_runtime_event(StateChanged(
@@ -177,7 +177,10 @@ def test_reply_playback_keeps_full_reply_and_ignores_stale_recording(speech_app)
     controller.handle_runtime_event(SpeakRequested(turn, correlation, "第一句。"))
     controller.handle_runtime_event(RecordingStarted(turn, correlation))
     controller.handle_runtime_event(SpeakRequested(TurnId.new(), correlation, "旧轮次提示"))
-    assert pet.property("speech") == "第一句。第二句。"
+    controller.handle_runtime_event(SpeakRequested(turn, correlation, "第二句。"))
+
+    # 播报推进到哪一段气泡就显示哪一段，旧轮次的播报不能覆盖
+    assert pet.property("speech") == "第二句。"
 
 
 def test_normal_reply_equal_to_wake_acknowledgement_is_not_replaced(speech_app):

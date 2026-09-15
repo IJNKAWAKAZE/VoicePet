@@ -9,19 +9,47 @@ ApplicationWindow {
     required property QtObject theme
     required property QtObject dialogs
     property var request: dialogs.currentAgentInteraction
-    width: 420
-    height: request.kind === "approval" ? 190 : 300
+    width: 460
+    // 详情长度随内容变化，长命令只滚动不截断
+    height: Math.max(210, layout.implicitHeight + 36)
     visible: false
     flags: Qt.Dialog | Qt.WindowStaysOnTopHint
     title: "Agent 需要你的选择"
     color: theme.canvas
 
     ColumnLayout {
+        id: layout
         anchors.fill: parent
         anchors.margins: 18
         spacing: 10
         Text { Layout.fillWidth: true; text: window.request.title || "需要选择"; color: theme.text; font.pixelSize: 18; font.bold: true; wrapMode: Text.Wrap }
-        Text { Layout.fillWidth: true; text: window.request.message || ""; color: theme.text; wrapMode: Text.Wrap }
+        Rectangle {
+            objectName: "agentRequestDetailBox"
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(260, Math.max(28, detailText.implicitHeight + 16))
+            color: theme.surface
+            radius: 10
+            border.color: theme.border
+            Flickable {
+                id: detailFlick
+                anchors.fill: parent
+                anchors.margins: 8
+                clip: true
+                contentWidth: width
+                contentHeight: detailText.implicitHeight
+                boundsBehavior: Flickable.StopAtBounds
+                Text {
+                    id: detailText
+                    objectName: "agentRequestDetail"
+                    width: detailFlick.width
+                    text: window.request.message || ""
+                    color: window.theme.text
+                    font.pixelSize: 13
+                    font.family: "Microsoft YaHei UI"
+                    wrapMode: Text.WrapAnywhere
+                }
+            }
+        }
         Repeater {
             model: window.request.options || []
             delegate: AppButton {
@@ -35,7 +63,6 @@ ApplicationWindow {
                 }
             }
         }
-        Item { Layout.fillHeight: true }
         RowLayout {
             Layout.alignment: Qt.AlignRight
             AppButton {

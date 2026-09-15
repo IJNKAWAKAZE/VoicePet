@@ -94,6 +94,84 @@ def bounded_text(value: object, limit: int = MAX_ITEM_TEXT_CHARS) -> str:
     text = value.strip()
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
+def payload_text(value: object, limit: int = 600) -> str:
+    """审批字段可能是字符串或参数数组，统一压成一行可展示文字"""
+    if isinstance(value, (list, tuple)):
+        value = " ".join(str(part) for part in value)
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+def change_kind_text(value: object) -> str:
+    """补丁变更类型是嵌套模型，取不到时留空"""
+    for candidate in (getattr(value, "root", None), value):
+        kind = enum_text(getattr(candidate, "type", ""))
+        if kind:
+            return kind
+    return ""
+
+_CHANGE_KIND_LABELS = {"add": "新增", "delete": "删除", "update": "修改"}
+
+def file_change_details(node: object) -> tuple[dict[str, str], ...]:
+    """审批弹窗要列出待改动文件、变更类型和改动规模"""
+    changes = getattr(node, "changes", None)
+    if not isinstance(changes, (list, tuple)):
+        return ()
+    details: list[dict[str, str]] = []
+    for change in changes:
+        path = bounded_text(getattr(change, "path", ""), 260)
+        if not path:
+            continue
+        added = removed = 0
+        for line in str(getattr(change, "diff", "")).splitlines():
+            if line.startswith(("+++", "---")):
+                continue
+            if line.startswith("+"):
+                added += 1
+            elif line.startswith("-"):
+                removed += 1
+        details.append({
+            "path": path,
+            "kind": change_kind_text(getattr(change, "kind", "")),
+            "summary": f"（+{added} −{removed}）" if added or removed else "",
+        })
+    return tuple(details)
+
+def approval_message(
+    method: str, payload: Mapping[str, Any], changes: tuple[Mapping[str, str], ...] = ()
+) -> str:
+    """把 Codex 审批请求翻译成用户能判断的具体操作，字段缺失时明确说明"""
+    reason = payload_text(payload.get("reason"))
+    if method == "item/fileChange/requestApproval":
+        lines = ["Codex 想修改这些文件："]
+        lines.extend(
+            "· "
+            + _CHANGE_KIND_LABELS.get(str(change.get("kind", "")), "修改")
+            + " "
+            + str(change.get("path", ""))
+            + str(change.get("summary", ""))
+            for change in changes
+        )
+        if not changes:
+            lines.append("（Codex 没有给出文件清单）")
+        root = payload_text(payload.get("grantRoot"))
+        if root:
+            lines.append(f"申请在本次会话内持续写入该目录：{root}")
+    else:
+        lines = [
+            "Codex 想向正在运行的命令写入内容："
+            if payload_text(payload.get("kind")) == "writeStdin"
+            else "Codex 想执行命令："
+        ]
+        lines.append(payload_text(payload.get("command")) or "（Codex 没有给出命令内容）")
+        cwd = payload_text(payload.get("cwd"))
+        if cwd:
+            lines.append(f"工作目录：{cwd}")
+    if reason:
+        lines.append(f"原因：{reason}")
+    return bounded_text("\n".join(lines), 1200)
+
 def enum_text(value: object) -> str:
     return str(getattr(value, "value", value) or "")
 
@@ -165,6 +243,7 @@ class CodexAgentAdapter:
         self._turn_requests: dict[str, AgentTurnRequest] = {}
         self._interaction_waiters: dict[str, tuple[threading.Event, dict[str, str]]] = {}
         self._interaction_callback: Any = None
+        self._file_changes: dict[str, tuple[dict[str, str], ...]] = {}
         self._capabilities = None
         self._api_key=api_key; self._data_directory=Path(data_directory).resolve(); self._model=model; self._reasoning_effort=reasoning_effort; self._system_prompt=system_prompt; self._client=None; self._turns={}; self._cancelled=set()
     def _mode_path(self) -> Path:
@@ -225,7 +304,9 @@ class CodexAgentAdapter:
             event = threading.Event()
             result: dict[str, str] = {}
             self._interaction_waiters[request_id] = (event, result)
-            published = self._publish_interaction(request, request_id, "Agent 请求执行操作", "是否允许 Codex 执行这项操作？")
+            item_id = str(payload.get("itemId") or "")
+            detail = approval_message(method, payload, self._file_changes.get(item_id, ()))
+            published = self._publish_interaction(request, request_id, "Agent 请求执行操作", detail)
             if published:
                 event.wait(300)
             self._interaction_waiters.pop(request_id, None)
@@ -402,6 +483,12 @@ class CodexAgentAdapter:
                 item_id = item_identifier(getattr(node, "id", None))
                 if item_id and str(getattr(node, "type", "")) == "agentMessage":
                     message_phases[item_id] = enum_text(getattr(node, "phase", "")) or "final_answer"
+                if item_id and str(getattr(node, "type", "")) == "fileChange":
+                    # 文件审批请求只带条目号，待改动清单要在这里留存给弹窗
+                    if method == "item/completed":
+                        self._file_changes.pop(item_id, None)
+                    else:
+                        self._file_changes[item_id] = file_change_details(node)
                 emitted.extend(codex_item_events(item, started=method=="item/started"))
             elif method=="turn/completed":
                 emitted.append((AgentEventType.TURN_COMPLETED, {"status":turn_status(getattr(getattr(payload,"turn",None),"status","completed"))}))
@@ -413,4 +500,5 @@ class CodexAgentAdapter:
         if self._client is not None and turn_id in self._turns: await self._client.turn_interrupt(*self._turns[turn_id])
     async def close(self) -> None:
         self._capabilities = None
+        self._file_changes.clear()
         if self._client is not None: await self._client.close(); self._client=None

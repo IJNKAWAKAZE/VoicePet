@@ -40,3 +40,25 @@ def test_click_resolves_agent_approval_and_closes_window(qapp, label, decision):
         assert not window.isVisible()
     finally:
         controller.close()
+
+
+def test_approval_window_shows_the_concrete_operation(qapp):
+    controller, _runtime, _, qml, *_ = build_controller(qapp)
+    controller.start()
+    try:
+        window = qml.root_objects[0].findChild(QObject, "agentInteractionWindow")
+        detail = "Codex 想执行命令：\n\nnpm run build --silent\n\n工作目录：D:\\LD\\VoicePet"
+        controller.handle_runtime_event(
+            AgentApprovalRequested(TurnId.new(), CorrelationId.new(), "approval-2", detail)
+        )
+        QTest.qWait(50)
+
+        rendered = next(item for item in visual_items(window.contentItem())
+                        if item.objectName() == "agentRequestDetail")
+        # 详情必须原样展示并真正占位，不能压成一行看不见内容
+        assert window.isVisible()
+        assert rendered.property("text") == detail
+        assert rendered.property("height") > 0
+        assert window.height() >= 210
+    finally:
+        controller.close()

@@ -71,17 +71,13 @@ Item {
             required property string markdown
             required property string status
             required property var attachments
-            required property string activityKind
-            required property string activityTitle
-            required property string activityOutput
             required property string createdLabel
-            readonly property bool isActivity: role === "activity"
-            readonly property bool bubbleVisible: !isActivity && role !== "tool"
+            // 聊天只保留对话内容，思考与命令等执行过程不进消息列表
+            readonly property bool bubbleVisible: role !== "tool" && role !== "activity"
                 && (markdown.length > 0 || attachments.length > 0)
             readonly property bool timeVisible: bubbleVisible && createdLabel.length > 0
             width: messages.width
-            height: isActivity ? activityBlock.implicitHeight + 12
-                : bubbleVisible ? timeLabel.height + bubble.implicitHeight + 30 : 0
+            height: bubbleVisible ? timeLabel.height + bubble.implicitHeight + 30 : 0
             Text {
                 id: timeLabel
                 objectName: "messageTimeLabel"
@@ -116,19 +112,6 @@ Item {
                 onCopyRequested: text => root.chat.copy_message(text)
                 onPlayRequested: text => root.chat.play_message(text)
                 onFileRequested: path => root.chat.open_attachment(path)
-            }
-            AgentActivityBlock {
-                id: activityBlock
-                objectName: "agentActivityBlock"
-                visible: parent.isActivity
-                width: Math.min(720, messages.width * 0.78)
-                theme: root.theme
-                kind: parent.activityKind
-                title: parent.activityTitle
-                output: parent.activityOutput
-                status: parent.status
-                viewportWidth: messages.width
-                anchors.left: parent.left
             }
         }
     }

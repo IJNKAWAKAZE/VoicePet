@@ -17,8 +17,10 @@ from core.agent_codex import (
     APPROVAL_MODE_FILENAME,
     CODEX_SDK_VERSION,
     CodexAgentAdapter,
+    approval_message,
     codex_thread_options,
     codex_turn_options,
+    file_change_details,
     require_supported_sdk,
     voicepet_mcp_overrides,
     write_approval_mode,
@@ -51,6 +53,7 @@ def test_options_match_generated_protocol(mode):
 def test_auto_edit_accepts_native_file_change_but_keeps_shell_confirmation():
     adapter = object.__new__(CodexAgentAdapter)
     adapter._active_modes = {"native": AgentApprovalMode.AUTO_EDIT}
+    adapter._file_changes = {}
     adapter._turn_requests = {}
     adapter._turns = {}
     adapter._interaction_callback = None
@@ -58,6 +61,76 @@ def test_auto_edit_accepts_native_file_change_but_keeps_shell_confirmation():
     assert adapter._handle_server_request("item/fileChange/requestApproval", {"itemId": "file"}) == {"decision": "accept"}
     assert adapter._handle_server_request("item/commandExecution/requestApproval", {"command": "Set-Content -LiteralPath file.txt -Value test"}) == {"decision": "accept"}
     assert adapter._handle_server_request("item/commandExecution/requestApproval", {"command": "Remove-Item file.txt"}) == {"decision": "decline"}
+
+
+def test_approval_detail_shows_the_command_and_working_directory():
+    detail = approval_message(
+        "item/commandExecution/requestApproval",
+        {"command": "npm run build", "cwd": "D:\\LD\\VoicePet", "reason": "需要构建产物"},
+    )
+
+    assert "npm run build" in detail
+    assert "工作目录：D:\\LD\\VoicePet" in detail
+    assert "原因：需要构建产物" in detail
+
+
+def test_approval_detail_lists_pending_files_and_says_when_unknown():
+    listed = approval_message(
+        "item/fileChange/requestApproval",
+        {"reason": "需要写入权限"},
+        ({"path": "D:\\LD\\VoicePet\\README.md", "kind": "update", "summary": "（+12 −3）"},),
+    )
+
+    assert "修改 D:\\LD\\VoicePet\\README.md（+12 −3）" in listed
+    assert "原因：需要写入权限" in listed
+    assert "没有给出文件清单" in approval_message("item/fileChange/requestApproval", {})
+
+
+def test_file_change_details_summarize_the_pending_patch():
+    item = SimpleNamespace(
+        changes=(
+            SimpleNamespace(
+                path="D:\\LD\\VoicePet\\core\\agent_codex.py",
+                kind=SimpleNamespace(root=SimpleNamespace(type="add")),
+                diff="@@ -1 +1,3 @@\n+第一行\n+第二行\n-旧行\n 上下文\n",
+            ),
+            SimpleNamespace(path="", kind=None, diff=""),
+        )
+    )
+
+    assert file_change_details(item) == (
+        {
+            "path": "D:\\LD\\VoicePet\\core\\agent_codex.py",
+            "kind": "add",
+            "summary": "（+2 −1）",
+        },
+    )
+
+
+def test_approval_request_publishes_the_concrete_operation():
+    adapter = object.__new__(CodexAgentAdapter)
+    adapter._active_modes = {"native": AgentApprovalMode.SUGGEST}
+    adapter._file_changes = {}
+    adapter._turn_requests = {"turn-1": SimpleNamespace(session_id="s1", turn_id="turn-1")}
+    adapter._turns = {}
+    adapter._interaction_waiters = {}
+    published = []
+
+    def publish(payload):
+        published.append(payload)
+        adapter.resolve_interaction(str(payload["request_id"]), "accept")
+        return True
+
+    adapter.set_interaction_callback(publish)
+    decision = adapter._handle_server_request(
+        "item/commandExecution/requestApproval",
+        {"itemId": "item-1", "command": "npm run build", "cwd": "D:\\LD\\VoicePet"},
+    )
+
+    assert decision == {"decision": "accept"}
+    assert [payload["message"] for payload in published] == [
+        "Codex 想执行命令：\nnpm run build\n工作目录：D:\\LD\\VoicePet"
+    ]
 
 
 def test_voicepet_mcp_overrides_keep_tools_visible_and_gated(tmp_path):

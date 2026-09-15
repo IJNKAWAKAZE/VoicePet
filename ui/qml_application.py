@@ -9,9 +9,6 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QJSValue
 
 from core.events import (
-    AgentActivityCompleted,
-    AgentActivityOutput,
-    AgentActivityStarted,
     AgentApprovalRequested,
     AgentProgress,
     ApprovalRequested,
@@ -130,6 +127,7 @@ class QmlApplicationController(QObject):
         self._session_turns: dict[str, TurnId] = {}
         self._speech_text = ""
         self._speech_turn_id: TurnId | None = None
+        self._speech_item_id = ""
         self._muted = False
         self._mute_busy = False
         self._closed = False
@@ -661,6 +659,7 @@ class QmlApplicationController(QObject):
         # 切换会话时同步清理可见气泡和增量缓存，防止旧回复再次出现
         self._speech_text = ""
         self._speech_turn_id = None
+        self._speech_item_id = ""
         self._set_pet_speech("")
 
     @Slot()
@@ -723,10 +722,8 @@ class QmlApplicationController(QObject):
             if self._phase is ConversationPhase.LISTENING and event.text == "我在，请说":
                 self._set_pet_speech("我在")
             elif self._phase is ConversationPhase.SPEAKING:
-                # 回复播报保留完整正文；历史重播没有 TextDelta，用播报文本填充气泡。
-                if not self._speech_text:
-                    self._speech_text = event.text
-                self._set_pet_speech(self._speech_text)
+                # 播报按段推进，气泡跟着当前播报的段落走，历史重播同样一段一弹
+                self._set_pet_speech(event.text)
             return
         if isinstance(event, TranscriptReady):
             self._chat.append_user_message(event.text)
@@ -741,6 +738,11 @@ class QmlApplicationController(QObject):
             if event.turn_id != self._speech_turn_id:
                 self._reset_pet_speech()
                 self._speech_turn_id = event.turn_id
+                self._speech_item_id = event.item_id
+            elif event.item_id != self._speech_item_id:
+                # 同一轮的下一段回复另起一条气泡，不跟上一段拼在一起
+                self._speech_item_id = event.item_id
+                self._speech_text = ""
             self._speech_text += event.text
             self._set_pet_speech(self._speech_text)
             return
@@ -776,21 +778,6 @@ class QmlApplicationController(QObject):
         if isinstance(event, AgentProgress):
             # 执行状态只显示在桌宠气泡，避免污染最终聊天回复；后台会话不会发布该事件
             self._set_pet_speech(event.message)
-            return
-        if isinstance(event, AgentActivityStarted):
-            self._chat.start_agent_activity(
-                event.activity_id, event.kind, event.title, event.session_id
-            )
-            return
-        if isinstance(event, AgentActivityOutput):
-            self._chat.append_agent_activity(
-                event.activity_id, event.text, event.session_id
-            )
-            return
-        if isinstance(event, AgentActivityCompleted):
-            self._chat.finish_agent_activity(
-                event.activity_id, event.status, event.session_id
-            )
             return
         if isinstance(event, AgentApprovalRequested):
             self._dialogs.request_agent_interaction(
