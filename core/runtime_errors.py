@@ -19,6 +19,7 @@ def runtime_error_event(
     *,
     error_code: str | None = None,
     retryable: bool | None = None,
+    session_id: str = "",
 ) -> RuntimeErrorEvent:
     """仅保留异常类型并生成适合用户操作的安全消息"""
 
@@ -61,6 +62,7 @@ def runtime_error_event(
         user_action_required,
         safe_message,
         {"exception_type": exception_type},
+        session_id,
     )
 
 

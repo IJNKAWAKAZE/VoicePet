@@ -63,7 +63,7 @@ class Runtime:
         self.activations.append(source)
         return completed()
 
-    def cancel_active_turn(self):
+    def cancel_active_turn(self, session_id: str = ""):
         self.cancellations += 1
         return completed()
 

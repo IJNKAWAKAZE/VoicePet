@@ -71,9 +71,33 @@ Item {
             required property string markdown
             required property string status
             required property var attachments
+            required property string activityKind
+            required property string activityTitle
+            required property string activityOutput
+            required property string createdLabel
+            readonly property bool isActivity: role === "activity"
+            readonly property bool bubbleVisible: !isActivity && role !== "tool"
+                && (markdown.length > 0 || attachments.length > 0)
+            readonly property bool timeVisible: bubbleVisible && createdLabel.length > 0
             width: messages.width
-            height: role !== "tool" && (markdown.length > 0 || attachments.length > 0)
-                ? bubble.implicitHeight + 30 : 0
+            height: isActivity ? activityBlock.implicitHeight + 12
+                : bubbleVisible ? timeLabel.height + bubble.implicitHeight + 30 : 0
+            Text {
+                id: timeLabel
+                objectName: "messageTimeLabel"
+                visible: parent.timeVisible
+                // 隐藏时必须彻底让位，否则首条消息上方会留出空白
+                height: visible ? implicitHeight + 6 : 0
+                text: parent.createdLabel
+                color: root.theme.textMuted
+                font.pixelSize: 11
+                font.family: "Microsoft YaHei UI"
+                anchors.top: parent.top
+                anchors.left: parent.role === "user" ? undefined : parent.left
+                anchors.right: parent.role === "user" ? parent.right : undefined
+                anchors.leftMargin: 4
+                anchors.rightMargin: 4
+            }
             MessageBubble {
                 id: bubble
                 width: Math.min(720, messages.width * 0.78)
@@ -83,15 +107,28 @@ Item {
                 status: parent.status
                 attachments: parent.attachments
                 playing: root.chat.messagePlaying
-                visible: parent.role !== "tool"
-                    && (parent.markdown.length > 0 || parent.attachments.length > 0)
+                visible: parent.bubbleVisible
                 viewportWidth: messages.width
+                anchors.top: timeLabel.bottom
                 anchors.right: parent.role === "user" ? parent.right : undefined
                 anchors.left: parent.role === "user" ? undefined : parent.left
                 onLinkRequested: link => root.linkRequested(link)
                 onCopyRequested: text => root.chat.copy_message(text)
                 onPlayRequested: text => root.chat.play_message(text)
                 onFileRequested: path => root.chat.open_attachment(path)
+            }
+            AgentActivityBlock {
+                id: activityBlock
+                objectName: "agentActivityBlock"
+                visible: parent.isActivity
+                width: Math.min(720, messages.width * 0.78)
+                theme: root.theme
+                kind: parent.activityKind
+                title: parent.activityTitle
+                output: parent.activityOutput
+                status: parent.status
+                viewportWidth: messages.width
+                anchors.left: parent.left
             }
         }
     }

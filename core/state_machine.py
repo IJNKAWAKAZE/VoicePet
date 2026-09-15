@@ -44,9 +44,11 @@ _LEGAL_TRANSITIONS: dict[ConversationPhase, frozenset[ConversationPhase]] = {
 class ConversationStateMachine:
     """维护一个活动轮次及其合法阶段变化"""
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "") -> None:
         self._phase = ConversationPhase.IDLE
         self._turn_id: TurnId | None = None
+        # 多会话并行时状态事件必须携带来源会话，UI 才能把阶段变化分派到对应会话
+        self._session_id = session_id if isinstance(session_id, str) else ""
 
     @property
     def phase(self) -> ConversationPhase:
@@ -70,6 +72,7 @@ class ConversationStateMachine:
             correlation_id,
             ConversationPhase.IDLE,
             ConversationPhase.LISTENING,
+            self._session_id,
         )
 
     def start_notice(self, correlation_id: CorrelationId) -> StateChanged:
@@ -87,6 +90,7 @@ class ConversationStateMachine:
             correlation_id,
             ConversationPhase.IDLE,
             ConversationPhase.SYNTHESIZING,
+            self._session_id,
         )
 
     def start_text_turn(self, correlation_id: CorrelationId) -> StateChanged:
@@ -104,6 +108,7 @@ class ConversationStateMachine:
             correlation_id,
             ConversationPhase.IDLE,
             ConversationPhase.THINKING,
+            self._session_id,
         )
 
     def transition(
@@ -120,7 +125,13 @@ class ConversationStateMachine:
             )
 
         previous = self._phase
-        event = StateChanged(turn_id, correlation_id, previous, target)
+        event = StateChanged(
+            turn_id,
+            correlation_id,
+            previous,
+            target,
+            self._session_id,
+        )
         self._phase = target
         if target is ConversationPhase.IDLE:
             self._turn_id = None
@@ -140,6 +151,7 @@ class ConversationStateMachine:
             correlation_id,
             previous,
             ConversationPhase.LISTENING,
+            self._session_id,
         )
 
     def reset(self, correlation_id: CorrelationId) -> StateChanged | None:
@@ -153,6 +165,7 @@ class ConversationStateMachine:
             correlation_id,
             self._phase,
             ConversationPhase.IDLE,
+            self._session_id,
         )
         self._phase = ConversationPhase.IDLE
         self._turn_id = None

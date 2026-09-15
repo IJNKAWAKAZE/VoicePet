@@ -21,15 +21,14 @@ class AgentWorkerError(RuntimeError):
 
 
 class AgentWorkerServer:
-    """Worker 只允许一个活动轮次并优先处理控制请求"""
+    """Worker 按轮次标识并发执行多个会话并优先处理控制请求"""
 
     def __init__(self, adapter: Any, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._adapter = adapter
         self._reader = reader
         self._writer = writer
         self._write_lock = asyncio.Lock()
-        self._active_turn: str | None = None
-        self._turn_task: asyncio.Task[None] | None = None
+        self._turn_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
 
     async def serve(self) -> None:
@@ -49,21 +48,26 @@ class AgentWorkerServer:
                     detail = str(error) if isinstance(error, AgentWorkerError) else f"Agent Worker 请求失败（{type(error).__name__}）"
                     await self._send(AgentRpcResponse(message.request_id if isinstance(message, AgentRpcRequest) else "invalid", error={"code": -32000, "message": detail or "Agent Worker 请求失败"}))
         finally:
-            if self._turn_task and not self._turn_task.done():
-                self._turn_task.cancel()
-                await asyncio.gather(self._turn_task, return_exceptions=True)
+            await self._cancel_all_turns()
             self._closed = True
             await self._adapter.close()
+
+    async def _cancel_all_turns(self) -> None:
+        tasks = [task for task in self._turn_tasks.values() if not task.done()]
+        self._turn_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _handle(self, request: AgentRpcRequest) -> dict[str, Any]:
         if request.method == "agent.initialize":
             return await self._adapter.initialize()
         if request.method == "agent.turn.start":
-            if self._active_turn is not None:
-                raise AgentWorkerError("已有 Agent 轮次运行")
             turn = AgentTurnRequest.from_mapping(request.params)
-            self._active_turn = turn.turn_id
-            self._turn_task = asyncio.create_task(self._run_turn(turn))
+            if turn.turn_id in self._turn_tasks:
+                raise AgentWorkerError("Agent 轮次标识重复")
+            self._turn_tasks[turn.turn_id] = asyncio.create_task(self._run_turn(turn))
             return {"accepted": True, "turn_id": turn.turn_id}
         if request.method == "agent.turn.cancel":
             self._require_active(request.params.get("turn_id"))
@@ -79,8 +83,8 @@ class AgentWorkerServer:
                 return {"accepted": True}
             raise AgentWorkerError("审批请求无效")
         if request.method == "agent.shutdown":
-            if self._active_turn is not None:
-                await self._adapter.cancel(self._active_turn)
+            for turn_id in tuple(self._turn_tasks):
+                await self._adapter.cancel(turn_id)
             self._closed = True
             return {"accepted": True}
         raise AgentWorkerError("Agent 方法无效")
@@ -88,19 +92,16 @@ class AgentWorkerServer:
     async def _run_turn(self, turn: AgentTurnRequest) -> None:
         try:
             async for event in self._adapter.run_turn(turn):
-                if event.type in {AgentEventType.TURN_COMPLETED, AgentEventType.CANCELLED, AgentEventType.ERROR} and self._active_turn == turn.turn_id:
-                    self._active_turn = None
                 await self._send(AgentRpcNotification("agent.event", event.to_mapping()))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             await self._send(AgentRpcNotification("agent.event", AgentEvent(turn.session_id, turn.turn_id, 0, AgentEventType.ERROR, {"code": "agent.turn"}).to_mapping()))
         finally:
-            if self._active_turn == turn.turn_id:
-                self._active_turn = None
+            self._turn_tasks.pop(turn.turn_id, None)
 
     def _require_active(self, turn_id: object) -> None:
-        if not isinstance(turn_id, str) or turn_id != self._active_turn:
+        if not isinstance(turn_id, str) or turn_id not in self._turn_tasks:
             raise AgentWorkerError("Agent 轮次不匹配")
 
     async def _send(self, message: AgentRpcResponse | AgentRpcNotification) -> None:

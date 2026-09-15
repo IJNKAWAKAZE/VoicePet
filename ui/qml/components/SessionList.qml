@@ -18,6 +18,8 @@ ListView {
         required property string title
         required property int turnCount
         required property bool active
+        required property bool running
+        required property string updatedLabel
         width: root.width
         height: 66
         Rectangle {
@@ -34,16 +36,44 @@ ListView {
             anchors.verticalCenter: parent.verticalCenter
             width: parent.width - 66
             spacing: 2
-            Text {
+            Row {
+                spacing: 6
                 width: parent.width
-                text: title
-                color: root.theme.text
-                font.pixelSize: 13
-                font.family: "Microsoft YaHei UI"
-                elide: Text.ElideRight
+                Text {
+                    // 运行标识和标题同行，给下面的时间留出完整宽度
+                    width: Math.max(0, parent.width - (sessionRow.running
+                        ? runningRowLabel.implicitWidth + 18 : 0))
+                    text: title
+                    color: root.theme.text
+                    font.pixelSize: 13
+                    font.family: "Microsoft YaHei UI"
+                    elide: Text.ElideRight
+                }
+                Rectangle {
+                    objectName: "sessionRunningDot"
+                    visible: sessionRow.running
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 6
+                    height: 6
+                    radius: 3
+                    color: root.theme.warning
+                }
+                Text {
+                    id: runningRowLabel
+                    objectName: "sessionRunningLabel"
+                    visible: sessionRow.running
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "运行中"
+                    color: root.theme.warning
+                    font.pixelSize: 11
+                    font.family: "Microsoft YaHei UI"
+                }
             }
             Text {
-                text: turnCount + " 轮对话"
+                objectName: "sessionUpdatedLabel"
+                width: parent.width
+                text: updatedLabel + " · " + turnCount + " 轮对话"
+                elide: Text.ElideRight
                 color: root.theme.textMuted
                 font.pixelSize: 11
                 font.family: "Microsoft YaHei UI"
@@ -74,6 +104,7 @@ ListView {
             kind: "ghost"
             onClicked: root.deleteRequested(sessionRow.sessionId)
         }
-        Accessible.description: turnCount + " 轮对话"
+        Accessible.description: (updatedLabel ? updatedLabel + "，" : "")
+            + turnCount + " 轮对话" + (running ? "，运行中" : "")
     }
 }

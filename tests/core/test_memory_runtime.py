@@ -544,7 +544,15 @@ def test_factory_wires_background_memory_pipeline(tmp_path):
     try:
         assert services.scheduler is not None
         assert services.scheduler._extractor is not None
-        assert services.memory_context is services.coordinator._memory_context
+        # 记忆装配按会话各持一份，前台会话的协调器必须拿到绑定同一上下文的装配器
+        assert services.memory_context is services.coordinator
+        current = services.coordinator.coordinator
+        assembler = current._memory_context
+        assert assembler is not None
+        assert assembler._context is current._session_context
+        assert services.coordinator.coordinator_for(
+            current._session_context.session_id
+        ) is current
         assert services.session_archive._retention_days == 7
         assert services.session_archive._summary_retention_days == 7
     finally:

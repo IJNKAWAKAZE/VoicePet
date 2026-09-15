@@ -42,6 +42,7 @@ from .runtime import RuntimeServices
 from .session_archive import SessionArchiveStore
 from .session_context import SessionContext
 from .session_data import SessionDataManager
+from .session_runtime import SessionCoordinatorPool
 from .structured_logging import (
     RuntimeEventLogger,
     StructuredLogError,
@@ -174,48 +175,66 @@ def build_default_runtime(
         temp_directory=cache_directory,
     )
     tts_voice_service = EdgeTtsVoiceService(audio_player)
-    session_context = SessionContext()
-    session_manager = SessionDataManager(
-        session_archive,
-        session_context,
-        agent_store=agent_store,
-        codex_files=CodexSessionFiles(data_directory / "codex"),
-    )
-    session_manager.resume_latest()
-    memory_context = MemoryContextAssembler(
-        memory_store,
-        archive=session_archive,
-        session_context=session_context,
-    )
+    speech_lock = asyncio.Lock()
     scheduler: MemoryScheduler | None = None
 
     def enqueue_archived_turn(session_id: str, turn_id: str) -> None:
         if scheduler is not None:
             scheduler.enqueue(session_id, turn_id)
 
-    coordinator = Coordinator(
-        audio_session,
-        transcript,
-        event_bus,
-        memory_context=memory_context,
-        session_context=session_context,
+    memory_operations = MemoryOperationService(
+        memory_store,
         session_archive=session_archive,
-        archive_completion=enqueue_archived_turn,
-        memory_operations=MemoryOperationService(
-            memory_store,
+    )
+
+    def build_coordinator(
+        session_id: str,
+        context: SessionContext,
+        memory_context: MemoryContextAssembler | None,
+        *,
+        speech_enabled: bool,
+        manual_input_speech_enabled: bool,
+    ) -> Coordinator:
+        return Coordinator(
+            audio_session,
+            transcript,
+            event_bus,
+            memory_context=memory_context,
+            session_context=context,
             session_archive=session_archive,
+            archive_completion=enqueue_archived_turn,
+            memory_operations=memory_operations,
+            llm_instructions=llm_instructions,
+            speech_enabled=speech_enabled,
+            manual_input_speech_enabled=manual_input_speech_enabled,
+            wake_keyword=config.wake_word.keyword,
+            continuous_conversation=config.wake_word.continuous_conversation,
+            followup_timeout=config.wake_word.followup_timeout,
+            speech_synthesizer=speech,
+            audio_player=audio_player,
+            agent_gateway=agent_gateway,
+            max_turn_duration=float(config.agent.max_turn_minutes) * 60.0,
+            is_foreground=lambda: coordinator.is_foreground(session_id),
+            speech_lock=speech_lock,
+        )
+
+    coordinator = SessionCoordinatorPool(
+        build_coordinator,
+        memory_context_builder=lambda context: MemoryContextAssembler(
+            memory_store,
+            archive=session_archive,
+            session_context=context,
         ),
-        llm_instructions=llm_instructions,
         speech_enabled=config.tts.enabled,
         manual_input_speech_enabled=config.tts.manual_input_enabled,
-        wake_keyword=config.wake_word.keyword,
-        continuous_conversation=config.wake_word.continuous_conversation,
-        followup_timeout=config.wake_word.followup_timeout,
-        speech_synthesizer=speech,
-        audio_player=audio_player,
-        agent_gateway=agent_gateway,
-        max_turn_duration=float(config.agent.max_turn_minutes) * 60.0,
     )
+    session_manager = SessionDataManager(
+        session_archive,
+        coordinator,
+        agent_store=agent_store,
+        codex_files=CodexSessionFiles(data_directory / "codex"),
+    )
+    session_manager.resume_latest()
     memory_jobs = MemoryJobStore(data_directory / "assistant.db")
     scheduler = MemoryScheduler(
         None if raw_llm is None else MemoryExtractor(raw_llm),
@@ -348,7 +367,7 @@ def build_default_runtime(
         llm_configured=raw_llm is not None,
         audio_output=audio_player,
         scheduler=scheduler,
-        memory_context=memory_context,
+        memory_context=coordinator,
         memory_store=memory_store,
         session_archive=session_archive,
         agent_gateway=agent_gateway,

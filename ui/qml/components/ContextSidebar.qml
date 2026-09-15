@@ -53,7 +53,7 @@ Item {
                 Layout.fillWidth: true
                 theme: root.theme
                 text: "＋ 新建会话"
-                enabled: !root.chatModel.processing && !root.chatModel.sessionLoading
+                enabled: !root.chatModel.sessionLoading
                 kind: "primary"
                 onClicked: root.chatModel.new_session()
             }
@@ -65,7 +65,7 @@ Item {
                 visible: root.shellModel.currentSection === "chat"
                 theme: root.theme
                 sessionModel: root.chatModel.sessionModel
-                enabled: !root.chatModel.processing && !root.chatModel.sessionLoading
+                enabled: !root.chatModel.sessionLoading
                 onDeleteRequested: sessionId => root.chatModel.request_delete_session(sessionId)
                 onSessionRequested: sessionId => {
                     root.chatModel.activate_session(sessionId)

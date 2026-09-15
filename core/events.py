@@ -129,6 +129,7 @@ class StateChanged:
     correlation_id: CorrelationId
     previous: ConversationPhase
     current: ConversationPhase
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +169,8 @@ class TextDelta:
     turn_id: TurnId
     correlation_id: CorrelationId
     text: str
+    item_id: str = ""
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +180,40 @@ class AgentProgress:
     turn_id: TurnId
     correlation_id: CorrelationId
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActivityStarted:
+    """Agent 开始一次工具调用，用于在聊天记录里插入执行条目"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    activity_id: str
+    kind: str
+    title: str
+    session_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActivityOutput:
+    """工具执行过程中新增的输出片段"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    activity_id: str
+    text: str
+    session_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActivityCompleted:
+    """工具调用结束，状态只使用 completed、failed、cancelled 三种稳定取值"""
+
+    turn_id: TurnId
+    correlation_id: CorrelationId
+    activity_id: str
+    status: str
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +243,7 @@ class MemoryResultReady:
     status: str
     message: str
     affected: int
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +280,7 @@ class RuntimeErrorEvent:
     user_action_required: bool
     safe_message: str
     diagnostic_context: Mapping[str, object]
+    session_id: str = ""
 
     def __post_init__(self) -> None:
         expected_component = _RUNTIME_ERROR_COMPONENTS.get(self.error_code)

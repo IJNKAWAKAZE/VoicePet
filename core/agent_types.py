@@ -29,6 +29,8 @@ class AgentEventType(str, Enum):
     FILE_CHANGE = "file_change"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
+    REASONING_DELTA = "reasoning_delta"
+    REASONING_COMPLETED = "reasoning_completed"
     PLAN_UPDATED = "plan_updated"
     USAGE_UPDATED = "usage_updated"
     APPROVAL_REQUEST = "approval_request"
@@ -195,10 +197,16 @@ class AgentEvent:
         object.__setattr__(self, "payload", freeze_json(self.payload))
         if self.type is AgentEventType.TURN_COMPLETED and self.payload.get("status") not in TERMINAL_STATUSES:
             raise ValueError("Agent 终态无效")
-        if self.type in {AgentEventType.TEXT_DELTA, AgentEventType.COMMAND_OUTPUT_DELTA} and not isinstance(self.payload.get("text"), str):
+        if self.type in {AgentEventType.TEXT_DELTA, AgentEventType.COMMAND_OUTPUT_DELTA, AgentEventType.REASONING_DELTA} and not isinstance(self.payload.get("text"), str):
             raise ValueError("Agent 文本事件无效")
         if self.type is AgentEventType.FILE_CHANGE and self.payload.get("status") not in {"proposed", "completed", "failed", "declined"}:
             raise ValueError("Agent 文件变更状态无效")
+        if self.type is AgentEventType.FILE_CHANGE and not all(isinstance(path, str) for path in self.payload.get("paths", ())):
+            raise ValueError("Agent 文件变更路径无效")
+        if self.type is AgentEventType.COMMAND_COMPLETED and self.payload.get("status") not in {"completed", "failed"}:
+            raise ValueError("Agent 命令终态无效")
+        if self.type in {AgentEventType.TOOL_STARTED, AgentEventType.TOOL_COMPLETED} and not isinstance(self.payload.get("tool"), str):
+            raise ValueError("Agent 工具事件无效")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> AgentEvent:

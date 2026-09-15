@@ -10,6 +10,9 @@ from core.cancellation import CancellationToken
 from core.coordinator import Coordinator
 from core.event_bus import EventBus
 from core.events import (
+    AgentActivityCompleted,
+    AgentActivityOutput,
+    AgentActivityStarted,
     AgentApprovalRequested,
     ConversationPhase,
     ErrorSeverity,
@@ -666,6 +669,123 @@ def test_spoken_notice_rejects_a_second_active_notice():
             await coordinator.speak_notice("第二条提示")
         await coordinator.stop()
         await first
+
+    asyncio.run(scenario())
+
+
+def test_agent_tool_activity_is_published_as_separate_chat_items():
+    async def scenario():
+        def agent_item(kind, payload, item_id):
+            return SimpleNamespace(type=kind, payload=payload, item_id=item_id)
+
+        gateway = ScriptedGateway(
+            [
+                agent_item(
+                    AgentEventType.COMMAND_STARTED,
+                    {"message": "正在执行命令", "command": "go vet ./..."},
+                    "item-1",
+                ),
+                agent_item(AgentEventType.COMMAND_OUTPUT_DELTA, {"text": "vet exit=0\n"}, "item-1"),
+                agent_item(
+                    AgentEventType.COMMAND_COMPLETED,
+                    {"message": "命令执行完成", "status": "completed"},
+                    "item-1",
+                ),
+                agent_item(
+                    AgentEventType.TOOL_STARTED,
+                    {"message": "正在调用", "tool": "voicepet/list_windows"},
+                    "item-2",
+                ),
+                agent_item(
+                    AgentEventType.TOOL_COMPLETED,
+                    {"message": "调用未完成", "status": "failed", "tool": "voicepet/list_windows"},
+                    "item-2",
+                ),
+                agent_item(AgentEventType.TEXT_DELTA, {"text": "已修复"}, "message-1"),
+                agent_completed(),
+            ]
+        )
+        bus = EventBus()
+        started, output, completed, deltas = [], [], [], []
+        bus.subscribe(AgentActivityStarted, started.append)
+        bus.subscribe(AgentActivityOutput, output.append)
+        bus.subscribe(AgentActivityCompleted, completed.append)
+        bus.subscribe(TextDelta, deltas.append)
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), bus, agent_gateway=gateway
+        )
+        try:
+            await coordinator.submit_text("修复编译错误")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        finally:
+            await coordinator.stop()
+
+        assert [(item.activity_id, item.kind, item.title) for item in started] == [
+            ("item-1", "command", "go vet ./..."),
+            ("item-2", "tool", "voicepet/list_windows"),
+        ]
+        assert [(item.activity_id, item.text) for item in output] == [("item-1", "vet exit=0\n")]
+        assert [(item.activity_id, item.status) for item in completed] == [
+            ("item-1", "completed"),
+            ("item-2", "failed"),
+        ]
+        assert [item.item_id for item in deltas] == ["message-1"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_reasoning_becomes_a_thinking_chat_item():
+    async def scenario():
+        def agent_item(kind, payload, item_id):
+            return SimpleNamespace(type=kind, payload=payload, item_id=item_id)
+
+        gateway = ScriptedGateway(
+            [
+                agent_item(AgentEventType.REASONING_DELTA, {"text": "先看目录"}, "item-1"),
+                agent_item(AgentEventType.REASONING_DELTA, {"text": "，再读 README"}, "item-1"),
+                agent_item(AgentEventType.REASONING_COMPLETED, {}, "item-1"),
+                agent_item(
+                    AgentEventType.COMMAND_STARTED,
+                    {"message": "正在执行命令", "command": "ls"},
+                    "item-2",
+                ),
+                agent_item(AgentEventType.REASONING_DELTA, {"text": "命令跑完了"}, "item-3"),
+                agent_item(AgentEventType.TEXT_DELTA, {"text": "最终答复"}, "message-1"),
+                agent_completed(),
+            ]
+        )
+        bus = EventBus()
+        started, output, completed, deltas = [], [], [], []
+        bus.subscribe(AgentActivityStarted, started.append)
+        bus.subscribe(AgentActivityOutput, output.append)
+        bus.subscribe(AgentActivityCompleted, completed.append)
+        bus.subscribe(TextDelta, deltas.append)
+        coordinator = Coordinator(
+            ImmediateAudio(), UnexpectedTranscript(), bus, agent_gateway=gateway
+        )
+        try:
+            await coordinator.submit_text("看看项目结构")
+            await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+        finally:
+            await coordinator.stop()
+
+        # 过程文字独立成条，命令条目保持自己的标识
+        assert [(item.activity_id, item.kind, item.title) for item in started] == [
+            ("item-1:thinking", "thinking", "正在思考"),
+            ("item-2", "command", "ls"),
+            ("item-3:thinking", "thinking", "正在思考"),
+        ]
+        assert [(item.activity_id, item.text) for item in output] == [
+            ("item-1:thinking", "先看目录"),
+            ("item-1:thinking", "，再读 README"),
+            ("item-3:thinking", "命令跑完了"),
+        ]
+        # 缺少条目终态的推理过程在轮次结束时兜底收尾
+        assert [(item.activity_id, item.status) for item in completed] == [
+            ("item-1:thinking", "completed"),
+            ("item-3:thinking", "completed"),
+        ]
+        assert [item.text for item in deltas] == ["最终答复"]
 
     asyncio.run(scenario())
 

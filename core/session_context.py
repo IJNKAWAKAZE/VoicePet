@@ -66,6 +66,14 @@ class SessionContext:
             self._turns.clear()
             self._session_id = str(uuid4())
 
+    def discard(self, session_id: str) -> None:
+        """只持有单个会话的旧装配没有别的会话状态需要释放"""
+
+    def reset(self) -> None:
+        """与 clear 等价，供按会话管理状态的实现统一起见"""
+
+        self.clear()
+
     def activate(
         self,
         session_id: str,

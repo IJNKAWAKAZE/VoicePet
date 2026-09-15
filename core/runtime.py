@@ -61,7 +61,7 @@ class CoordinatorService(Protocol):
 
     async def capture_manual_transcript(self) -> str: ...
 
-    async def cancel_active_turn(self) -> None: ...
+    async def cancel_active_turn(self, session_id: str = "") -> None: ...
 
     async def set_speech_enabled(self, enabled: bool) -> None: ...
 
@@ -343,8 +343,15 @@ class RuntimeHost:
             )
         return self._submit(self._services.coordinator.capture_manual_transcript())
 
-    def cancel_active_turn(self) -> Future[None]:
-        return self._submit(self._services.coordinator.cancel_active_turn())
+    def cancel_active_turn(self, session_id: str = "") -> Future[None]:
+        """只停止目标会话的轮次，缺省时停止当前前台会话"""
+
+        coordinator = self._services.coordinator
+        try:
+            future = coordinator.cancel_active_turn(session_id)
+        except TypeError:
+            future = coordinator.cancel_active_turn()
+        return self._submit(future)
 
     def set_session_agent_mode(self, session_id: str, mode: str | None) -> Future[None]:
         """保存会话级 Agent 模式覆盖并让下一轮读取"""

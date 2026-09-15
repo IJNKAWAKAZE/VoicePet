@@ -17,7 +17,7 @@ class AgentGateway:
     def __init__(self, client_factory, store: AgentStore, *, default_mode: AgentApprovalMode=AgentApprovalMode.AUTO_EDIT, stop_worker=None):
         self._stop_worker = stop_worker
         self._session_maintenance = False
-        self._client_factory=client_factory; self._store=store; self._default_mode=default_mode; self._global_mode=store.global_mode() or default_mode; self._client:AgentWorkerClient|None=None; self._active_turn: str|None=None; self._active_task: asyncio.Task|None=None; self._mode_overrides={}; self._capabilities=None
+        self._client_factory=client_factory; self._store=store; self._default_mode=default_mode; self._global_mode=store.global_mode() or default_mode; self._client:AgentWorkerClient|None=None; self._active_turns:set[str]=set(); self._session_turns:dict[str,str]={}; self._mode_overrides={}; self._capabilities=None
     async def initialize(self):
         if self._client is None:
             self._client=await self._client_factory()
@@ -25,18 +25,19 @@ class AgentGateway:
         return self._capabilities
     async def run_turn(self, session_id:str, text:str, *, mode:AgentApprovalMode|None=None, thread_id:str|None=None, turn_id:str|None=None, attachments=(), context:str="")->AsyncIterator[AgentEvent]:
         if self._session_maintenance: raise AgentGatewayError("正在清理会话，请稍后重试")
-        if self._active_turn is not None: raise AgentGatewayError("已有 Agent 轮次运行")
+        # 不同会话可以并发执行，同一会话仍必须串行，否则原生线程会被两个轮次同时改写
+        if session_id in self._session_turns: raise AgentGatewayError("该会话已有轮次运行")
         chosen=mode or self._global_mode; current=turn_id or uuid4().hex
         if thread_id is None:
             binding = self._store.binding(session_id)
             thread_id = binding.codex_thread_id if binding else None
         # 轮次使用全局模式快照并复用当前会话的原生线程
-        request=AgentTurnRequest(session_id,thread_id,current,text,chosen,attachments=attachments,context=context); self._store.start_turn(current,session_id,chosen); self._active_turn=current
+        request=AgentTurnRequest(session_id,thread_id,current,text,chosen,attachments=attachments,context=context); self._store.start_turn(current,session_id,chosen); self._active_turns.add(current); self._session_turns[session_id]=current
         try:
             if self._client is None: await self.initialize()
             assert self._client is not None; await self._client.start_turn(request)
             while True:
-                event=await self._client.next_event()
+                event=await self._next_turn_event(current)
                 if event.turn_id != current: continue
                 self._store.append_event_summary(event)
                 if event.thread_id:
@@ -46,7 +47,7 @@ class AgentGateway:
                     status=event.payload.get("status", "failed") if event.type is AgentEventType.TURN_COMPLETED else ("cancelled" if event.type is AgentEventType.CANCELLED else "failed")
                     # 消费者可在收到终态后立即停止迭代，必须先完成记录和释放状态
                     self._store.finish_turn(current,status)
-                    self._active_turn = None
+                    self._release_turn(session_id, current)
                 yield event
                 if terminal:
                     break
@@ -60,10 +61,29 @@ class AgentGateway:
             self._store.finish_turn(current,"outcome_unknown"); raise
         finally:
             # 旧生成器延迟关闭时不能清除新轮次的运行状态
-            if self._active_turn == current:
-                self._active_turn = None
-    async def cancel(self):
-        if self._active_turn and self._client: await self._client.cancel_turn(self._active_turn)
+            self._release_turn(session_id, current)
+
+    async def _next_turn_event(self, turn_id: str) -> AgentEvent:
+        # 支持只实现全局事件流的旧客户端桩
+        reader = getattr(self._client, "next_turn_event", None)
+        if callable(reader):
+            return await reader(turn_id)
+        assert self._client is not None
+        return await self._client.next_event()
+
+    def _release_turn(self, session_id: str, turn_id: str) -> None:
+        self._active_turns.discard(turn_id)
+        if self._session_turns.get(session_id) == turn_id:
+            self._session_turns.pop(session_id, None)
+        release = getattr(self._client, "release_turn", None)
+        if callable(release):
+            release(turn_id)
+
+    async def cancel(self, turn_id: str | None = None):
+        if self._client is None: return
+        targets = [turn_id] if turn_id else sorted(self._active_turns)
+        for target in targets:
+            if target: await self._client.cancel_turn(target)
     async def resolve_approval(self, approval_id:str, decision:str):
         if self._client is None: raise AgentGatewayError("Agent 尚未启动")
         await self._client.resolve_approval(approval_id,decision)
@@ -103,7 +123,7 @@ class AgentGateway:
 
     @asynccontextmanager
     async def session_maintenance(self):
-        if self._active_turn is not None or self._session_maintenance:
+        if self._active_turns or self._session_maintenance:
             raise AgentGatewayError("当前回复完成后才能删除会话")
         self._session_maintenance = True
         try:

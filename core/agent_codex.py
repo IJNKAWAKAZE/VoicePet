@@ -50,6 +50,13 @@ def codex_turn_options(mode: AgentApprovalMode) -> dict[str, Any]:
 
 APPROVAL_MODE_FILENAME = "voicepet-agent-mode.json"
 
+# 并发轮次共用同一个 Codex 进程和 MCP 子进程，审批闸门只能取最保守的生效模式
+_MODE_PERMISSIVENESS = {
+    AgentApprovalMode.SUGGEST: 0,
+    AgentApprovalMode.AUTO_EDIT: 1,
+    AgentApprovalMode.FULL_AUTO: 2,
+}
+
 def voicepet_mcp_overrides(mode_file: str | Path) -> tuple[str, ...]:
     """VoicePet MCP 服务配置：required 与审批模式决定工具能否被调用"""
     return (
@@ -74,6 +81,78 @@ def write_approval_mode(path: str | Path, mode: AgentApprovalMode) -> bool:
         return False
     return True
 
+
+MAX_ITEM_TEXT_CHARS = 400
+MAX_OUTPUT_DELTA_CHARS = 8_000
+TURN_STATUSES = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}
+_FILE_CHANGE_STATUSES = frozenset({"proposed", "completed", "failed", "declined"})
+
+def bounded_text(value: object, limit: int = MAX_ITEM_TEXT_CHARS) -> str:
+    """把工具条目文本收敛为可安全投递给主进程的片段"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+def enum_text(value: object) -> str:
+    return str(getattr(value, "value", value) or "")
+
+def item_identifier(value: object) -> str | None:
+    """Codex 条目标识必须满足 AgentEvent 校验，非法时退化为无标识"""
+    if not isinstance(value, str) or not value or len(value) > 256 or any(ord(char) < 32 for char in value):
+        return None
+    return value
+
+def file_change_paths(item: object) -> tuple[str, ...]:
+    changes = getattr(item, "changes", None)
+    if not isinstance(changes, (list, tuple)):
+        return ()
+    paths = (bounded_text(getattr(change, "path", ""), 260) for change in changes)
+    return tuple(path for path in paths if path)
+
+def codex_item_events(item: object, *, started: bool) -> list[tuple[AgentEventType, dict[str, Any]]]:
+    """把 Codex 条目生命周期翻译成聊天可展示的执行事件"""
+    node = getattr(item, "root", item)
+    kind = str(getattr(node, "type", ""))
+    if kind == "commandExecution":
+        command = bounded_text(getattr(node, "command", ""))
+        if started:
+            return [(AgentEventType.COMMAND_STARTED, {"message": "正在执行命令", "command": command})]
+        exit_code = getattr(node, "exit_code", None)
+        failed = enum_text(getattr(node, "status", "")) in {"failed", "declined"} or (isinstance(exit_code, int) and exit_code != 0)
+        return [(AgentEventType.COMMAND_COMPLETED, {"message": "命令执行失败" if failed else "命令执行完成", "status": "failed" if failed else "completed", "command": command})]
+    if kind == "fileChange":
+        paths = file_change_paths(node)
+        if started:
+            return [(AgentEventType.COMMAND_STARTED, {"message": "正在修改文件", "command": bounded_text("、".join(paths))})]
+        status = enum_text(getattr(node, "status", ""))
+        if status not in _FILE_CHANGE_STATUSES:
+            status = "completed"
+        return [(AgentEventType.FILE_CHANGE, {"status": status, "paths": paths, "message": "文件修改未完成" if status in {"failed", "declined"} else "文件已修改"})]
+    if kind in {"mcpToolCall", "dynamicToolCall"}:
+        tool = bounded_text(getattr(node, "tool", ""), 160) or "工具"
+        server = bounded_text(getattr(node, "server", ""), 80)
+        title = f"{server}/{tool}" if server else tool
+        if started:
+            return [(AgentEventType.TOOL_STARTED, {"tool": title, "message": f"正在调用 {title}"})]
+        failed = getattr(node, "error", None) is not None or getattr(node, "success", None) is False or enum_text(getattr(node, "status", "")) == "failed"
+        return [(AgentEventType.TOOL_COMPLETED, {"tool": title, "status": "failed" if failed else "completed", "message": f"{title} 调用未完成" if failed else f"{title} 调用完成"})]
+    if kind == "webSearch":
+        query = bounded_text(getattr(node, "query", ""), 200)
+        body = {"message": f"正在搜索 {query}" if query else "正在搜索网络"}
+        return [(AgentEventType.TOOL_STARTED, {**body, "tool": "web_search"})]
+    if kind == "imageView":
+        path = bounded_text(getattr(node, "path", ""), 260)
+        return [(AgentEventType.TOOL_STARTED, {"tool": "image_view", "message": f"正在查看 {path}" if path else "正在查看图片"})]
+    if kind == "reasoning":
+        # 推理条目的中间过程文字走 REASONING_DELTA，结束时显式收尾
+        return [] if started else [(AgentEventType.REASONING_COMPLETED, {})]
+    return []
+
+def turn_status(value: object) -> str:
+    """Codex 的 interrupted 终态在 VoicePet 中统一表示为 cancelled"""
+    return TURN_STATUSES.get(enum_text(value).lower(), "completed")
+
 class CodexAgentAdapter:
     """Worker 内拥有 Codex 客户端，主进程只接收安全事件"""
     def __init__(self, *, api_key: str, data_directory: str | Path, model: str, base_url: str = "", reasoning_effort: str = "low", system_prompt: str = "") -> None:
@@ -82,7 +161,8 @@ class CodexAgentAdapter:
         from .config import validate_llm_base_url
         validate_llm_base_url(base_url)
         self._base_url = base_url
-        self._active_mode = AgentApprovalMode.SUGGEST
+        self._active_modes: dict[str, AgentApprovalMode] = {}
+        self._turn_requests: dict[str, AgentTurnRequest] = {}
         self._interaction_waiters: dict[str, tuple[threading.Event, dict[str, str]]] = {}
         self._interaction_callback: Any = None
         self._capabilities = None
@@ -132,18 +212,20 @@ class CodexAgentAdapter:
     def _handle_server_request(self, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
         """同步回答 Codex 原生工具审批和用户交互请求"""
         payload = params or {}
+        mode = self._restrictive_mode()
+        request = self._owning_request(payload)
         if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
-            if self._active_mode is AgentApprovalMode.FULL_AUTO:
+            if mode is AgentApprovalMode.FULL_AUTO:
                 return {"decision": "accept"}
-            if self._active_mode is AgentApprovalMode.AUTO_EDIT and method == "item/fileChange/requestApproval":
+            if mode is AgentApprovalMode.AUTO_EDIT and method == "item/fileChange/requestApproval":
                 return {"decision": "accept"}
-            if self._active_mode is AgentApprovalMode.AUTO_EDIT and method == "item/commandExecution/requestApproval" and self._is_text_edit_command(payload):
+            if mode is AgentApprovalMode.AUTO_EDIT and method == "item/commandExecution/requestApproval" and self._is_text_edit_command(payload):
                 return {"decision": "accept"}
             request_id = str(payload.get("itemId") or payload.get("callId") or "approval")
             event = threading.Event()
             result: dict[str, str] = {}
             self._interaction_waiters[request_id] = (event, result)
-            published = self._publish_interaction(request_id, "Agent 请求执行操作", "是否允许 Codex 执行这项操作？")
+            published = self._publish_interaction(request, request_id, "Agent 请求执行操作", "是否允许 Codex 执行这项操作？")
             if published:
                 event.wait(300)
             self._interaction_waiters.pop(request_id, None)
@@ -156,13 +238,43 @@ class CodexAgentAdapter:
             options = payload.get("options", payload.get("choices", ()))
             if not isinstance(options, (list, tuple)):
                 options = ()
-            published = self._publish_interaction(request_id, "Agent 需要你的选择", str(payload.get("message", "请选择一个选项")), kind="input", options=options)
+            published = self._publish_interaction(request, request_id, "Agent 需要你的选择", str(payload.get("message", "请选择一个选项")), kind="input", options=options)
             if published:
                 event.wait(300)
             self._interaction_waiters.pop(request_id, None)
             answer = result.get("answer", "")
             return {"answers": {"answer": answer} if answer else {}, "cancelled": not bool(answer)}
         return {}
+
+    def _restrictive_mode(self) -> AgentApprovalMode:
+        """并发轮次取用最保守的审批模式，缺失时不放行任何危险操作"""
+
+        if not self._active_modes:
+            return AgentApprovalMode.SUGGEST
+        return min(self._active_modes.values(), key=lambda item: _MODE_PERMISSIVENESS[item])
+
+    def _sync_approval_mode(self) -> None:
+        write_approval_mode(self._mode_path(), self._restrictive_mode())
+
+    def _owning_request(self, payload: Mapping[str, Any]) -> AgentTurnRequest | None:
+        """审批请求只带原生线程和轮次标识，按它们找回发起轮次"""
+
+        for key in ("turnId", "turn_id"):
+            value = payload.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            for turn_id, (_, codex_turn_id) in self._turns.items():
+                if value in {codex_turn_id, turn_id}:
+                    return self._turn_requests.get(turn_id)
+        for key in ("threadId", "thread_id"):
+            value = payload.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            for turn_id, (thread_id, _) in self._turns.items():
+                if thread_id == value:
+                    return self._turn_requests.get(turn_id)
+        # 标识缺失时退回最近注册的轮次，避免审批请求无人应答
+        return next(reversed(self._turn_requests.values()), None)
 
     @staticmethod
     def _is_text_edit_command(payload: Mapping[str, Any]) -> bool:
@@ -202,13 +314,13 @@ class CodexAgentAdapter:
     def set_interaction_callback(self, callback: Any) -> None:
         self._interaction_callback = callback
 
-    def _publish_interaction(self, request_id: str, title: str, message: str, *, kind: str = "approval", options: object = ()) -> bool:
-        if self._interaction_callback is None:
+    def _publish_interaction(self, request: AgentTurnRequest | None, request_id: str, title: str, message: str, *, kind: str = "approval", options: object = ()) -> bool:
+        if self._interaction_callback is None or request is None:
             return False
         return bool(self._interaction_callback({
             "request_id": request_id,
-            "session_id": self._active_request.session_id,
-            "turn_id": self._active_request.turn_id,
+            "session_id": request.session_id,
+            "turn_id": request.turn_id,
             "kind": kind,
             "title": title,
             "message": message,
@@ -216,9 +328,19 @@ class CodexAgentAdapter:
         }))
     async def run_turn(self, request: AgentTurnRequest) -> AsyncIterator[AgentEvent]:
         if self._client is None: raise RuntimeError("Agent 尚未初始化")
-        self._active_mode = request.approval_mode
-        self._active_request = request
-        write_approval_mode(self._mode_path(), request.approval_mode)
+        self._active_modes[request.turn_id] = request.approval_mode
+        self._turn_requests[request.turn_id] = request
+        self._sync_approval_mode()
+        try:
+            async for event in self._run_registered_turn(request):
+                yield event
+        finally:
+            self._active_modes.pop(request.turn_id, None)
+            self._turn_requests.pop(request.turn_id, None)
+            self._turns.pop(request.turn_id, None)
+            self._sync_approval_mode()
+
+    async def _run_registered_turn(self, request: AgentTurnRequest) -> AsyncIterator[AgentEvent]:
         thread_id=request.thread_id
         instructions = "\n\n".join(item for item in (
             self._system_prompt.strip(), AGENT_TOOL_INSTRUCTIONS,
@@ -250,29 +372,41 @@ class CodexAgentAdapter:
             "summary": "concise",
         }
         started=await self._client.turn_start(thread_id,inputs,turn_options); codex_turn_id=started.turn.id; self._turns[request.turn_id]=(thread_id,codex_turn_id); seq=0
-        active_progress = False
+        # 中间过程文字按条目归属：commentary 消息和推理条目都不进最终回复气泡
+        message_phases: dict[str, str] = {}
+        summarized_items: set[str] = set()
         while True:
             notification = await self._client.next_turn_notification(codex_turn_id)
-            method=notification.method; payload=notification.payload; kind=None; body={}
+            method=notification.method; payload=notification.payload
+            emitted: list[tuple[AgentEventType, dict[str, Any]]] = []
+            item_id = item_identifier(getattr(payload, "item_id", None))
             if method=="item/agentMessage/delta":
-                if active_progress:
-                    yield AgentEvent(request.session_id,request.turn_id,seq,AgentEventType.COMMAND_COMPLETED,{"message":"命令执行完成"},thread_id,codex_turn_id); seq+=1; active_progress=False
-                kind=AgentEventType.TEXT_DELTA; body={"text":getattr(payload,"delta","")}
-            elif method=="item/commandExecution/outputDelta":
-                if not active_progress:
-                    yield AgentEvent(request.session_id,request.turn_id,seq,AgentEventType.COMMAND_STARTED,{"message":"正在执行命令"},thread_id,codex_turn_id); seq+=1; active_progress=True
-                kind=AgentEventType.COMMAND_OUTPUT_DELTA; body={"text":getattr(payload,"delta","")}
-            elif method=="item/fileChange/outputDelta":
-                if not active_progress:
-                    yield AgentEvent(request.session_id,request.turn_id,seq,AgentEventType.COMMAND_STARTED,{"message":"正在修改文件"},thread_id,codex_turn_id); seq+=1; active_progress=True
-                kind=AgentEventType.COMMAND_OUTPUT_DELTA; body={"text":getattr(payload,"delta","")}
-            elif method in {"item/commandExecution/started", "item/fileChange/started"}:
-                kind=AgentEventType.COMMAND_STARTED
-                body={"message": "正在执行命令" if "commandExecution" in method else "正在修改文件"}
-            elif method == "item/commandExecution/completed":
-                kind=AgentEventType.COMMAND_COMPLETED; body={"message": "命令执行完成"}
-            elif method=="turn/completed": kind=AgentEventType.TURN_COMPLETED; status=getattr(getattr(payload,"turn",None),"status","completed"); body={"status":str(getattr(status,"value",status)).lower()}
-            if kind is not None: yield AgentEvent(request.session_id,request.turn_id,seq,kind,body,thread_id,codex_turn_id); seq+=1
+                delta=getattr(payload,"delta","")
+                if message_phases.get(item_id or "") == "commentary":
+                    emitted.append((AgentEventType.REASONING_DELTA, {"text": delta}))
+                else:
+                    emitted.append((AgentEventType.TEXT_DELTA, {"text":delta}))
+            elif method=="item/reasoning/summaryTextDelta":
+                if item_id: summarized_items.add(item_id)
+                emitted.append((AgentEventType.REASONING_DELTA, {"text":getattr(payload,"delta","")}))
+            elif method=="item/reasoning/textDelta":
+                # 摘要优先；只提供原始思考的服务用原始文本兜底
+                if item_id is None or item_id not in summarized_items:
+                    emitted.append((AgentEventType.REASONING_DELTA, {"text":getattr(payload,"delta","")}))
+            elif method in {"item/commandExecution/outputDelta", "item/fileChange/outputDelta"}:
+                # 命令输出可能远超单帧上限，超长片段必须截断后再进入主进程
+                emitted.append((AgentEventType.COMMAND_OUTPUT_DELTA, {"text":bounded_text(getattr(payload,"delta",""), MAX_OUTPUT_DELTA_CHARS)}))
+            elif method in {"item/started", "item/completed"}:
+                item = getattr(payload, "item", None)
+                node = getattr(item, "root", item)
+                item_id = item_identifier(getattr(node, "id", None))
+                if item_id and str(getattr(node, "type", "")) == "agentMessage":
+                    message_phases[item_id] = enum_text(getattr(node, "phase", "")) or "final_answer"
+                emitted.extend(codex_item_events(item, started=method=="item/started"))
+            elif method=="turn/completed":
+                emitted.append((AgentEventType.TURN_COMPLETED, {"status":turn_status(getattr(getattr(payload,"turn",None),"status","completed"))}))
+            for kind, body in emitted:
+                yield AgentEvent(request.session_id,request.turn_id,seq,kind,body,thread_id,codex_turn_id,item_id); seq+=1
             if method=="turn/completed" or request.turn_id in self._cancelled: break
     async def cancel(self, turn_id: str) -> None:
         self._cancelled.add(turn_id)

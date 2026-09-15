@@ -1,13 +1,13 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 
 from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
-from ui.viewmodels.chat import ChatViewModel
+from ui.viewmodels.chat import MAX_ACTIVITY_OUTPUT_CHARS, ChatViewModel
 from ui.viewmodels.dialogs import DialogCoordinator
 
 
@@ -64,7 +64,7 @@ class FakeRuntime:
         self.submitted.append((text, tuple(attachments)))
         return completed("turn")
 
-    def cancel_active_turn(self):
+    def cancel_active_turn(self, session_id: str = ""):
         self.cancelled += 1
         return completed()
 
@@ -286,6 +286,156 @@ def test_new_session_clears_messages_after_runtime_accepts():
     assert runtime.created == 1
     assert chat.message_model.rowCount() == 0
     assert chat.active_session_id == "new-session"
+
+
+def test_message_time_labels_use_today_yesterday_and_dates():
+    from ui.viewmodels.chat import _time_label
+
+    today = datetime.now(UTC).astimezone().date()
+    assert _time_label(f"{today.isoformat()} 09:05") == "今天 09:05"
+    yesterday = today - timedelta(days=1)
+    assert _time_label(f"{yesterday.isoformat()} 23:40") == "昨天 23:40"
+    older = today - timedelta(days=40)
+    assert _time_label(f"{older.isoformat()} 08:00") == f"{older:%m-%d} 08:00"
+    assert _time_label("2019-01-02 03:04") == "2019-01-02 03:04"
+    assert _time_label("") == ""
+
+
+def test_every_message_keeps_its_own_time_label():
+    chat = ChatViewModel(FakeRuntime())
+    chat.submit("问题")
+    chat.start_agent_activity("item-1", "thinking", "正在思考")
+    chat.append_assistant_delta("最终回复", "msg-1")
+
+    items = chat.message_model._items
+    assert [item["role"] for item in items] == ["user", "activity", "assistant"]
+    # 回复接管占位气泡后仍然带着自己的时间，过程条目也保留时间字段
+    assert all(item["createdLabel"].startswith("今天 ") for item in items)
+    assert items[0]["createdLabel"] == items[2]["createdLabel"]
+
+
+def test_session_list_reports_last_message_time():
+    chat = ChatViewModel(FakeRuntime())
+
+    chat.refresh_sessions()
+
+    index = chat.session_model.index(0)
+    assert chat.session_model.data(index, Qt.UserRole + 8).startswith("今天 ")
+
+
+def test_restored_history_keeps_message_times():
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+
+    chat.activate_session("s1")
+
+    stamp = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M")
+    restored = [item for item in chat.message_model._items if item["role"] == "assistant"]
+    assert [item["createdAt"] for item in restored] == [stamp]
+    assert restored[0]["createdLabel"] == f"今天 {stamp[11:]}"
+
+
+def test_agent_activities_are_separate_rows_with_live_output():
+    chat = ChatViewModel(FakeRuntime())
+
+    chat.start_agent_activity("item-1", "command", "go vet ./...")
+    chat.append_agent_activity("item-1", "vet exit=0\n")
+    chat.start_agent_activity("item-2", "tool", "voicepet/list_windows")
+    chat.finish_agent_activity("item-2", "failed")
+    chat.finish_agent_activity("item-1", "completed")
+
+    model = chat.message_model
+    assert model.rowCount() == 2
+    assert model.data(model.index(0), Qt.UserRole + 1) == "activity:item-1"
+    assert model.data(model.index(0), Qt.UserRole + 2) == "activity"
+    assert model.data(model.index(0), Qt.UserRole + 8) == "command"
+    assert model.data(model.index(0), Qt.UserRole + 9) == "go vet ./..."
+    assert model.data(model.index(0), Qt.UserRole + 10) == "vet exit=0\n"
+    assert model.data(model.index(0), Qt.UserRole + 4) == "complete"
+    assert model.data(model.index(1), Qt.UserRole + 9) == "voicepet/list_windows"
+    assert model.data(model.index(1), Qt.UserRole + 4) == "failed"
+    assert chat.processing is True
+
+
+def test_agent_activity_output_keeps_tail_and_creates_missing_row():
+    chat = ChatViewModel(FakeRuntime())
+
+    chat.append_agent_activity("item-1", "先出现的输出")
+    chat.append_agent_activity("item-1", "x" * (MAX_ACTIVITY_OUTPUT_CHARS + 200))
+
+    item = chat.message_model._items[0]
+    assert item["activityKind"] == "command"
+    assert item["status"] == "running"
+    assert len(item["activityOutput"]) == MAX_ACTIVITY_OUTPUT_CHARS
+    assert item["activityOutput"].startswith("x")
+
+
+def test_finishing_turn_stops_activities_still_running():
+    chat = ChatViewModel(FakeRuntime())
+    chat.submit("问题")
+    chat.start_agent_activity("item-1", "command", "ping")
+
+    chat.finish_assistant()
+
+    activity = next(
+        item for item in chat.message_model._items if item["role"] == "activity"
+    )
+    assert activity["status"] == "stopped"
+
+
+def test_finished_activity_keeps_its_status_when_turn_finishes():
+    chat = ChatViewModel(FakeRuntime())
+    chat.submit("问题")
+    chat.start_agent_activity("item-1", "command", "ping")
+    chat.finish_agent_activity("item-1", "completed")
+
+    chat.finish_assistant()
+
+    activity = next(
+        item for item in chat.message_model._items if item["role"] == "activity"
+    )
+    assert activity["status"] == "complete"
+
+
+def test_reply_bubble_moves_below_activity_entries():
+    chat = ChatViewModel(FakeRuntime())
+    chat.submit("问题")
+    # 执行过程先于最终回复到达，回复接管占位气泡后必须排在过程条目后面
+    chat.start_agent_activity("item-1", "command", "go vet ./...")
+    chat.append_assistant_delta("这是最终回复", "msg-1")
+
+    items = chat.message_model._items
+    assert [item["role"] for item in items] == ["user", "activity", "assistant"]
+    assert items[-1]["messageId"] == "agent:msg-1"
+    assert items[-1]["markdown"] == "这是最终回复"
+
+
+def test_thinking_activity_streams_process_text():
+    chat = ChatViewModel(FakeRuntime())
+    chat.start_agent_activity("item-1", "thinking", "正在思考")
+    chat.append_agent_activity("item-1", "先看目录结构\n")
+
+    item = chat.message_model._items[0]
+    assert item["activityKind"] == "thinking"
+    assert item["activityTitle"] == "正在思考"
+    assert item["activityOutput"] == "先看目录结构\n"
+
+
+def test_each_agent_message_item_becomes_its_own_bubble():
+    chat = ChatViewModel(FakeRuntime())
+    chat.submit("问题")
+
+    chat.append_assistant_delta("先看代码", "message-1")
+    chat.append_assistant_delta("，再改配置", "message-1")
+    chat.append_assistant_delta("改完了", "message-2")
+    chat.finish_assistant()
+
+    model = chat.message_model
+    assert model.rowCount() == 3
+    assert model.data(model.index(1), Qt.UserRole + 3) == "先看代码，再改配置"
+    assert model.data(model.index(1), Qt.UserRole + 4) == "complete"
+    assert model.data(model.index(2), Qt.UserRole + 3) == "改完了"
+    assert model.data(model.index(2), Qt.UserRole + 4) == "complete"
 
 
 def test_tool_result_is_rendered_as_safe_structured_message():

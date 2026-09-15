@@ -15,6 +15,9 @@ from core.config import ConfigError, ConfigStore, default_config_path
 from core.credentials import CredentialError, DpapiCredentialStore
 from core.event_bus import EventBus
 from core.events import (
+    AgentActivityCompleted,
+    AgentActivityOutput,
+    AgentActivityStarted,
     AgentApprovalRequested,
     AgentProgress,
     ApprovalRequested,
@@ -56,6 +59,9 @@ from .viewmodels import (
 from .window_coordinator import WindowCoordinator
 
 _RUNTIME_EVENT_TYPES = (
+    AgentActivityStarted,
+    AgentActivityOutput,
+    AgentActivityCompleted,
     AgentApprovalRequested,
     AgentProgress,
     StateChanged,

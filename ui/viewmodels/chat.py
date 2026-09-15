@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from concurrent.futures import Future
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -31,6 +32,13 @@ from ui.markdown import sanitize_markdown
 from .dialogs import ConfirmationRequest, DialogCoordinator
 
 _INVALID_INDEX = QModelIndex()
+MAX_ACTIVITY_OUTPUT_CHARS = 4_000
+
+
+def _activity_message_id(activity_id: str, session_id: str = "") -> str:
+    """执行条目的消息标识与 Codex 条目号一一对应"""
+
+    return f"activity:{session_id}:{activity_id}" if session_id else f"activity:{activity_id}"
 
 
 class ChatRuntimeProtocol(Protocol):
@@ -38,7 +46,7 @@ class ChatRuntimeProtocol(Protocol):
         self, text: str, attachments: tuple[LlmAttachment, ...] = ()
     ) -> Future[Any]: ...
 
-    def cancel_active_turn(self) -> Future[None]: ...
+    def cancel_active_turn(self, session_id: str = "") -> Future[None]: ...
 
     def list_sessions(self) -> Future[tuple[Any, ...]]: ...
 
@@ -101,6 +109,60 @@ class _RoleListModel(QAbstractListModel):
         index = self.index(row)
         self.dataChanged.emit(index, index, list(self._roles))
 
+    def row_of(self, message_id: str) -> int | None:
+        """按消息标识定位条目，流式增量据此并入同一条"""
+
+        if not message_id:
+            return None
+        for row, item in enumerate(self._items):
+            if item.get("messageId") == message_id:
+                return row
+        return None
+
+    def update_item(self, message_id: str, changes: dict[str, object]) -> bool:
+        row = self.row_of(message_id)
+        if row is None:
+            return False
+        self._items[row].update(changes)
+        index = self.index(row)
+        self.dataChanged.emit(index, index, list(self._roles))
+        return True
+
+    def update_row(self, row: int, changes: dict[str, object]) -> None:
+        """会话列表按行更新运行状态，不依赖消息标识"""
+
+        if not 0 <= row < len(self._items):
+            return
+        self._items[row].update(changes)
+        index = self.index(row)
+        self.dataChanged.emit(index, index, list(self._roles))
+
+    def move_to_end(self, message_id: str) -> None:
+        """占位气泡被真实回复接管时移到末尾，执行过程条目仍留在回复之前"""
+
+        row = self.row_of(message_id)
+        if row is None or row == len(self._items) - 1:
+            return
+        self.beginMoveRows(QModelIndex(), row, row, QModelIndex(), len(self._items))
+        self._items.append(self._items.pop(row))
+        self.endMoveRows()
+
+    def item_at(self, row: int) -> dict[str, object] | None:
+        """按行读取条目，用于判断条目当前状态"""
+
+        if not 0 <= row < len(self._items):
+            return None
+        return self._items[row]
+
+    def finish_streaming(self, status: str = "complete") -> None:
+        """一轮结束时统一收尾仍在流式的条目，多条目流式不能只看最后一条"""
+
+        for row, item in enumerate(self._items):
+            if item.get("status") == "streaming":
+                item["status"] = status
+                index = self.index(row)
+                self.dataChanged.emit(index, index, list(self._roles))
+
     @property
     def last(self) -> dict[str, object] | None:
         return self._items[-1] if self._items else None
@@ -111,7 +173,20 @@ class ChatMessageModel(_RoleListModel):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(
-            ("messageId", "role", "markdown", "status", "createdAt", "attachments"), parent
+            (
+                "messageId",
+                "role",
+                "markdown",
+                "status",
+                "createdAt",
+                "attachments",
+                "activityId",
+                "activityKind",
+                "activityTitle",
+                "activityOutput",
+                "createdLabel",
+            ),
+            parent,
         )
 
 
@@ -120,9 +195,26 @@ class SessionListModel(_RoleListModel):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(
-            ("sessionId", "title", "turnCount", "updatedAt", "active", "group"),
+            (
+                "sessionId",
+                "title",
+                "turnCount",
+                "updatedAt",
+                "active",
+                "group",
+                "running",
+                "updatedLabel",
+            ),
             parent,
         )
+
+    def mark_running(self, active: set[str]) -> None:
+        """按会话运行状态刷新各行，用于区分后台仍在执行的会话"""
+
+        for row, item in enumerate(self._items):
+            self.update_row(
+                row, {"running": str(item.get("sessionId", "")) in active}
+            )
 
 
 class ChatMemoryChangeModel(_RoleListModel):
@@ -169,12 +261,15 @@ class ChatViewModel(QObject):
         self._session_model = SessionListModel(self)
         self._memory_changes_model = ChatMemoryChangeModel(self)
         self._viewed_memory_changes: set[tuple[str, str]] = set()
-        self._processing = False
+        # 会话可以并行运行，处理状态和消息条目都必须按会话隔离
+        self._session_items: dict[str, list[dict[str, object]]] = {}
+        self._processing: set[str] = set()
         self._active_session_id = ""
         self._session_loading = False
         self._pending_session_id = ""
         self._pending_switch_id = ""
         self._memory_query_session = ""
+        self._memory_session_id = ""
         self._memory_query_epoch = 0
         self._memory_action_busy = False
         self._memory_undo_session = ""
@@ -183,6 +278,11 @@ class ChatViewModel(QObject):
         self._message_playing = False
         self._agent_mode = "auto_edit"
         self._agent_mode_pending = False
+        self._assistant_buffers: dict[tuple[str, str], str] = {}
+        self._pending_assistant_id: dict[str, str] = {}
+        self._activity_kinds: dict[tuple[str, str], str] = {}
+        self._activity_titles: dict[tuple[str, str], str] = {}
+        self._activity_outputs: dict[tuple[str, str], str] = {}
         self._futureFinished.connect(self._handle_future)
 
     @Property(QObject, constant=True)
@@ -225,7 +325,7 @@ class ChatViewModel(QObject):
             change_id = self._memory_changes_model.data(
                 self._memory_changes_model.index(row), Qt.UserRole + 1
             )
-            self._viewed_memory_changes.add((self._active_session_id, str(change_id)))
+            self._viewed_memory_changes.add((self._memory_session(), str(change_id)))
             change_ids.append(str(change_id))
         self._memory_changes_model.reset_items([])
         self._memory_action_result = ""
@@ -285,7 +385,7 @@ class ChatViewModel(QObject):
                 self.errorOccurred.emit("Agent 模式切换失败")
                 return
         self._agent_mode = mode
-        self._agent_mode_pending = self._processing
+        self._agent_mode_pending = self.processing
         self.agentModeChanged.emit()
 
     @Slot()
@@ -317,8 +417,8 @@ class ChatViewModel(QObject):
 
     @Slot()
     def start_voice_input(self) -> None:
-        if self._voice_recording or self._processing or self._session_loading:
-            if self._processing or self._session_loading:
+        if self._voice_recording or self.processing or self._session_loading:
+            if self.processing or self._session_loading:
                 self.errorOccurred.emit("当前回复完成后才能录音")
             return
         starter = getattr(self._runtime, "capture_manual_transcript", None)
@@ -451,7 +551,15 @@ class ChatViewModel(QObject):
 
     @Property(bool, notify=processingChanged)
     def processing(self) -> bool:
-        return self._processing
+        """当前显示的会话是否正在回复"""
+
+        return self._active_session_id in self._processing
+
+    @Property(bool, notify=processingChanged)
+    def anyProcessing(self) -> bool:
+        """任意会话仍在运行，删除会话一类全局操作据此判定"""
+
+        return bool(self._processing)
 
     @Property(str, notify=activeSessionIdChanged)
     def active_session_id(self) -> str:
@@ -471,7 +579,7 @@ class ChatViewModel(QObject):
 
     @Slot(str, "QVariant")
     def submit(self, text: str, attachments: object = ()) -> None:
-        if self._session_loading or self._processing:
+        if self._session_loading or self.processing:
             self.errorOccurred.emit("请等待当前会话加载或回复完成")
             return
         normalized = text.strip() if isinstance(text, str) else ""
@@ -509,70 +617,102 @@ class ChatViewModel(QObject):
             return
         if not normalized and not normalized_attachments:
             return
+        session_id = self._active_session_id
         self._append_message(
+            session_id,
             "user",
             normalized or "已附加文件",
             "complete",
             attachments=_attachment_view_items(normalized_attachments),
         )
-        self._append_message("assistant", "", "streaming")
+        self._pending_assistant_id[session_id] = self._append_message(
+            session_id, "assistant", "", "streaming"
+        )
         self.scrollToLatestRequested.emit()
-        self._set_processing(True)
+        self._set_processing(session_id, True)
         try:
             try:
                 future = self._runtime.submit_text(normalized, normalized_attachments)
             except TypeError:
                 future = self._runtime.submit_text(normalized)
-            self._watch("submit", future)
+            # 发送归属发起时所在的会话，切走以后失败仍落到同一条消息上
+            self._watch(f"submit:{session_id}", future)
         except (RuntimeError, ValueError, TypeError):
-            self._message_model.update_last({"status": "error"})
-            self._set_processing(False)
+            self._update_last(session_id, {"status": "error"})
+            self._set_processing(session_id, False)
             self.errorOccurred.emit("消息发送失败，请稍后重试")
 
-    @Slot()
-    def begin_turn(self) -> None:
+    @Slot(str)
+    def begin_turn(self, session_id: str = "") -> None:
         # 语音等待首段回复时也属于处理中，禁止把旧轮回复切入其他会话
-        self._set_processing(True)
+        self._set_processing(session_id, True)
 
     @Slot()
     def stop_generation(self) -> None:
-        if not self._processing:
+        session_id = self._active_session_id
+        if session_id not in self._processing:
             return
         try:
-            self._watch("cancel", self._runtime.cancel_active_turn())
+            self._watch("cancel", self._runtime.cancel_active_turn(session_id))
         except RuntimeError:
             self.errorOccurred.emit("当前操作无法停止")
-        self._message_model.update_last({"status": "stopped"})
-        self._set_processing(False)
+        self._finish_streaming(session_id, "stopped")
+        self._finish_activities(session_id, "stopped")
+        self._set_processing(session_id, False)
 
-    @Slot(str)
-    def append_user_message(self, text: str) -> None:
+    @Slot(str, str)
+    def append_user_message(self, text: str, session_id: str = "") -> None:
         if isinstance(text, str) and text.strip():
-            self._append_message("user", text.strip(), "complete")
+            self._append_message(session_id, "user", text.strip(), "complete")
             self.scrollToLatestRequested.emit()
 
-    @Slot(str)
-    def append_assistant_delta(self, text: str) -> None:
+    @Slot(str, str, str)
+    def append_assistant_delta(self, text: str, item_id: str = "", session_id: str = "") -> None:
+        """每个 Codex 消息条目单独成条，没有条目号的旧链路沿用最后一条流式回复"""
+
         if not isinstance(text, str) or not text:
             return
-        last = self._message_model.last
-        if (
-            last is None
-            or last.get("role") != "assistant"
-            or last.get("status") != "streaming"
-        ):
-            self._append_message("assistant", text, "streaming")
-        else:
-            combined = str(last.get("markdown", "")) + text
-            self._message_model.update_last({"markdown": sanitize_markdown(combined)})
-        self._set_processing(True)
+        message_id = f"agent:{item_id}" if item_id else ""
+        if not message_id:
+            last = self._last_item(session_id)
+            if (
+                last is None
+                or last.get("role") != "assistant"
+                or last.get("status") != "streaming"
+            ):
+                self._append_message(session_id, "assistant", text, "streaming")
+            else:
+                combined = str(last.get("markdown", "")) + text
+                self._update_last(session_id, {"markdown": sanitize_markdown(combined)})
+            self._set_processing(session_id, True)
+            return
+        key = (session_id, message_id)
+        buffered = self._assistant_buffers.get(key, "") + text
+        self._assistant_buffers[key] = buffered
+        markdown = sanitize_markdown(buffered)
+        if not self._update_item(session_id, message_id, {"markdown": markdown}):
+            # 首段真实回复接管发送时插入的占位气泡，避免留下空条目
+            pending = self._pending_assistant_id.get(session_id, "")
+            if pending and self._update_item(
+                session_id, pending, {"messageId": message_id, "markdown": markdown}
+            ):
+                # 回复接管占位气泡时移到末尾，执行过程条目留在回复之前
+                self._move_to_end(session_id, message_id)
+            else:
+                self._append_message(
+                    session_id, "assistant", buffered, "streaming", message_id=message_id
+                )
+            self._pending_assistant_id.pop(session_id, None)
+        self._set_processing(session_id, True)
 
-    @Slot()
-    def finish_assistant(self) -> None:
-        last = self._message_model.last
-        if last is not None and last.get("role") == "assistant":
-            self._message_model.update_last({"status": "complete"})
-        self._set_processing(False)
+    @Slot(str)
+    def finish_assistant(self, session_id: str = "") -> None:
+        self._finish_streaming(session_id, "complete")
+        self._finish_activities(session_id, "stopped")
+        for key in [key for key in self._assistant_buffers if key[0] == session_id]:
+            del self._assistant_buffers[key]
+        self._pending_assistant_id.pop(session_id, None)
+        self._set_processing(session_id, False)
         self.refresh_sessions()
 
     @Slot(str, str, "QVariantMap")
@@ -621,6 +761,114 @@ class ChatViewModel(QObject):
             )
         )
 
+    @Slot(str, str, str, str)
+    def start_agent_activity(
+        self, activity_id: str, kind: str, title: str, session_id: str = ""
+    ) -> None:
+        """每个工具调用在聊天记录里单独成条，后续输出按标识原地更新"""
+
+        if not isinstance(activity_id, str) or not activity_id:
+            return
+        message_id = _activity_message_id(activity_id, session_id)
+        if self._row_of(session_id, message_id) is not None:
+            return
+        key = (session_id, activity_id)
+        normalized_kind = (
+            kind
+            if isinstance(kind, str) and kind in {"command", "file", "tool", "thinking"}
+            else "tool"
+        )
+        self._activity_kinds[key] = normalized_kind
+        default_title = (
+            "正在思考" if normalized_kind == "thinking" else "Agent 正在执行操作"
+        )
+        self._activity_titles[key] = (
+            title.strip()[:400] if isinstance(title, str) and title.strip() else default_title
+        )
+        self._activity_outputs.setdefault(key, "")
+        self._append_message(
+            session_id,
+            "activity",
+            "",
+            "running",
+            message_id=message_id,
+            activity=self._activity_fields(session_id, activity_id),
+        )
+        self._set_processing(session_id, True)
+
+    @Slot(str, str, str)
+    def append_agent_activity(
+        self, activity_id: str, text: str, session_id: str = ""
+    ) -> None:
+        """执行输出按尾部保留，超长命令不会把整条消息撑爆"""
+
+        if not isinstance(activity_id, str) or not activity_id or not isinstance(text, str) or not text:
+            return
+        key = (session_id, activity_id)
+        if key not in self._activity_outputs:
+            self.start_agent_activity(activity_id, "command", "正在执行命令", session_id)
+        buffered = (self._activity_outputs.get(key, "") + text)[-MAX_ACTIVITY_OUTPUT_CHARS:]
+        self._activity_outputs[key] = buffered
+        if not self._update_item(
+            session_id,
+            _activity_message_id(activity_id, session_id),
+            {"activityOutput": buffered},
+        ):
+            return
+        self._set_processing(session_id, True)
+
+    @Slot(str, str, str)
+    def finish_agent_activity(
+        self, activity_id: str, status: str, session_id: str = ""
+    ) -> None:
+        if not isinstance(activity_id, str) or not activity_id:
+            return
+        final = {"completed": "complete", "failed": "failed", "stopped": "stopped"}.get(
+            status if isinstance(status, str) else "", "complete"
+        )
+        self._update_item(
+            session_id,
+            _activity_message_id(activity_id, session_id),
+            {"status": final},
+        )
+
+    def _finish_activities(self, session_id: str, status: str) -> None:
+        """轮次结束或中断时收尾仍在执行中的条目，已有终态的条目保持原状"""
+
+        for key in tuple(self._activity_outputs):
+            if key[0] == session_id and self._activity_status(session_id, key[1]) == "running":
+                self.finish_agent_activity(key[1], status, session_id)
+        for store in (
+            self._activity_kinds,
+            self._activity_titles,
+            self._activity_outputs,
+        ):
+            for key in [key for key in store if key[0] == session_id]:
+                del store[key]
+
+    def _activity_status(self, session_id: str, activity_id: str) -> str:
+        """读取执行条目的当前状态，避免结束轮次时改写已有终态"""
+
+        message_id = _activity_message_id(activity_id, session_id)
+        model = self._model_for(session_id)
+        if model is not None:
+            row = model.row_of(message_id)
+            item = model.item_at(row) if row is not None else None
+            return str(item.get("status", "")) if item is not None else ""
+        for item in self._items(session_id):
+            if item.get("messageId") == message_id:
+                return str(item.get("status", ""))
+        return ""
+
+    def _activity_fields(self, session_id: str, activity_id: str) -> dict[str, object]:
+        key = (session_id, activity_id)
+        return {
+            "activityId": activity_id,
+            "activityKind": self._activity_kinds.get(key, "tool"),
+            "activityTitle": self._activity_titles.get(key, ""),
+            "activityOutput": self._activity_outputs.get(key, ""),
+        }
+
     @Slot()
     def refresh_sessions(self) -> None:
         try:
@@ -639,9 +887,10 @@ class ChatViewModel(QObject):
 
     @Slot(str)
     def set_active_session_for_memory(self, session_id: str) -> None:
-        """同步当前会话并从持久存储恢复独立变更记录"""
+        """记忆页只切换它自己的会话范围，不改变聊天正在显示的会话"""
 
-        self._active_session_id = session_id
+        self._memory_session_id = session_id
+        self.activeSessionIdChanged.emit()
         self._memory_query_epoch += 1
         self._memory_action_result = ""
         self.memoryActionResultChanged.emit()
@@ -649,9 +898,20 @@ class ChatViewModel(QObject):
         self.memoryChangesChanged.emit()
         self.refresh_memory_changes()
 
+    def _memory_session(self) -> str:
+        """记忆变更查询默认跟随当前聊天会话"""
+
+        return self._memory_session_id or self._active_session_id
+
+    @Property(str, notify=activeSessionIdChanged)
+    def memorySessionId(self) -> str:
+        """记忆页当前作用的会话，后台记忆事件据此判断是否刷新提示"""
+
+        return self._memory_session()
+
     @Slot()
     def refresh_memory_changes(self) -> None:
-        session_id = self._active_session_id
+        session_id = self._memory_session()
         if not session_id:
             self._memory_changes_model.reset_items([])
             self.memoryChangesChanged.emit()
@@ -674,7 +934,7 @@ class ChatViewModel(QObject):
         if not change_id:
             return
         try:
-            self._memory_undo_session = self._active_session_id
+            self._memory_undo_session = self._memory_session()
             self._memory_action_busy = True
             self._memory_action_result = ""
             self.memoryActionResultChanged.emit()
@@ -689,8 +949,8 @@ class ChatViewModel(QObject):
     def activate_session(self, session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id:
             return
-        if self._processing or self._session_loading:
-            self.errorOccurred.emit("当前回复完成后才能切换会话")
+        # 其它会话可以在后台继续运行，切换本身不再被回复阻塞
+        if self._session_loading:
             return
         self._set_session_loading(True)
         self._pending_switch_id = session_id
@@ -702,8 +962,7 @@ class ChatViewModel(QObject):
 
     @Slot()
     def new_session(self) -> None:
-        if self._processing or self._session_loading:
-            self.errorOccurred.emit("当前回复完成后才能新建会话")
+        if self._session_loading:
             return
         self._set_session_loading(True)
         try:
@@ -721,8 +980,9 @@ class ChatViewModel(QObject):
         self._confirm_session_removal(None)
 
     def _confirm_session_removal(self, session_id: str | None) -> None:
-        if self._processing or self._session_loading:
-            self.errorOccurred.emit("当前回复完成后才能删除会话")
+        # 删除会关闭 Agent 线程持有者，必须等所有会话的轮次都结束
+        if self.anyProcessing or self._session_loading:
+            self.errorOccurred.emit("会话运行结束后才能删除会话")
             return
         if self._dialogs is None or session_id == "":
             self.errorOccurred.emit("会话删除当前不可用")
@@ -730,8 +990,8 @@ class ChatViewModel(QObject):
 
         def remove() -> None:
             # 确认等待期间可能开始新的回复，执行前再次检查
-            if self._processing or self._session_loading:
-                self.errorOccurred.emit("当前回复完成后才能删除会话")
+            if self.anyProcessing or self._session_loading:
+                self.errorOccurred.emit("会话运行结束后才能删除会话")
                 return
             try:
                 future = (
@@ -784,9 +1044,10 @@ class ChatViewModel(QObject):
                 self._set_session_loading(False)
                 if operation == "turns":
                     self._pending_switch_id = ""
-            if operation == "submit":
-                self._message_model.update_last({"status": "error"})
-                self._set_processing(False)
+            if operation.startswith("submit:"):
+                session_id = operation.split(":", 1)[1]
+                self._update_last(session_id, {"status": "error"})
+                self._set_processing(session_id, False)
             if operation == "voice_input":
                 self._voice_recording = False
                 self.voiceRecordingChanged.emit()
@@ -813,8 +1074,9 @@ class ChatViewModel(QObject):
                     ),
                 )
             self._session_model.reset_items(items)
+            self._sync_session_running()
             self.sessionsChanged.emit()
-        elif operation == "submit":
+        elif operation.startswith("submit:"):
             # 后台归档完成后刷新侧栏，让新会话立即可见
             self.submissionAccepted.emit()
             self.refresh_sessions()
@@ -835,12 +1097,11 @@ class ChatViewModel(QObject):
             if self._dialogs is not None:
                 self._dialogs.toast("会话历史已更新", "success")
         elif operation == "turns":
-            self._load_turns(tuple(result or ()))
-            if self._pending_switch_id:
-                self._active_session_id = self._pending_switch_id
-                self.activeSessionIdChanged.emit()
-                self.refresh_memory_changes()
-                self._pending_switch_id = ""
+            target = self._pending_switch_id or self._active_session_id
+            self._load_turns(tuple(result or ()), target)
+            self._show_session(target)
+            self._pending_switch_id = ""
+            self.refresh_memory_changes()
             self._set_session_loading(False)
             self.refresh_sessions()
         elif operation.startswith("agent_mode_load:"):
@@ -848,7 +1109,7 @@ class ChatViewModel(QObject):
             if session_id != self._active_session_id or result not in {"suggest", "auto_edit", "full_auto"}:
                 return
             self._agent_mode = str(result)
-            self._agent_mode_pending = self._processing
+            self._agent_mode_pending = self.processing
             self.agentModeChanged.emit()
         elif operation in {"agent_mode_global", "agent_mode_default"}:
             if operation == "agent_mode_default":
@@ -858,7 +1119,7 @@ class ChatViewModel(QObject):
                 return
             if result in {"suggest", "auto_edit", "full_auto"}:
                 self._agent_mode = str(result)
-                self._agent_mode_pending = self._processing
+                self._agent_mode_pending = self.processing
                 self.agentModeChanged.emit()
         elif operation == "current":
             session_id = str(result or "")
@@ -874,10 +1135,9 @@ class ChatViewModel(QObject):
             else:
                 self._set_session_loading(False)
         elif operation == "new":
-            self._active_session_id = str(result)
-            self._pending_session_id = self._active_session_id
-            self.activeSessionIdChanged.emit()
-            self._message_model.reset_items([])
+            self._pending_session_id = str(result)
+            self._session_items[self._pending_session_id] = []
+            self._show_session(self._pending_session_id)
             self.refresh_memory_changes()
             self._set_session_loading(False)
             self.refresh_sessions()
@@ -886,7 +1146,7 @@ class ChatViewModel(QObject):
             session_id = parts[1]
             epoch = int(parts[2])
             if (
-                session_id != self._active_session_id
+                session_id != self._memory_session()
                 or epoch != self._memory_query_epoch
             ):
                 return
@@ -909,7 +1169,7 @@ class ChatViewModel(QObject):
             self.memoryChangesChanged.emit()
         elif operation == "memory-undo":
             self._memory_action_busy = False
-            if self._memory_undo_session != self._active_session_id:
+            if self._memory_undo_session != self._memory_session():
                 self.memoryActionResultChanged.emit()
                 return
             self._memory_action_result = (
@@ -918,7 +1178,11 @@ class ChatViewModel(QObject):
             self.memoryActionResultChanged.emit()
             self.refresh_memory_changes()
 
-    def _load_turns(self, turns: tuple[object, ...]) -> None:
+    def _load_turns(self, turns: tuple[object, ...], session_id: str) -> None:
+        """只在会话还没有内存条目时用归档重建，避免覆盖正在运行的内容"""
+
+        if session_id and session_id in self._session_items:
+            return
         items: list[dict[str, object]] = []
         for turn in turns:
             created_at = _iso(_read(turn, "created_at", datetime.now(UTC)))
@@ -943,35 +1207,131 @@ class ChatViewModel(QObject):
                     ),
                 )
             )
-        self._message_model.reset_items(items)
+        self._session_items[session_id] = items
+
+    def _show_session(self, session_id: str) -> None:
+        """把模型切换到目标会话的条目列表，其它会话继续在后台累积"""
+
+        self._active_session_id = session_id
+        self._memory_session_id = ""
+        self._message_model.reset_items(self._items(session_id))
+        self.activeSessionIdChanged.emit()
+        self.processingChanged.emit()
+        self._sync_session_running()
+
+    def _items(self, session_id: str) -> list[dict[str, object]]:
+        return self._session_items.setdefault(session_id, [])
+
+    def _model_for(self, session_id: str) -> ChatMessageModel | None:
+        """只有当前显示的会话需要驱动 QML 模型"""
+
+        return self._message_model if session_id == self._active_session_id else None
+
+    def _row_of(self, session_id: str, message_id: str) -> int | None:
+        model = self._model_for(session_id)
+        if model is not None:
+            return model.row_of(message_id)
+        for row, item in enumerate(self._items(session_id)):
+            if item.get("messageId") == message_id:
+                return row
+        return None
+
+    def _update_item(
+        self, session_id: str, message_id: str, changes: dict[str, object]
+    ) -> bool:
+        model = self._model_for(session_id)
+        if model is not None:
+            return model.update_item(message_id, changes)
+        row = self._row_of(session_id, message_id)
+        if row is None:
+            return False
+        self._items(session_id)[row].update(changes)
+        return True
+
+    def _update_last(self, session_id: str, changes: dict[str, object]) -> None:
+        model = self._model_for(session_id)
+        if model is not None:
+            model.update_last(changes)
+            return
+        items = self._items(session_id)
+        if items:
+            items[-1].update(changes)
+
+    def _move_to_end(self, session_id: str, message_id: str) -> None:
+        """真实回复接管占位气泡后移到末尾，执行过程条目留在回复之前"""
+
+        model = self._model_for(session_id)
+        if model is not None:
+            model.move_to_end(message_id)
+            return
+        items = self._items(session_id)
+        row = self._row_of(session_id, message_id)
+        if row is not None and row != len(items) - 1:
+            items.append(items.pop(row))
+
+    def _last_item(self, session_id: str) -> dict[str, object] | None:
+        model = self._model_for(session_id)
+        if model is not None:
+            return model.last
+        items = self._items(session_id)
+        return items[-1] if items else None
+
+    def _finish_streaming(self, session_id: str, status: str) -> None:
+        model = self._model_for(session_id)
+        if model is not None:
+            model.finish_streaming(status)
+            return
+        for item in self._items(session_id):
+            if item.get("status") == "streaming":
+                item["status"] = status
 
     def _append_message(
         self,
+        session_id: str,
         role: str,
         text: str,
         status: str,
         *,
         attachments: list[dict[str, object]] | None = None,
-    ) -> None:
-        self._message_model.append_item(
-            _message_item(
-                str(uuid4()),
-                role,
-                text,
-                status,
-                _iso(datetime.now(UTC)),
-                attachments=attachments,
-            )
+        message_id: str | None = None,
+        activity: dict[str, object] | None = None,
+    ) -> str:
+        resolved = message_id or str(uuid4())
+        item = _message_item(
+            resolved,
+            role,
+            text,
+            status,
+            _iso(datetime.now(UTC)),
+            attachments=attachments,
         )
+        if activity:
+            item.update(activity)
+        model = self._model_for(session_id)
+        if model is not None:
+            model.append_item(item)
+        else:
+            self._items(session_id).append(item)
+        return resolved
 
-    def _set_processing(self, processing: bool) -> None:
-        if processing == self._processing:
+    def _set_processing(self, session_id: str, processing: bool) -> None:
+        active = session_id in self._processing
+        if processing == active:
             return
-        self._processing = processing
-        if not processing and self._agent_mode_pending:
+        if processing:
+            self._processing.add(session_id)
+        else:
+            self._processing.discard(session_id)
+        if not processing and not self._processing and self._agent_mode_pending:
             self._agent_mode_pending = False
             self.agentModeChanged.emit()
         self.processingChanged.emit()
+        self._sync_session_running()
+
+    def _sync_session_running(self) -> None:
+        """会话列表用运行标记区分后台仍在执行的会话"""
+
+        self._session_model.mark_running(self._processing)
 
     def _set_session_loading(self, loading: bool) -> None:
         if loading == self._session_loading:
@@ -995,7 +1355,12 @@ def _message_item(
         "markdown": sanitize_markdown(str(markdown)),
         "status": status,
         "createdAt": created_at,
+        "createdLabel": _time_label(created_at),
         "attachments": list(attachments or []),
+        "activityId": "",
+        "activityKind": "",
+        "activityTitle": "",
+        "activityOutput": "",
     }
 
 
@@ -1060,13 +1425,16 @@ def _attachment_items(value: object) -> tuple[object, ...]:
 
 def _session_item(record: object) -> dict[str, object]:
     updated = _read(record, "updated_at", datetime.now(UTC))
+    updated_at = _iso(updated)
     return {
         "sessionId": str(_read(record, "id", "")),
         "title": str(_read(record, "title", "未命名会话"))[:120],
         "turnCount": int(_read(record, "turn_count", 0)),
-        "updatedAt": _iso(updated),
+        "updatedAt": updated_at,
+        "updatedLabel": _time_label(updated_at),
         "active": bool(_read(record, "is_active", False)),
         "group": "最近",
+        "running": False,
     }
 
 
@@ -1082,3 +1450,22 @@ def _iso(value: object) -> str:
         if isinstance(value, datetime)
         else str(value)
     )
+
+
+_MESSAGE_TIME_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$")
+
+
+def _time_label(value: object) -> str:
+    """聊天时间用今天/昨天加时刻展示，跨年才补上年份"""
+
+    text = str(value)
+    match = _MESSAGE_TIME_PATTERN.match(text)
+    if match is None:
+        return text
+    stamp, clock = match.groups()
+    today = datetime.now(UTC).astimezone().date()
+    if stamp == today.isoformat():
+        return f"今天 {clock}"
+    if stamp == (today - timedelta(days=1)).isoformat():
+        return f"昨天 {clock}"
+    return f"{stamp[5:]} {clock}" if stamp[:4] == f"{today.year:04d}" else f"{stamp} {clock}"

@@ -13,6 +13,7 @@ from core.events import (
     TextDelta,
     TurnId,
 )
+from core.runtime_errors import runtime_error_event
 
 
 @pytest.fixture
@@ -60,6 +61,40 @@ def test_new_manual_turn_clears_bubble_before_first_delta(speech_app):
         TurnId.new(), CorrelationId.new(), ConversationPhase.IDLE, ConversationPhase.THINKING,
     ))
     assert pet.property("speech") == ""
+
+
+def test_parallel_session_turn_end_clears_its_running_state(speech_app):
+    controller, _runtime, chat, _pet = speech_app
+    chat.activate_session("session-a")
+    assert chat.activeSessionId == "session-a"
+
+    # 会话 A 先跑起来，随后用户切到会话 B 并提交，A 转为后台继续跑
+    first = TurnId.new()
+    controller.handle_runtime_event(StateChanged(
+        first, CorrelationId.new(), ConversationPhase.IDLE, ConversationPhase.THINKING,
+        "session-a",
+    ))
+    chat.activate_session("session-b")
+    chat.begin_turn("session-b")
+    second = TurnId.new()
+    controller.handle_runtime_event(StateChanged(
+        second, CorrelationId.new(), ConversationPhase.IDLE, ConversationPhase.THINKING,
+        "session-b",
+    ))
+    assert chat.processing is True
+    assert chat.anyProcessing is True
+
+    # 新会话先结束，后台的旧会话随后才结束，两边都要收掉自己的运行中标记
+    controller.handle_runtime_event(StateChanged(
+        second, CorrelationId.new(), ConversationPhase.THINKING, ConversationPhase.IDLE,
+        "session-b",
+    ))
+    controller.handle_runtime_event(StateChanged(
+        first, CorrelationId.new(), ConversationPhase.THINKING, ConversationPhase.IDLE,
+        "session-a",
+    ))
+
+    assert chat.anyProcessing is False
 
 
 @pytest.mark.parametrize("operation", ["switch", "new"])
@@ -166,29 +201,67 @@ def test_delta_from_new_turn_never_appends_previous_turn_text(speech_app):
 
 
 @pytest.mark.parametrize("operation", ["switch", "new"])
-def test_voice_waiting_for_first_delta_keeps_session_locked(speech_app, operation):
+def test_background_voice_turn_finishes_without_touching_the_pet(speech_app, operation):
     controller, runtime, chat, pet = speech_app
     chat.activate_session("voice-session")
+    session_id = chat.activeSessionId
     turn, correlation = TurnId.new(), CorrelationId.new()
     controller.handle_runtime_event(StateChanged(
-        turn, correlation, ConversationPhase.IDLE, ConversationPhase.LISTENING,
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.LISTENING, session_id,
     ))
     controller.handle_runtime_event(StateChanged(
-        turn, correlation, ConversationPhase.TRANSCRIBING, ConversationPhase.THINKING,
+        turn, correlation, ConversationPhase.TRANSCRIBING, ConversationPhase.THINKING, session_id,
     ))
+    assert chat.processing is True
+
     runtime.new_session = lambda: completed("new-session")
     if operation == "switch":
         chat.activate_session("other-session")
+        assert chat.activeSessionId == "other-session"
     else:
         chat.new_session()
-    assert chat.activeSessionId == "voice-session"
-    assert chat.processing
-    controller.handle_runtime_event(TextDelta(turn, correlation, "语音回复"))
-    assert pet.property("speech") == "语音回复"
-    controller.handle_runtime_event(StateChanged(
-        turn, correlation, ConversationPhase.THINKING, ConversationPhase.IDLE,
-    ))
-    assert not chat.processing
-    chat.activate_session("other-session")
-    assert chat.activeSessionId == "other-session"
+        assert chat.activeSessionId == "new-session"
+    assert chat.processing is False
     assert pet.property("speech") == ""
+
+    # 后台会话静默跑完，不驱动桌宠气泡
+    controller.handle_runtime_event(
+        TextDelta(turn, correlation, "语音回复", "", session_id)
+    )
+    assert pet.property("speech") == ""
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.THINKING, ConversationPhase.IDLE, session_id,
+    ))
+
+    # 切回原会话能看到后台跑完的完整回复
+    chat.activate_session("voice-session")
+    assert chat.activeSessionId == "voice-session"
+    assert [item["markdown"] for item in chat.messageModel._items] == ["语音回复"]
+
+
+def test_background_session_error_stays_silent_and_keeps_the_reason(speech_app):
+    controller, runtime, chat, pet = speech_app
+    chat.activate_session("voice-session")
+    session_id = chat.activeSessionId
+    turn, correlation = TurnId.new(), CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.THINKING, session_id,
+    ))
+    runtime.new_session = lambda: completed("new-session")
+    chat.new_session()
+
+    controller.handle_runtime_event(
+        runtime_error_event(turn, correlation, RuntimeError("boom"), session_id=session_id)
+    )
+
+    # 后台失败不打断前台，也不驱动桌宠气泡
+    assert pet.property("speech") == ""
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.RECOVERING, ConversationPhase.IDLE, session_id,
+    ))
+
+    # 切回原会话能看到失败原因
+    chat.activate_session("voice-session")
+    assert [item["markdown"] for item in chat.messageModel._items] == [
+        "运行时操作失败，请运行诊断检查"
+    ]

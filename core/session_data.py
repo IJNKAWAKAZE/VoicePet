@@ -104,8 +104,10 @@ class SessionDataManager:
         deleted = self._archive.discard_session(session_id)
         if self._agent_store is not None:
             self._agent_store.delete_session(session_id)
-        if deleted and session_id == self._context.session_id:
-            self._context.clear()
+        if deleted:
+            self._context.discard(session_id)
+            if session_id == self._context.session_id:
+                self._context.clear()
         return deleted
 
     def clear(self) -> int:
@@ -118,7 +120,7 @@ class SessionDataManager:
         if self._agent_store is not None:
             for session_id in session_ids:
                 self._agent_store.delete_session(session_id)
-        self._context.clear()
+        self._context.reset()
         return affected
 
     def _delete_codex_thread(self, session_id: str) -> None:

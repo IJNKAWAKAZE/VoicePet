@@ -16,6 +16,9 @@ from .cancellation import CancellationSource, CancellationToken, CancelledError
 from .config import normalize_wake_keyword
 from .event_bus import EventBus
 from .events import (
+    AgentActivityCompleted,
+    AgentActivityOutput,
+    AgentActivityStarted,
     AgentApprovalRequested,
     AgentProgress,
     ApprovalRequested,
@@ -51,6 +54,47 @@ _ACTIVATION_SOURCES = frozenset(
     {"click", "hotkey", "shortcut", "wake_word", "wake_followup"}
 )
 _WAKE_ACKNOWLEDGEMENT = "我在，请说"
+_MAX_ACTIVITY_TITLE_CHARS = 400
+_FAILED_ACTIVITY_STATUSES = frozenset({"failed", "declined", "cancelled", "error"})
+
+
+def agent_activity_kind(event: object) -> str:
+    """命令执行与工具调用在聊天记录里使用不同的展示条目"""
+
+    return "command" if getattr(event, "type", None) is AgentEventType.COMMAND_STARTED else "tool"
+
+
+def agent_item_id(event: object) -> str:
+    """Codex 条目标识可能缺失，聊天条目按标识分开时用它对齐同一条目"""
+
+    value = getattr(event, "item_id", None)
+    return value if isinstance(value, str) else ""
+
+
+def agent_thinking_id(event: object) -> str:
+    """同一条 Codex 推理条目收敛成聊天里的一个过程条目"""
+
+    item = agent_item_id(event)
+    return f"{item}:thinking" if item else ""
+
+
+def agent_activity_title(event: object) -> str:
+    """优先展示真实命令或工具名，缺失时退回可读状态"""
+
+    payload = getattr(event, "payload", None) or {}
+    for key in ("command", "tool"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:_MAX_ACTIVITY_TITLE_CHARS]
+    return str(payload.get("message", "Agent 正在执行操作"))[:_MAX_ACTIVITY_TITLE_CHARS]
+
+
+def agent_activity_status(event: object) -> str:
+    """把 Codex 的条目终态收敛为聊天条目使用的两种取值"""
+
+    payload = getattr(event, "payload", None) or {}
+    status = str(payload.get("status", "completed")).casefold()
+    return "failed" if status in _FAILED_ACTIVITY_STATUSES else "completed"
 
 
 def simplify_asr_text(text: str) -> str:
@@ -154,6 +198,8 @@ class Coordinator:
         max_turn_tokens: int = 16_384,
         clock: Callable[[], float] | None = None,
         shutdown_timeout: float = 2.0,
+        is_foreground: Callable[[], bool] | None = None,
+        speech_lock: asyncio.Lock | None = None,
     ) -> None:
         budget_limits = TurnBudgetLimits(
             max_duration=max_turn_duration,
@@ -169,7 +215,15 @@ class Coordinator:
         self._audio_session = audio_session
         self._transcript_adapter = transcript_adapter
         self._event_bus = event_bus
-        self._state_machine = state_machine or ConversationStateMachine()
+        self._session_id = (
+            session_context.session_id if session_context is not None else ""
+        )
+        self._state_machine = state_machine or ConversationStateMachine(
+            self._session_id
+        )
+        # 并行会话里只有前台会话可以发声和驱动桌宠，后台会话静默跑完
+        self._is_foreground = is_foreground
+        self._speech_lock = speech_lock
         self._agent_gateway = agent_gateway
         self._memory_context = memory_context
         self._session_context = session_context
@@ -204,6 +258,11 @@ class Coordinator:
 
     def is_current(self, turn_id: TurnId) -> bool:
         return not self._stopped and self._state_machine.turn_id == turn_id
+
+    def _foreground(self) -> bool:
+        """没有前台判定的旧装配始终按前台处理"""
+
+        return self._is_foreground is None or bool(self._is_foreground())
 
     @property
     def phase(self) -> ConversationPhase:
@@ -530,6 +589,7 @@ class Coordinator:
                     "denied",
                     "用户取消了记忆操作",
                     0,
+                    self._session_id,
                 )
             )
             # 用户拒绝不是执行失败，结束原轮次后恢复待机
@@ -794,32 +854,116 @@ class Coordinator:
                 context="\n\n".join(str(item["content"]) for item in memory_history),
             )
             completed = False
+            activity_id = ""
+            thinking_id = ""
             while True:
                 try:
                     event = await self._await_with_budget(lambda: anext(stream))
                 except StopAsyncIteration:
                     break
                 if token.is_cancelled:
-                    await self._agent_gateway.cancel()
+                    await self._agent_gateway.cancel(str(turn_id))
                     return
                 if event.type is AgentEventType.TEXT_DELTA:
                     value = str(event.payload.get("text", ""))
                     chunks.append(value)
-                    await self._event_bus.publish(TextDelta(turn_id, correlation_id, value))
-                elif event.type is AgentEventType.COMMAND_STARTED:
+                    await self._event_bus.publish(TextDelta(turn_id, correlation_id, value, agent_item_id(event), self._session_id))
+                elif event.type is AgentEventType.REASONING_DELTA:
+                    # Agent 的中间过程文字独立成条，命令输出保留在各自的条目里
+                    value = str(event.payload.get("text", ""))
+                    if value:
+                        current = agent_thinking_id(event) or thinking_id or f"{turn_id}:thinking"
+                        if current != thinking_id:
+                            thinking_id = current
+                            await self._event_bus.publish(
+                                AgentActivityStarted(
+                                    turn_id,
+                                    correlation_id,
+                                    thinking_id,
+                                    "thinking",
+                                    "正在思考",
+                                    self._session_id,
+                                )
+                            )
+                        await self._event_bus.publish(
+                            AgentActivityOutput(
+                                turn_id,
+                                correlation_id,
+                                thinking_id,
+                                value,
+                                self._session_id,
+                            )
+                        )
+                elif event.type is AgentEventType.REASONING_COMPLETED:
+                    if thinking_id:
+                        await self._event_bus.publish(
+                            AgentActivityCompleted(
+                                turn_id,
+                                correlation_id,
+                                thinking_id,
+                                "completed",
+                                self._session_id,
+                            )
+                        )
+                        thinking_id = ""
+                elif event.type in {AgentEventType.COMMAND_STARTED, AgentEventType.TOOL_STARTED}:
+                    # 每个工具条目拥有独立标识，聊天记录里各自成条
+                    activity_id = agent_item_id(event) or f"{turn_id}:{getattr(event, 'seq', 0)}"
                     await self._event_bus.publish(
-                        AgentProgress(
+                        AgentActivityStarted(
                             turn_id,
                             correlation_id,
-                            str(event.payload.get("message", "Agent 正在执行操作")),
+                            activity_id,
+                            agent_activity_kind(event),
+                            agent_activity_title(event),
+                            self._session_id,
                         )
                     )
-                elif event.type is AgentEventType.COMMAND_COMPLETED:
+                    if self._foreground():
+                        await self._event_bus.publish(
+                            AgentProgress(
+                                turn_id,
+                                correlation_id,
+                                str(event.payload.get("message", "Agent 正在执行操作")),
+                            )
+                        )
+                elif event.type is AgentEventType.COMMAND_OUTPUT_DELTA:
                     await self._event_bus.publish(
-                        AgentProgress(
+                        AgentActivityOutput(
                             turn_id,
                             correlation_id,
-                            str(event.payload.get("message", "操作已完成")),
+                            agent_item_id(event) or activity_id or f"{turn_id}:{getattr(event, 'seq', 0)}",
+                            str(event.payload.get("text", "")),
+                            self._session_id,
+                        )
+                    )
+                elif event.type in {AgentEventType.COMMAND_COMPLETED, AgentEventType.TOOL_COMPLETED}:
+                    if activity_id:
+                        await self._event_bus.publish(
+                            AgentActivityCompleted(
+                                turn_id,
+                                correlation_id,
+                                agent_item_id(event) or activity_id,
+                                agent_activity_status(event),
+                                self._session_id,
+                            )
+                        )
+                    if self._foreground():
+                        await self._event_bus.publish(
+                            AgentProgress(
+                                turn_id,
+                                correlation_id,
+                                str(event.payload.get("message", "操作已完成")),
+                            )
+                        )
+                elif event.type is AgentEventType.FILE_CHANGE and activity_id:
+                    await self._event_bus.publish(
+                        AgentActivityCompleted(
+                            turn_id,
+                            correlation_id,
+                            agent_item_id(event) or activity_id,
+                            agent_activity_status(event),
+                            self._session_id,
                         )
                     )
                 if event.type is AgentEventType.APPROVAL_REQUEST:
@@ -835,6 +979,18 @@ class Coordinator:
                     break
                 if event.type in {AgentEventType.ERROR, AgentEventType.CANCELLED}:
                     raise RuntimeError("Agent 轮次中断")
+            if thinking_id:
+                # 轮次正常结束时兜底收尾，缺失条目终态的推理过程不会停在执行中
+                await self._event_bus.publish(
+                    AgentActivityCompleted(
+                        turn_id,
+                        correlation_id,
+                        thinking_id,
+                        "completed",
+                        self._session_id,
+                    )
+                )
+                thinking_id = ""
             if not completed:
                 raise RuntimeError("Agent 流缺少完成事件")
             if not self._accept_result(turn_id, token):
@@ -861,7 +1017,7 @@ class Coordinator:
             ):
                 await self.start_listening("wake_followup")
         except asyncio.CancelledError:
-            await self._agent_gateway.cancel()
+            await self._agent_gateway.cancel(str(turn_id))
         except Exception as error:  # noqa: BLE001 Agent 失败只显示安全错误
             await self._handle_runtime_error(turn_id, correlation_id, token, error)
         finally:
@@ -900,7 +1056,7 @@ class Coordinator:
         if not self._accept_result(turn_id, token):
             return
         await self._await_with_budget(
-            lambda: self._audio_player.play(audio, token)
+            lambda: self._play_audio(audio, token)
         )
 
     async def _run_notice(
@@ -932,7 +1088,7 @@ class Coordinator:
             if not self._accept_result(turn_id, token):
                 return
             await self._await_with_budget(
-                lambda: self._audio_player.play(audio, token)
+                lambda: self._play_audio(audio, token)
             )
             if not self._accept_result(turn_id, token):
                 return
@@ -1036,6 +1192,7 @@ class Coordinator:
                     "failed",
                     message,
                     0,
+                    self._session_id,
                 )
             )
             recovering = self._state_machine.transition(
@@ -1054,6 +1211,7 @@ class Coordinator:
                 "success",
                 result.safe_message,
                 result.affected,
+                self._session_id,
             )
         )
         if not self._accept_result(pending.turn_id, pending.source.token):
@@ -1190,7 +1348,7 @@ class Coordinator:
                 if not self._accept_result(turn_id, token):
                     return
                 await self._await_with_budget(
-                    lambda audio=audio: self._audio_player.play(audio, token)
+                    lambda audio=audio: self._play_audio(audio, token)
                 )
                 if not self._accept_result(turn_id, token):
                     return
@@ -1211,10 +1369,21 @@ class Coordinator:
             )
 
     def _speech_enabled_for_active_turn(self) -> bool:
-        return self._speech_enabled and (
+        return self._foreground() and self._speech_enabled and (
             not self._active_input_is_manual
             or self._manual_input_speech_enabled
         )
+
+    async def _play_audio(self, audio: SynthesizedAudio, token: CancellationToken) -> None:
+        """并行会话共享同一个音频设备，播放阶段必须串行"""
+
+        assert self._audio_player is not None
+        lock = self._speech_lock
+        if lock is None:
+            await self._audio_player.play(audio, token)
+            return
+        async with lock:
+            await self._audio_player.play(audio, token)
 
     async def _handle_runtime_error(
         self,
@@ -1228,7 +1397,12 @@ class Coordinator:
         if not self._accept_result(turn_id, token):
             return
         await self._event_bus.publish(
-            runtime_error_event(turn_id, correlation_id, error)
+            runtime_error_event(
+                turn_id,
+                correlation_id,
+                error,
+                session_id=self._session_id,
+            )
         )
         if not self._accept_result(turn_id, token):
             return

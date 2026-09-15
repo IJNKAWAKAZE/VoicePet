@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from core.agent_gateway import AgentGateway
+from core.agent_gateway import AgentGateway, AgentGatewayError
 from core.agent_store import AgentStore
 from core.agent_types import AgentEvent, AgentEventType
 
@@ -88,4 +88,139 @@ async def test_binding_survives_restart_and_sessions_remain_isolated(tmp_path):
     _ = [event async for event in gateway.run_turn("two", "你好")]
     _ = [event async for event in gateway.run_turn("one", "修改刚才的文件")]
     assert [item.thread_id for item in client.requests] == [None, None, "thread-one"]
+
+
+class ManualClient:
+    """按轮次分队列，让测试自己决定每个会话何时推进"""
+
+    def __init__(self):
+        self.requests = []
+        self.queues = {}
+        self.cancelled = []
+
+    async def initialize(self):
+        return None
+
+    async def start_turn(self, request):
+        self.requests.append(request)
+        self.queues[request.turn_id] = asyncio.Queue()
+
+    async def next_turn_event(self, turn_id):
+        return await self.queues[turn_id].get()
+
+    async def cancel_turn(self, turn_id):
+        self.cancelled.append(turn_id)
+
+    async def close(self):
+        return None
+
+    def request(self, turn_id):
+        return next(item for item in self.requests if item.turn_id == turn_id)
+
+    async def emit(self, turn_id, type_, payload=None):
+        request = self.request(turn_id)
+        await self.queues[turn_id].put(
+            AgentEvent(
+                request.session_id,
+                turn_id,
+                0,
+                type_,
+                payload or {},
+                f"thread-{request.session_id}",
+                f"codex-{turn_id}",
+            )
+        )
+
+
+async def wait_started(client, count):
+    for _ in range(200):
+        if len(client.requests) >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("并发轮次没有启动")
+
+
+async def collect(stream):
+    return [event async for event in stream]
+
+
+@pytest.mark.anyio
+async def test_sessions_run_together_while_one_session_stays_serial(tmp_path):
+    client = ManualClient()
+    store = AgentStore(tmp_path / "agent.db")
+
+    async def factory():
+        return client
+
+    gateway = AgentGateway(factory, store)
+    first = asyncio.create_task(collect(gateway.run_turn("one", "第一问", turn_id="t1")))
+    second = asyncio.create_task(collect(gateway.run_turn("two", "第二问", turn_id="t2")))
+    await wait_started(client, 2)
+
+    # 同一会话的两个轮次仍然互斥，否则原生线程会被同时改写
+    blocked = gateway.run_turn("one", "再来一问", turn_id="t3")
+    with pytest.raises(AgentGatewayError, match="该会话已有轮次运行"):
+        await anext(blocked)
+    await blocked.aclose()
+    assert store.turn("t3") is None
+
+    await client.emit("t1", AgentEventType.TEXT_DELTA, {"text": "A"})
+    await client.emit("t2", AgentEventType.TEXT_DELTA, {"text": "B"})
+    await client.emit("t1", AgentEventType.TURN_COMPLETED, {"status": "completed"})
+    await client.emit("t2", AgentEventType.TURN_COMPLETED, {"status": "completed"})
+
+    assert [
+        (event.turn_id, event.type) for event in await first
+    ] == [("t1", AgentEventType.TEXT_DELTA), ("t1", AgentEventType.TURN_COMPLETED)]
+    assert [
+        (event.turn_id, event.type) for event in await second
+    ] == [("t2", AgentEventType.TEXT_DELTA), ("t2", AgentEventType.TURN_COMPLETED)]
+    assert [store.turn("t1").status, store.turn("t2").status] == [
+        "completed",
+        "completed",
+    ]
+
+    # 终态释放后同一会话可以继续复用原生线程
+    follow = asyncio.create_task(collect(gateway.run_turn("one", "追问", turn_id="t4")))
+    await wait_started(client, 3)
+    assert client.request("t4").thread_id == "thread-one"
+    await client.emit("t4", AgentEventType.TURN_COMPLETED, {"status": "completed"})
+    assert [event.turn_id for event in await follow] == ["t4"]
+
+
+@pytest.mark.anyio
+async def test_cancel_targets_only_the_requested_turn(tmp_path):
+    client = ManualClient()
+    store = AgentStore(tmp_path / "agent.db")
+
+    async def factory():
+        return client
+
+    gateway = AgentGateway(factory, store)
+    first = asyncio.create_task(collect(gateway.run_turn("one", "第一问", turn_id="t1")))
+    second = asyncio.create_task(collect(gateway.run_turn("two", "第二问", turn_id="t2")))
+    await wait_started(client, 2)
+
+    async def enter_maintenance():
+        async with gateway.session_maintenance():
+            pass
+
+    with pytest.raises(AgentGatewayError, match="当前回复完成后才能删除会话"):
+        await enter_maintenance()
+
+    await gateway.cancel("t1")
+    assert client.cancelled == ["t1"]
+
+    await gateway.cancel()
+    # 不带轮次号时取消所有活跃轮次，t1 尚未收到终态因此会再次下发
+    assert client.cancelled == ["t1", "t1", "t2"]
+
+    await client.emit("t1", AgentEventType.CANCELLED)
+    await client.emit("t2", AgentEventType.TURN_COMPLETED, {"status": "completed"})
+    assert (await first)[-1].type is AgentEventType.CANCELLED
+    assert (await second)[-1].type is AgentEventType.TURN_COMPLETED
+    assert store.turn("t1").status == "cancelled"
+
+    async with gateway.session_maintenance():
+        pass
 

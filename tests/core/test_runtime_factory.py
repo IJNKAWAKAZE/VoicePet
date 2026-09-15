@@ -37,7 +37,7 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
         assert services.event_bus is event_bus
         assert isinstance(services.capture, AudioCaptureService)
         assert services.capture.audio_format.sample_rate == 16_000
-        assert isinstance(services.coordinator, Coordinator)
+        assert isinstance(services.coordinator.coordinator, Coordinator)
         assert services.memory is not None
         assert services.diagnostics is not None
         assert services.memory.list_records() == ()
@@ -46,16 +46,16 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
         assert not (tmp_path / "VoicePet" / "models" / "wake").exists()
         assert services.llm_configured is False
         assert services.agent_gateway is None
-        assert services.asr_preparer is services.coordinator._transcript_adapter
+        assert services.asr_preparer is services.coordinator.coordinator._transcript_adapter
         assert services.asr_preparer._model_directory == (
             tmp_path / "VoicePet" / "models" / "asr" / "small"
         )
-        assert isinstance(services.coordinator._session_context, SessionContext)
+        assert isinstance(services.coordinator.coordinator._session_context, SessionContext)
         assert isinstance(
-            services.coordinator._session_archive,
+            services.coordinator.coordinator._session_archive,
             SessionArchiveStore,
         )
-        assert services.coordinator._session_archive._retention_days == 7
+        assert services.coordinator.coordinator._session_archive._retention_days == 7
 
         turn_id = TurnId.new()
         correlation_id = CorrelationId.new()
@@ -94,7 +94,7 @@ def test_default_runtime_factory_wires_local_fallback(tmp_path):
             "desktop": 15.0,
         }
         assert (tmp_path / "VoicePet" / "cache").is_dir()
-        assert "1～3 句" in services.coordinator._llm_instructions
+        assert "1～3 句" in services.coordinator.coordinator._llm_instructions
     finally:
         RuntimeHost(services).close()
 
@@ -106,7 +106,7 @@ def test_default_runtime_factory_wires_agent_turn_limit(tmp_path):
         tmp_path / "VoicePet",
     )
     try:
-        assert services.coordinator._budget_limits == TurnBudgetLimits(
+        assert services.coordinator.coordinator._budget_limits == TurnBudgetLimits(
             max_duration=AppConfig().agent.max_turn_minutes * 60.0,
         )
     finally:
@@ -124,7 +124,7 @@ def test_default_runtime_factory_respects_custom_agent_turn_limit(tmp_path):
         tmp_path / "VoicePet",
     )
     try:
-        assert services.coordinator._budget_limits == TurnBudgetLimits(
+        assert services.coordinator.coordinator._budget_limits == TurnBudgetLimits(
             max_duration=300.0,
         )
     finally:
@@ -159,7 +159,7 @@ def test_default_runtime_factory_appends_persona_after_builtin_rules(tmp_path):
         tmp_path / "VoicePet",
     )
     try:
-        instructions = services.coordinator._llm_instructions
+        instructions = services.coordinator.coordinator._llm_instructions
         assert "1～3 句" in instructions
         assert "不能修改安全、工具或记忆规则" in instructions
         assert instructions.index(persona) > instructions.index("1～3 句")
@@ -215,10 +215,10 @@ def test_default_runtime_factory_wraps_network_services_without_sdk_retries(
         api_key="sk-private",
     )
     try:
-        speech = services.coordinator._speech_synthesizer
+        speech = services.coordinator.coordinator._speech_synthesizer
 
         assert services.llm_configured is True
-        assert services.asr_preparer is services.coordinator._transcript_adapter
+        assert services.asr_preparer is services.coordinator.coordinator._transcript_adapter
         assert seen["llm_settings"]["max_retries"] == 0
         assert seen["llm_settings"]["base_url"] is None
         assert isinstance(speech, FallbackSpeechSynthesizer)
@@ -337,7 +337,7 @@ def test_runtime_factory_closes_owned_mci_player(tmp_path, monkeypatch):
 
     assert len(players) == 1
     assert services.audio_output is players[0]
-    assert services.coordinator._audio_player is players[0]
+    assert services.coordinator.coordinator._audio_player is players[0]
     assert services.tts_voice_service._audio_player is players[0]
     assert players[0].closed == 1
     assert players[0].settings == {

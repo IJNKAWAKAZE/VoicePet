@@ -50,7 +50,9 @@ def test_options_match_generated_protocol(mode):
 
 def test_auto_edit_accepts_native_file_change_but_keeps_shell_confirmation():
     adapter = object.__new__(CodexAgentAdapter)
-    adapter._active_mode = AgentApprovalMode.AUTO_EDIT
+    adapter._active_modes = {"native": AgentApprovalMode.AUTO_EDIT}
+    adapter._turn_requests = {}
+    adapter._turns = {}
     adapter._interaction_callback = None
     adapter._interaction_waiters = {}
     assert adapter._handle_server_request("item/fileChange/requestApproval", {"itemId": "file"}) == {"decision": "accept"}
@@ -82,6 +84,132 @@ def test_write_approval_mode_ignores_invalid_input_and_unwritable_path(tmp_path)
     assert write_approval_mode(tmp_path / "missing" / "mode.json", AgentApprovalMode.FULL_AUTO) is False
 
 
+def test_codex_items_turn_into_chat_visible_activity_events():
+    from openai_codex.generated.v2_all import (
+        ItemCompletedNotification,
+        ItemStartedNotification,
+    )
+
+    from core.agent_codex import (
+        MAX_OUTPUT_DELTA_CHARS,
+        bounded_text,
+        codex_item_events,
+        turn_status,
+    )
+
+    started = ItemStartedNotification.model_validate(
+        {
+            "threadId": "thread",
+            "turnId": "turn",
+            "startedAtMs": 1,
+            "item": {
+                "type": "commandExecution",
+                "id": "item-1",
+                "command": "go vet ./...",
+                "cwd": "D:/LD",
+                "commandActions": [],
+                "status": "inProgress",
+            },
+        }
+    )
+    assert codex_item_events(started.item, started=True) == [
+        (AgentEventType.COMMAND_STARTED, {"message": "正在执行命令", "command": "go vet ./..."})
+    ]
+
+    failed = ItemCompletedNotification.model_validate(
+        {
+            "threadId": "thread",
+            "turnId": "turn",
+            "completedAtMs": 2,
+            "item": {
+                "type": "commandExecution",
+                "id": "item-1",
+                "command": "go vet ./...",
+                "cwd": "D:/LD",
+                "commandActions": [],
+                "status": "failed",
+                "exitCode": 2,
+                "aggregatedOutput": "boom",
+            },
+        }
+    )
+    assert codex_item_events(failed.item, started=False) == [
+        (
+            AgentEventType.COMMAND_COMPLETED,
+            {"message": "命令执行失败", "status": "failed", "command": "go vet ./..."},
+        )
+    ]
+
+    tool = ItemCompletedNotification.model_validate(
+        {
+            "threadId": "thread",
+            "turnId": "turn",
+            "completedAtMs": 3,
+            "item": {
+                "type": "mcpToolCall",
+                "id": "item-2",
+                "server": "voicepet",
+                "tool": "list_windows",
+                "arguments": {},
+                "status": "completed",
+            },
+        }
+    )
+    assert codex_item_events(tool.item, started=False) == [
+        (
+            AgentEventType.TOOL_COMPLETED,
+            {"tool": "voicepet/list_windows", "status": "completed", "message": "voicepet/list_windows 调用完成"},
+        )
+    ]
+
+    changed = ItemCompletedNotification.model_validate(
+        {
+            "threadId": "thread",
+            "turnId": "turn",
+            "completedAtMs": 4,
+            "item": {
+                "type": "fileChange",
+                "id": "item-3",
+                "status": "completed",
+                "changes": [{"path": "a.go", "kind": {"type": "update"}, "diff": "@@"}],
+            },
+        }
+    )
+    assert codex_item_events(changed.item, started=False) == [
+        (
+            AgentEventType.FILE_CHANGE,
+            {"status": "completed", "paths": ("a.go",), "message": "文件已修改"},
+        )
+    ]
+
+    # 中断在 VoicePet 里按取消处理，命令输出按帧上限截断后才进入主进程
+    assert turn_status("interrupted") == "cancelled"
+    assert turn_status("completed") == "completed"
+    assert len(bounded_text("x" * (MAX_OUTPUT_DELTA_CHARS + 1), MAX_OUTPUT_DELTA_CHARS)) == MAX_OUTPUT_DELTA_CHARS
+
+
+def test_reasoning_items_end_with_an_explicit_completion():
+    from openai_codex.generated.v2_all import (
+        ItemCompletedNotification,
+        ItemStartedNotification,
+    )
+
+    from core.agent_codex import codex_item_events
+
+    payload = {
+        "threadId": "thread",
+        "turnId": "turn",
+        "item": {"type": "reasoning", "id": "item-9", "content": [], "summary": []},
+    }
+    started = ItemStartedNotification.model_validate({**payload, "startedAtMs": 1})
+    completed = ItemCompletedNotification.model_validate({**payload, "completedAtMs": 2})
+
+    assert codex_item_events(started.item, started=True) == []
+    assert codex_item_events(completed.item, started=False) == [
+        (AgentEventType.REASONING_COMPLETED, {})
+    ]
+
+
 class FakeTurnClient:
     """只回应一轮 turn，用于观察适配器真正发出的参数"""
 
@@ -106,9 +234,9 @@ async def collect_turn(adapter, request):
     return [event async for event in adapter.run_turn(request)]
 
 
-@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max"])
-def test_adapter_sends_the_configured_reasoning_effort(tmp_path, effort):
-    client = FakeTurnClient()
+def build_adapter(client, tmp_path, *, effort="low"):
+    """只装配通知循环需要的字段，避免真的启动 Codex 子进程"""
+
     adapter = object.__new__(CodexAgentAdapter)
     adapter._data_directory = tmp_path
     adapter._system_prompt = ""
@@ -117,10 +245,34 @@ def test_adapter_sends_the_configured_reasoning_effort(tmp_path, effort):
     adapter._client = client
     adapter._turns = {}
     adapter._cancelled = set()
-    adapter._active_mode = AgentApprovalMode.SUGGEST
-    adapter._active_request = None
+    adapter._active_modes = {}
+    adapter._turn_requests = {}
     adapter._interaction_callback = None
     adapter._interaction_waiters = {}
+    return adapter
+
+
+class FakeNotificationClient(FakeTurnClient):
+    """按顺序回放通知，用于观察适配器把哪些通知转成了事件"""
+
+    def __init__(self, notifications):
+        super().__init__()
+        self._notifications = list(notifications)
+
+    async def next_turn_notification(self, turn_id):
+        if self._notifications:
+            return self._notifications.pop(0)
+        return await super().next_turn_notification(turn_id)
+
+
+def notification(method, payload):
+    return SimpleNamespace(method=method, payload=payload)
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max"])
+def test_adapter_sends_the_configured_reasoning_effort(tmp_path, effort):
+    client = FakeTurnClient()
+    adapter = build_adapter(client, tmp_path, effort=effort)
     request = AgentTurnRequest(
         session_id="session",
         thread_id=None,
@@ -134,6 +286,101 @@ def test_adapter_sends_the_configured_reasoning_effort(tmp_path, effort):
     assert events[-1].type is AgentEventType.TURN_COMPLETED
     assert client.turn_params["summary"] == "concise"
     assert client.turn_params["effort"] == effort
+
+
+def test_adapter_sends_reasoning_and_commentary_as_process_text(tmp_path):
+    from openai_codex.generated.v2_all import (
+        AgentMessageDeltaNotification,
+        ItemCompletedNotification,
+        ItemStartedNotification,
+        ReasoningSummaryTextDeltaNotification,
+        ReasoningTextDeltaNotification,
+    )
+
+    def message_started(item_id, phase):
+        return ItemStartedNotification.model_validate(
+            {
+                "threadId": "thread",
+                "turnId": "turn",
+                "startedAtMs": 1,
+                "item": {"type": "agentMessage", "id": item_id, "text": "", "phase": phase},
+            }
+        )
+
+    client = FakeNotificationClient(
+        [
+            notification(
+                "item/reasoning/summaryTextDelta",
+                ReasoningSummaryTextDeltaNotification.model_validate(
+                    {
+                        "threadId": "thread",
+                        "turnId": "turn",
+                        "itemId": "r1",
+                        "summaryIndex": 0,
+                        "delta": "先看目录",
+                    }
+                ),
+            ),
+            notification(
+                "item/reasoning/textDelta",
+                ReasoningTextDeltaNotification.model_validate(
+                    {
+                        "threadId": "thread",
+                        "turnId": "turn",
+                        "itemId": "r1",
+                        "contentIndex": 0,
+                        "delta": "有摘要时原始思考不重复展示",
+                    }
+                ),
+            ),
+            notification("item/started", message_started("m1", "commentary")),
+            notification(
+                "item/agentMessage/delta",
+                AgentMessageDeltaNotification.model_validate(
+                    {"threadId": "thread", "turnId": "turn", "itemId": "m1", "delta": "顺手说明"}
+                ),
+            ),
+            notification("item/started", message_started("m2", "final_answer")),
+            notification(
+                "item/agentMessage/delta",
+                AgentMessageDeltaNotification.model_validate(
+                    {"threadId": "thread", "turnId": "turn", "itemId": "m2", "delta": "最终答复"}
+                ),
+            ),
+            notification(
+                "item/completed",
+                ItemCompletedNotification.model_validate(
+                    {
+                        "threadId": "thread",
+                        "turnId": "turn",
+                        "completedAtMs": 9,
+                        "item": {"type": "reasoning", "id": "r1", "content": [], "summary": []},
+                    }
+                ),
+            ),
+        ]
+    )
+    adapter = build_adapter(client, tmp_path)
+    request = AgentTurnRequest(
+        session_id="session",
+        thread_id=None,
+        turn_id="turn",
+        input="你好",
+        approval_mode=AgentApprovalMode.SUGGEST,
+    )
+
+    events = asyncio.run(collect_turn(adapter, request))
+
+    assert [
+        (event.type, event.payload.get("text"))
+        for event in events
+        if event.type is not AgentEventType.TURN_COMPLETED
+    ] == [
+        (AgentEventType.REASONING_DELTA, "先看目录"),
+        (AgentEventType.REASONING_DELTA, "顺手说明"),
+        (AgentEventType.TEXT_DELTA, "最终答复"),
+        (AgentEventType.REASONING_COMPLETED, None),
+    ]
 
 
 def test_fake_server_waits_for_native_file_approval(tmp_path):

@@ -9,6 +9,9 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QJSValue
 
 from core.events import (
+    AgentActivityCompleted,
+    AgentActivityOutput,
+    AgentActivityStarted,
     AgentApprovalRequested,
     AgentProgress,
     ApprovalRequested,
@@ -124,6 +127,7 @@ class QmlApplicationController(QObject):
         self._confirmation_window: QObject | None = None
         self._phase = ConversationPhase.IDLE
         self._phase_turn_id: TurnId | None = None
+        self._session_turns: dict[str, TurnId] = {}
         self._speech_text = ""
         self._speech_turn_id: TurnId | None = None
         self._muted = False
@@ -667,25 +671,18 @@ class QmlApplicationController(QObject):
     @Slot(object)
     def handle_runtime_event(self, event: object) -> None:
         if isinstance(event, StateChanged):
-            # 旧轮次的结束事件不能覆盖新轮次的真实监听状态
-            if (
-                event.current is ConversationPhase.IDLE
-                and self._phase_turn_id is not None
-                and event.turn_id != self._phase_turn_id
-            ):
+            # 并行会话的状态变化各归各的轮次，迟到事件不能收掉别人的收尾
+            if self._is_stale_turn(event):
                 return
-            if (
-                event.current is not ConversationPhase.IDLE
-                and self._phase_turn_id is not None
-                and event.turn_id != self._phase_turn_id
-                and not (
-                    event.current is ConversationPhase.LISTENING
-                    and event.previous is not ConversationPhase.IDLE
-                )
-            ):
+            if not self._is_foreground_session(event.session_id):
+                # 后台会话只更新自己的聊天条目，不驱动宠物、托盘和气泡
+                if event.current is not ConversationPhase.IDLE:
+                    self._chat.begin_turn(event.session_id)
+                else:
+                    self._chat.finish_assistant(event.session_id)
                 return
             if event.current is not ConversationPhase.IDLE:
-                self._chat.begin_turn()
+                self._chat.begin_turn(event.session_id)
             # 手动输入直接进入思考阶段，不能只在开始聆听时重置缓存
             if event.current is not ConversationPhase.IDLE and event.turn_id != self._speech_turn_id:
                 self._reset_pet_speech()
@@ -708,7 +705,7 @@ class QmlApplicationController(QObject):
             if callable(setter):
                 setter(listening)
             if event.current is ConversationPhase.IDLE:
-                self._chat.finish_assistant()
+                self._chat.finish_assistant(event.session_id)
             return
         if isinstance(event, WakeCommandPending):
             if event.turn_id == self._phase_turn_id:
@@ -736,7 +733,11 @@ class QmlApplicationController(QObject):
             self._set_pet_speech("")
             return
         if isinstance(event, TextDelta):
-            self._chat.append_assistant_delta(event.text)
+            self._chat.append_assistant_delta(
+                event.text, event.item_id, event.session_id
+            )
+            if not self._is_foreground_session(event.session_id):
+                return
             if event.turn_id != self._speech_turn_id:
                 self._reset_pet_speech()
                 self._speech_turn_id = event.turn_id
@@ -754,7 +755,9 @@ class QmlApplicationController(QObject):
                 and event.turn_id == self._speech_turn_id
                 and event.status in {"success", "denied", "failed"}
             ):
-                self._chat.append_assistant_delta(event.message)
+                self._chat.append_assistant_delta(
+                    event.message, session_id=event.session_id
+                )
                 self._speech_text = event.message
                 self._set_pet_speech(self._speech_text)
             return
@@ -762,7 +765,7 @@ class QmlApplicationController(QObject):
             if self._memories is not None:
                 self._memories.refresh()
                 self._memories.refresh_changes()
-            if event.session_id == self._chat.activeSessionId:
+            if event.session_id == self._chat.memorySessionId:
                 self._chat.refresh_memory_changes()
             return
         if isinstance(event, MemoryMaintenanceChanged):
@@ -771,8 +774,23 @@ class QmlApplicationController(QObject):
                 self._memories.refresh_summaries()
             return
         if isinstance(event, AgentProgress):
-            # 执行状态只显示在桌宠气泡，避免污染最终聊天回复
+            # 执行状态只显示在桌宠气泡，避免污染最终聊天回复；后台会话不会发布该事件
             self._set_pet_speech(event.message)
+            return
+        if isinstance(event, AgentActivityStarted):
+            self._chat.start_agent_activity(
+                event.activity_id, event.kind, event.title, event.session_id
+            )
+            return
+        if isinstance(event, AgentActivityOutput):
+            self._chat.append_agent_activity(
+                event.activity_id, event.text, event.session_id
+            )
+            return
+        if isinstance(event, AgentActivityCompleted):
+            self._chat.finish_agent_activity(
+                event.activity_id, event.status, event.session_id
+            )
             return
         if isinstance(event, AgentApprovalRequested):
             self._dialogs.request_agent_interaction(
@@ -780,8 +798,34 @@ class QmlApplicationController(QObject):
             )
             return
         if isinstance(event, RuntimeErrorEvent):
+            if not self._is_foreground_session(event.session_id):
+                # 后台会话不打断当前操作，失败原因留在它自己的聊天记录里
+                self._chat.append_assistant_delta(
+                    event.safe_message, session_id=event.session_id
+                )
+                return
             self._dialogs.set_page_error("chat", event.safe_message)
             self._set_pet_speech(event.safe_message)
+
+    def _is_foreground_session(self, session_id: object) -> bool:
+        """没有会话标识的旧链路按前台处理，后台会话不驱动桌宠和提示"""
+
+        if not isinstance(session_id, str) or not session_id:
+            return True
+        active = self._chat.activeSessionId
+        # 聊天还没恢复出当前会话时无法判断归属，按前台处理
+        return not active or session_id == active
+
+    def _is_stale_turn(self, event: StateChanged) -> bool:
+        """按会话跟踪当前轮次，并行会话里迟到的结束事件不能收掉新轮次"""
+
+        key = event.session_id or ""
+        if event.current is not ConversationPhase.IDLE:
+            self._session_turns[key] = event.turn_id
+            return False
+        tracked = self._session_turns.pop(key, None)
+        # 同一会话已经有更晚的轮次在跑，旧轮次的结束事件直接丢弃
+        return tracked is not None and tracked != event.turn_id
 
     def _queue_approval(self, event: ApprovalRequested) -> None:
         request = ConfirmationRequest(

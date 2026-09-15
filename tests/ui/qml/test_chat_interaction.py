@@ -111,6 +111,31 @@ def test_click_history_renders_saved_messages(history_window, qapp):
     assert all(bubble.isVisible() and bubble.height() > 24 for bubble in bubbles)
 
 
+def test_history_messages_show_time_above_each_bubble(history_window, qapp):
+    root, _chat, _, _ = history_window
+    session_list = root.findChild(QQuickItem, "sessionList")
+    button = next(item for item in visual_items(session_list)
+                  if item.property("sessionId") == "history-1")
+    position = button.mapToScene(QPoint(20, 20)).toPoint()
+    QTest.mouseClick(root, Qt.LeftButton, pos=position)
+    QTest.qWait(100)
+
+    page = root.findChild(QQuickItem, "chatPage")
+    message_list = next(item for item in visual_items(page)
+                        if item.objectName() == "chatMessageList"
+                        and item.property("count") == 2)
+    labels = [item for item in visual_items(message_list)
+              if item.objectName() == "messageTimeLabel"]
+    bubbles = [item for item in visual_items(message_list)
+               if item.metaObject().className().startswith("MessageBubble")]
+    assert len(labels) == 2
+    # 提问和回复各自带一条时间，且都排在气泡上方
+    assert [label.isVisible() for label in labels] == [True, True]
+    assert all(label.property("text").startswith("今天 ") for label in labels)
+    assert bubbles[0].y() >= labels[0].y() + labels[0].height()
+    assert bubbles[1].y() >= labels[1].y() + labels[1].height()
+
+
 @pytest.mark.parametrize("section", ["settings", "memories"])
 def test_non_chat_pages_release_history_sidebar_space(history_window, section, qapp):
     root, _, shell, _ = history_window
@@ -123,6 +148,32 @@ def test_non_chat_pages_release_history_sidebar_space(history_window, section, q
     assert sidebar.property("visible") is False
     assert content.property("width") == root.width() - navigation.property("width") - 20
     assert content.mapToScene(QPoint(0, 0)).x() + content.width() <= root.width() - 10
+
+
+def test_agent_activity_renders_command_output_inline(history_window, qapp):
+    root, chat, shell, _ = history_window
+    shell.navigate("chat")
+    QTest.qWait(30)
+
+    chat.start_agent_activity("item-1", "command", "go vet ./...")
+    chat.append_agent_activity("item-1", "vet exit=0\n")
+    QTest.qWait(60)
+
+    page = root.findChild(QQuickItem, "chatPage")
+    blocks = [item for item in visual_items(page)
+              if item.objectName() == "agentActivityBlock"
+              and item.property("visible") is True]
+    assert len(blocks) == 1
+    assert blocks[0].property("title") == "go vet ./..."
+    assert blocks[0].property("status") == "running"
+    assert blocks[0].height() > 24
+    output = next(item for item in visual_items(blocks[0])
+                  if item.objectName() == "agentActivityOutput")
+    assert output.property("text") == "vet exit=0\n"
+
+    chat.finish_agent_activity("item-1", "completed")
+    QTest.qWait(30)
+    assert blocks[0].property("status") == "complete"
 
 
 def test_loaded_history_scrolls_past_last_user_to_assistant_bottom(history_window):

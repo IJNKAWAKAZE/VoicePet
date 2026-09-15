@@ -32,6 +32,8 @@ def test_agent_context_is_applied_to_new_and_resumed_threads(tmp_path):
         adapter._reasoning_effort = "low"
         adapter._turns = {}
         adapter._cancelled = set()
+        adapter._active_modes = {}
+        adapter._turn_requests = {}
         for index, (thread, context) in enumerate(((None, "用户事实：住在杭州"), ("thread", "摘要：周六出发"), ("thread", ""))):
             request = AgentTurnRequest("session", thread, f"turn-{index}", "我在哪个城市？", AgentApprovalMode.SUGGEST, context=context)
             _ = [event async for event in adapter.run_turn(request)]
