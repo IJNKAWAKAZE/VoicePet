@@ -643,3 +643,43 @@ def test_close_releases_runtime_qml_and_tray(qapp):
     assert runtime.closed == 1
     assert tray.closed == 1
     assert qml.root_objects == ()
+
+
+def test_showing_the_pet_raises_it_back_to_the_top(qapp):
+    built = build_controller(qapp)
+    controller, _runtime, _tray, qml, *_middle, _settings, _store = built
+    controller.start()
+    pet = qml.root_objects[0].findChild(QObject, "petWindow")
+    speech = pet.findChild(QObject, "petSpeechWindow")
+    raised = []
+    controller._window_coordinator.raise_window = (
+        lambda window: raised.append(window) or True
+    )
+
+    controller._handle_pet_menu_action("visibility")
+    assert pet.property("visible") is False
+    raised.clear()
+    controller._handle_pet_menu_action("visibility")
+
+    # 重新显示桌宠不会自动回到置顶带最前，必须主动抬一次
+    assert pet.property("visible") is True
+    assert raised == [pet, speech]
+    controller.close()
+
+
+def test_disabled_topmost_leaves_window_order_alone(qapp):
+    built = build_controller(qapp)
+    controller, _runtime, _tray, _qml, *_middle, settings, _store = built
+    controller.start()
+    raised = []
+    controller._window_coordinator.raise_window = (
+        lambda window: raised.append(window) or True
+    )
+    settings.set_field("ui", "always_on_top", False)
+    raised.clear()
+
+    controller._handle_pet_menu_action("visibility")
+    controller._handle_pet_menu_action("visibility")
+
+    assert raised == []
+    controller.close()

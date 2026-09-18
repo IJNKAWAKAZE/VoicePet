@@ -770,6 +770,7 @@ class Coordinator:
                     turn_id,
                     transcription_correlation,
                     normalized_text,
+                    self._session_id,
                 )
             )
             if not self._accept_result(turn_id, token):

@@ -542,7 +542,8 @@ class RuntimeHost:
         gateway = self._services.agent_gateway
         if gateway is None:
             return await asyncio.to_thread(operation, *args)
-        async with gateway.session_maintenance():
+        # 只锁定本次要删除的会话，其它会话可以继续在后台执行
+        async with gateway.session_maintenance(args or None):
             return await asyncio.to_thread(operation, *args)
 
     def list_summaries(

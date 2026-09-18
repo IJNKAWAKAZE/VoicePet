@@ -137,6 +137,7 @@ class TranscriptReady:
     turn_id: TurnId
     correlation_id: CorrelationId
     text: str
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

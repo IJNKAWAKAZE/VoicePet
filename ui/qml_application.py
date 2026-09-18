@@ -246,6 +246,7 @@ class QmlApplicationController(QObject):
         self._apply_pet_preferences()
         if self._pet_window is not None:
             self._pet_window.setProperty("visible", True)
+        self._assert_pet_topmost()
 
     def show_main(self, section: str = "chat") -> None:
         self._app_shell.show_main(section)
@@ -396,6 +397,9 @@ class QmlApplicationController(QObject):
             return
         visible = bool(self._pet_window.property("visible"))
         self._pet_window.setProperty("visible", not visible)
+        if not visible:
+            # 重新显示不会自动回到置顶带最前，需要再抬一次
+            self._assert_pet_topmost()
 
     @Slot()
     def _restore_interaction(self) -> None:
@@ -427,6 +431,16 @@ class QmlApplicationController(QObject):
             for window in windows:
                 self._window_coordinator.set_click_through(window, False)
             self._settings.set_field("ui", "pet_click_through", False)
+        self._assert_pet_topmost()
+
+    def _assert_pet_topmost(self) -> None:
+        """置顶窗口之间也有上下关系，显示桌宠或改设置后主动抬一次"""
+
+        if self._settings is None or not self._settings.config.ui.always_on_top:
+            return
+        for window in (self._pet_window, self._pet_speech_window):
+            if window is not None:
+                self._window_coordinator.raise_window(window)
 
     @Slot()
     def _apply_saved_settings(self) -> None:
@@ -726,7 +740,7 @@ class QmlApplicationController(QObject):
                 self._set_pet_speech(event.text)
             return
         if isinstance(event, TranscriptReady):
-            self._chat.append_user_message(event.text)
+            self._chat.append_user_message(event.text, event.session_id)
             self._set_pet_speech("")
             return
         if isinstance(event, TextDelta):

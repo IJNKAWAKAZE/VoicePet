@@ -39,7 +39,8 @@ Rectangle {
     readonly property int toolbarHeight: 40
     readonly property int editorHeight: Math.max(56, Math.min(140, composer.implicitHeight))
     implicitHeight: editorHeight + toolbarHeight + 16
-        + (attachments.count > 0 ? 34 : 0) + (recording ? 22 : 0)
+        + (attachments.count > 0 ? attachmentPreview.implicitHeight + 8 : 0)
+        + (recording ? 22 : 0)
     radius: 14
     color: theme.surface
     border.color: composer.activeFocus ? theme.focus : theme.border
@@ -99,8 +100,9 @@ Rectangle {
         attachments.clear()
     }
 
-    Row {
+    Flow {
         id: attachmentPreview
+        objectName: "attachmentPreview"
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top

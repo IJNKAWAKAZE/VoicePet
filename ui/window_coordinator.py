@@ -52,6 +52,21 @@ class WindowCoordinator(QObject):
             return False
         return True
 
+    @Slot(QWindow, result=bool)
+    def raise_window(self, window: QWindow) -> bool:
+        """把置顶窗口抬回置顶带最前面，重新显示或改标志都不会自动回到最前"""
+
+        if window is None:
+            return False
+        raise_method = getattr(window, "raise_", None)
+        if not callable(raise_method):
+            return False
+        try:
+            raise_method()
+        except RuntimeError:
+            return False
+        return True
+
     def clamp_rect(self, rect: QRect, screens: Sequence[QRect]) -> QRect:
         """把主窗口限制到最接近的可用屏幕内"""
 

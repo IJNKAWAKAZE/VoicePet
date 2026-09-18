@@ -224,3 +224,40 @@ async def test_cancel_targets_only_the_requested_turn(tmp_path):
     async with gateway.session_maintenance():
         pass
 
+
+@pytest.mark.anyio
+async def test_session_maintenance_targets_only_the_deleted_session(tmp_path):
+    client = ManualClient()
+    store = AgentStore(tmp_path / "agent.db")
+    stopped = []
+
+    async def factory():
+        return client
+
+    async def stop_worker():
+        stopped.append(True)
+
+    gateway = AgentGateway(factory, store, stop_worker=stop_worker)
+    running = asyncio.create_task(
+        collect(gateway.run_turn("running", "第一问", turn_id="t1"))
+    )
+    await wait_started(client, 1)
+
+    # 目标会话本身在跑时必须拒绝
+    with pytest.raises(AgentGatewayError, match="当前回复完成后才能删除会话"):
+        async with gateway.session_maintenance(("running",)):
+            pass
+    # 其它会话仍在执行时可以删除已结束的会话
+    async with gateway.session_maintenance(("finished",)):
+        pass
+    # 但不能为了删除会话关掉仍被占用的 Worker
+    assert stopped == []
+    assert client.request("t1") is not None
+
+    await client.emit("t1", AgentEventType.TURN_COMPLETED, {"status": "completed"})
+    assert [event.turn_id for event in await running] == ["t1"]
+
+    async with gateway.session_maintenance(("finished",)):
+        pass
+    assert stopped == [True]
+

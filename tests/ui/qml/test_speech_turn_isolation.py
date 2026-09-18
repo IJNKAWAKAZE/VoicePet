@@ -11,6 +11,7 @@ from core.events import (
     SpeakRequested,
     StateChanged,
     TextDelta,
+    TranscriptReady,
     TurnId,
 )
 from core.runtime_errors import runtime_error_event
@@ -268,3 +269,19 @@ def test_background_session_error_stays_silent_and_keeps_the_reason(speech_app):
     assert [item["markdown"] for item in chat.messageModel._items] == [
         "运行时操作失败，请运行诊断检查"
     ]
+
+
+def test_voice_transcript_is_recorded_in_the_active_session(speech_app):
+    controller, _runtime, chat, _pet = speech_app
+    chat.activate_session("voice-session")
+    session_id = chat.activeSessionId
+    turn, correlation = TurnId.new(), CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn, correlation, ConversationPhase.IDLE, ConversationPhase.LISTENING, session_id,
+    ))
+    controller.handle_runtime_event(
+        TranscriptReady(turn, correlation, "你好小蓝", session_id)
+    )
+
+    # 语音转写必须落到发起它的会话，否则点桌宠说话看不到自己的提问
+    assert [item["markdown"] for item in chat.messageModel._items] == ["你好小蓝"]

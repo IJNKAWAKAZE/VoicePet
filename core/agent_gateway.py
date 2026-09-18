@@ -122,18 +122,26 @@ class AgentGateway:
         if self._client: await self._client.close(); self._client=None
 
     @asynccontextmanager
-    async def session_maintenance(self):
-        if self._active_turns or self._session_maintenance:
+    async def session_maintenance(self, session_ids=None):
+        """删除会话前释放线程持有者，只锁定本次要删除的会话"""
+        targets = None if session_ids is None else {str(item) for item in session_ids}
+        if self._session_maintenance:
+            raise AgentGatewayError("正在清理会话，请稍后重试")
+        if self._active_turns and (
+            targets is None or set(self._session_turns) & targets
+        ):
             raise AgentGatewayError("当前回复完成后才能删除会话")
         self._session_maintenance = True
         try:
             # 先关闭线程持有者，避免文件仍被占用或被缓冲写入重新创建。
-            if self._stop_worker is not None:
-                await self._stop_worker()
-                self._client = None
-                self._capabilities = None
-            else:
-                await self.close()
+            # 还有其它会话在跑时不能关闭它，否则会打断后台轮次。
+            if not self._active_turns:
+                if self._stop_worker is not None:
+                    await self._stop_worker()
+                    self._client = None
+                    self._capabilities = None
+                else:
+                    await self.close()
             yield
             self._mode_overrides.clear()
         finally:

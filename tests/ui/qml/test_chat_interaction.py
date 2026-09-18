@@ -589,3 +589,32 @@ def test_code_block_wraps_inside_bubble_instead_of_overflowing(history_window):
     prose = [item for item in visible if item.objectName() == "messageMarkdownText"]
     assert len(prose) == 2
     assert all(item.height() == pytest.approx(item.property("implicitHeight")) for item in prose)
+
+
+def test_many_attachments_wrap_inside_the_composer(history_window, tmp_path):
+    root, _, _, _ = history_window
+    composer = root.findChild(QQuickItem, "chatComposer")
+    preview = composer.findChild(QQuickItem, "attachmentPreview")
+    for index in range(8):
+        composer.addAttachment(
+            QUrl.fromLocalFile(str(tmp_path / f"很长的附件名称需要换行-{index}.txt")),
+            "file",
+        )
+    composer.setDraftText("这些附件都是什么？")
+    QTest.qWait(30)
+
+    chips = list(preview.childItems())
+    # Repeater 自身也是 Flow 的子项，只统计真正渲染出来的附件标签
+    chips = [
+        item for item in chips
+        if item.metaObject().className().startswith("QQuickRectangle")
+    ]
+    assert len(chips) == 8
+    # 放不下的附件必须自动换行，不能横向溢出输入栏
+    assert len({round(chip.y()) for chip in chips}) > 1
+    assert preview.height() >= 26 * 2
+    assert all(chip.x() + chip.width() <= preview.width() + 1 for chip in chips)
+    assert composer.height() >= preview.height()
+    # 附件区必须完整落在输入栏内部
+    assert (preview.mapToScene(QPointF(0, preview.height())).y()
+            <= composer.mapToScene(QPointF(0, composer.height())).y())

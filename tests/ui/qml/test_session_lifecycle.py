@@ -412,3 +412,26 @@ def test_session_row_shows_last_message_time(archived_chat, qapp):
             root.deleteLater()
         engine.deleteLater()
         qapp.processEvents()
+
+
+def test_finished_session_can_be_deleted_while_another_one_runs(tmp_path, qapp):
+    archive = SessionArchiveStore(tmp_path / "sessions.db")
+    runtime = ArchiveRuntime(archive)
+    dialogs = DialogCoordinator()
+    chat = ChatViewModel(runtime, dialogs=dialogs)
+    finished_id = runtime.sessions.current_session_id
+    archive.archive_turn(str(uuid4()), "已完成的问题", "已完成的回答", finished_id)
+    running_id = runtime.sessions.new()
+    archive.archive_turn(str(uuid4()), "正在执行的问题", "执行中的回答", running_id)
+    chat.activate_session(finished_id)
+    chat.begin_turn(running_id)
+    assert chat.anyProcessing is True
+
+    try:
+        chat.request_delete_session(finished_id)
+        # 运行中的是另一个会话，删除已结束的会话不应该被拦下
+        assert dialogs.currentConfirmation is not None
+        dialogs.resolve_confirmation(dialogs.currentConfirmation["requestId"], True)
+        assert not runtime.sessions.list_turns(finished_id)
+    finally:
+        archive.close()

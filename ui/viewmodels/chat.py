@@ -856,8 +856,8 @@ class ChatViewModel(QObject):
         self._confirm_session_removal(None)
 
     def _confirm_session_removal(self, session_id: str | None) -> None:
-        # 删除会关闭 Agent 线程持有者，必须等所有会话的轮次都结束
-        if self.anyProcessing or self._session_loading:
+        # 其它会话可以继续执行，只有被删除的会话必须已经结束
+        if self._session_loading or self._removal_blocked(session_id):
             self.errorOccurred.emit("会话运行结束后才能删除会话")
             return
         if self._dialogs is None or session_id == "":
@@ -866,7 +866,7 @@ class ChatViewModel(QObject):
 
         def remove() -> None:
             # 确认等待期间可能开始新的回复，执行前再次检查
-            if self.anyProcessing or self._session_loading:
+            if self._session_loading or self._removal_blocked(session_id):
                 self.errorOccurred.emit("会话运行结束后才能删除会话")
                 return
             try:
@@ -894,6 +894,13 @@ class ChatViewModel(QObject):
             ),
             remove,
         )
+
+    def _removal_blocked(self, session_id: str | None) -> bool:
+        """清空全部会话仍要求整体空闲，删除单个会话只要求它自己结束"""
+
+        if session_id is None:
+            return self.anyProcessing
+        return session_id in self._processing
 
     def _watch(self, operation: str, future: Future[Any]) -> None:
         def done(completed: Future[Any]) -> None:

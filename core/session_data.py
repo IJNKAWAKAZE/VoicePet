@@ -127,5 +127,10 @@ class SessionDataManager:
         if self._agent_store is None or self._codex_files is None:
             return
         thread_id = self._agent_store.thread_id(session_id)
-        if thread_id:
+        if not thread_id:
+            return
+        try:
             self._codex_files.delete_thread(thread_id)
+        except OSError:
+            # 其它会话仍在执行时线程文件可能被占用；残留文件只是可重建的缓存
+            pass
