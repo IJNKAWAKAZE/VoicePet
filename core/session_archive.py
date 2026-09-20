@@ -23,6 +23,11 @@ class SessionArchiveError(RuntimeError):
     code = "session.archive"
 
 
+_ASSISTANT_TEXT_LIMIT = 16_000
+_MAX_ASSISTANT_ITEMS = 200
+_TRUNCATION_NOTICE = "\n\n……（回复过长，历史记录已截断）"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionTurnRecord:
     """一个已完成且带自动过期时间的会话轮次"""
@@ -36,6 +41,7 @@ class SessionTurnRecord:
     created_at: datetime
     expires_at: datetime
     attachments: tuple[dict[str, str], ...] = ()
+    assistant_items: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +130,7 @@ class SessionArchiveStore:
         assistant_text: str,
         session_id: str | None = None,
         attachments: Sequence[Mapping[str, object]] = (),
+        assistant_items: Sequence[Mapping[str, object]] = (),
     ) -> SessionTurnRecord:
         """按来源轮次幂等归档一个完整问答"""
 
@@ -131,8 +138,9 @@ class SessionArchiveStore:
         normalized_session_id = session_id or turn_id
         self._validate_uuid(normalized_session_id, "会话 ID")
         user = self._validate_text(user_text, "用户文本", 4096)
-        assistant = self._validate_text(assistant_text, "助手文本", 16_000)
+        assistant = self._bounded_assistant_text(assistant_text)
         normalized_attachments = self._normalize_attachments(attachments)
+        normalized_items = self._normalize_assistant_items(assistant_items)
         now = self._now()
         with self._lock:
             self._ensure_open()
@@ -196,6 +204,17 @@ class SessionArchiveStore:
                         [
                             (turn_id, item["name"], item["path"], item["url"], item["mediaType"], item["kind"])
                             for item in normalized_attachments
+                        ],
+                    )
+                    self._connection.execute(
+                        "DELETE FROM session_turn_items WHERE turn_id=?", (turn_id,)
+                    )
+                    self._connection.executemany(
+                        "INSERT INTO session_turn_items(turn_id,position,item_id,text) "
+                        "VALUES (?,?,?,?)",
+                        [
+                            (turn_id, index, item["itemId"], item["text"])
+                            for index, item in enumerate(normalized_items)
                         ],
                     )
             except sqlite3.Error as error:
@@ -724,6 +743,16 @@ class SessionArchiveStore:
                         "DELETE FROM short_term_summaries WHERE session_id=?", (session_id,)
                     )
                     self._connection.execute(
+                        "DELETE FROM session_turn_items WHERE turn_id IN "
+                        "(SELECT turn_id FROM session_turns WHERE session_id=?)",
+                        (session_id,),
+                    )
+                    self._connection.execute(
+                        "DELETE FROM session_turn_attachments WHERE turn_id IN "
+                        "(SELECT turn_id FROM session_turns WHERE session_id=?)",
+                        (session_id,),
+                    )
+                    self._connection.execute(
                         "DELETE FROM session_turns WHERE session_id=?", (session_id,)
                     )
                     self._connection.execute(
@@ -771,6 +800,8 @@ class SessionArchiveStore:
                         ((row["session_id"], row["turn_id"]) for row in turns), now
                     )
                     self._connection.execute("DELETE FROM short_term_summaries")
+                    self._connection.execute("DELETE FROM session_turn_items")
+                    self._connection.execute("DELETE FROM session_turn_attachments")
                     self._connection.execute("DELETE FROM session_turns")
                     if session_ids:
                         placeholders = self._placeholders(session_ids)
@@ -832,6 +863,16 @@ class SessionArchiveStore:
                     "turn_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, "
                     "url TEXT NOT NULL, media_type TEXT NOT NULL, kind TEXT NOT NULL, "
                     "PRIMARY KEY(turn_id, path), FOREIGN KEY(turn_id) REFERENCES session_turns(turn_id) ON DELETE CASCADE)"
+                )
+            except sqlite3.Error as error:
+                raise SessionArchiveError("会话数据库结构迁移失败") from error
+            try:
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS session_turn_items("
+                    "turn_id TEXT NOT NULL, position INTEGER NOT NULL, "
+                    "item_id TEXT NOT NULL, text TEXT NOT NULL, "
+                    "PRIMARY KEY(turn_id, position), "
+                    "FOREIGN KEY(turn_id) REFERENCES session_turns(turn_id) ON DELETE CASCADE)"
                 )
             except sqlite3.Error as error:
                 raise SessionArchiveError("会话数据库结构迁移失败") from error
@@ -945,6 +986,14 @@ class SessionArchiveStore:
             f"DELETE FROM memory_progress WHERE turn_id IN ({placeholders})",
             tuple(turn_ids),
         )
+        self._connection.execute(
+            f"DELETE FROM session_turn_items WHERE turn_id IN ({placeholders})",
+            tuple(turn_ids),
+        )
+        self._connection.execute(
+            f"DELETE FROM session_turn_attachments WHERE turn_id IN ({placeholders})",
+            tuple(turn_ids),
+        )
         jobs = self._connection.execute(
             "SELECT id,source_turn_ids_json FROM memory_jobs"
         ).fetchall()
@@ -1012,6 +1061,48 @@ class SessionArchiveStore:
             raise SessionArchiveError(f"{label}无效")
         return value.strip()
 
+    @staticmethod
+    def _bounded_assistant_text(value: str) -> str:
+        """超长回复截断保留开头，避免整轮对话从历史里消失"""
+
+        if not isinstance(value, str) or not value.strip():
+            raise SessionArchiveError("助手文本无效")
+        text = value.strip()
+        if len(text) <= _ASSISTANT_TEXT_LIMIT:
+            return text
+        keep = _ASSISTANT_TEXT_LIMIT - len(_TRUNCATION_NOTICE)
+        return text[:keep] + _TRUNCATION_NOTICE
+
+    @staticmethod
+    def _normalize_assistant_items(
+        assistant_items: Sequence[Mapping[str, object]],
+    ) -> tuple[dict[str, str], ...]:
+        """保存每个回复条目的文本，聊天历史按条目重建气泡"""
+
+        if isinstance(assistant_items, (str, bytes, bytearray)):
+            raise SessionArchiveError("助手条目无效")
+        if not isinstance(assistant_items, Sequence):
+            raise SessionArchiveError("助手条目无效")
+        normalized: list[dict[str, str]] = []
+        total = 0
+        for item in assistant_items:
+            if not isinstance(item, Mapping):
+                raise SessionArchiveError("助手条目无效")
+            text = item.get("text", "")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            entry = text.strip()
+            total += len(entry)
+            if total > _ASSISTANT_TEXT_LIMIT:
+                # 条目总量超过正文上限时只保留整段正文，避免展示与正文不一致
+                return ()
+            normalized.append(
+                {"itemId": str(item.get("itemId", ""))[:128], "text": entry}
+            )
+            if len(normalized) >= _MAX_ASSISTANT_ITEMS:
+                break
+        return tuple(normalized)
+
     def _turn_record(self, row: sqlite3.Row) -> SessionTurnRecord:
         attachments = tuple(
             {
@@ -1026,6 +1117,13 @@ class SessionArchiveStore:
                 (row["turn_id"],),
             ).fetchall()
         )
+        assistant_items = tuple(
+            {"itemId": str(item["item_id"]), "text": str(item["text"])}
+            for item in self._connection.execute(
+                "SELECT item_id,text FROM session_turn_items WHERE turn_id=? ORDER BY position",
+                (row["turn_id"],),
+            ).fetchall()
+        )
         return SessionTurnRecord(
             row["id"],
             row["turn_id"],
@@ -1036,6 +1134,7 @@ class SessionArchiveStore:
             datetime.fromisoformat(row["created_at"]),
             datetime.fromisoformat(row["expires_at"]),
             attachments,
+            assistant_items,
         )
 
     @staticmethod

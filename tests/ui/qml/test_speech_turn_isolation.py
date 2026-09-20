@@ -98,6 +98,51 @@ def test_parallel_session_turn_end_clears_its_running_state(speech_app):
     assert chat.anyProcessing is False
 
 
+def test_switching_to_running_session_restores_pet_state(qapp):
+    controller, _runtime, tray, qml, _shell, chat, *_ = build_controller(qapp)
+    controller.start()
+    try:
+        pet = qml.root_objects[0].findChild(QObject, "petWindow")
+        animation = pet.property("animation")
+        first = TurnId.new()
+        chat.activate_session("session-a")
+        controller.handle_runtime_event(StateChanged(
+            first, CorrelationId.new(), ConversationPhase.IDLE, ConversationPhase.THINKING,
+            "session-a",
+        ))
+        assert animation.row == 7
+
+        # 会话 A 转入后台后切到会话 B，桌宠要跟着当前会话变成执行状态
+        chat.activate_session("session-b")
+        second = TurnId.new()
+        controller.handle_runtime_event(StateChanged(
+            second, CorrelationId.new(), ConversationPhase.IDLE, ConversationPhase.EXECUTING_TOOL,
+            "session-b",
+        ))
+        assert animation.row == 4
+
+        # A 在后台继续推进状态时桌宠不受影响，B 结束后先回到空闲
+        controller.handle_runtime_event(StateChanged(
+            first, CorrelationId.new(), ConversationPhase.THINKING, ConversationPhase.AWAITING_APPROVAL,
+            "session-a",
+        ))
+        assert animation.row == 4
+        controller.handle_runtime_event(StateChanged(
+            second, CorrelationId.new(), ConversationPhase.EXECUTING_TOOL, ConversationPhase.IDLE,
+            "session-b",
+        ))
+        assert animation.row == 0
+        assert tray.listening is False
+
+        # 切回仍在等待确认的 A 时，桌宠与托盘要恢复该会话的状态而不是停在空闲
+        chat.activate_session("session-a")
+
+        assert animation.row == 6
+        assert tray.listening is True
+    finally:
+        controller.close()
+
+
 @pytest.mark.parametrize("operation", ["switch", "new"])
 def test_session_change_hides_bubble_and_starts_fresh(speech_app, operation):
     controller, runtime, chat, pet = speech_app

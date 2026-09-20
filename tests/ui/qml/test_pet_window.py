@@ -9,7 +9,7 @@ from ui.pet_animation_model import PetAnimationModel, PetInteractionController
 
 
 def test_animation_model_publishes_v2_sheet_and_phase_rows(qapp):
-    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    model = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
 
     assert model.cell_width == 192
     assert model.cell_height == 208
@@ -25,7 +25,7 @@ def test_animation_model_publishes_v2_sheet_and_phase_rows(qapp):
 
 
 def test_animation_model_uses_variable_durations_and_execution_followup(qapp):
-    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    model = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
     model.advance_frame()
     assert model.column == 1
     assert model.frame_duration == 110
@@ -123,7 +123,7 @@ def test_drag_reports_incremental_deltas_after_threshold(qapp):
 
 
 def test_animation_model_can_switch_to_valid_pet_directory(qapp, tmp_path):
-    source = Path("assets/pet/dpsk-girl").resolve()
+    source = Path("assets/pet/kawakaze").resolve()
     target = tmp_path / "new-pet"
     target.mkdir()
     shutil.copy2(source / "spritesheet.webp", target / "spritesheet.webp")

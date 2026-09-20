@@ -16,7 +16,7 @@ from ui.viewmodels.settings import SettingsViewModel
 @pytest.fixture
 def pets(qapp, monkeypatch):
     monkeypatch.setattr(PetViewModel, "_STATUS_TIMEOUT_MS", 40, raising=False)
-    directory = Path("assets/pet/dpsk-girl").resolve()
+    directory = Path("assets/pet/kawakaze").resolve()
     choices = (PetChoice("guga", "咕嘎", directory, False),)
     runtime = Runtime(Path("pets/guga"))
     vm = PetViewModel(runtime, SettingsViewModel(AppConfig(), Store()), lambda: choices)
@@ -73,13 +73,13 @@ def test_leaving_pet_page_clears_completed_import_status(qapp, navigation):
         pending = Future()
         runtime.install_pet = lambda source: pending
         vm.import_pet("builtin-copy.zip")
-        pending.set_result(Path("pets/dpsk-girl"))
+        pending.set_result(Path("pets/kawakaze"))
         assert "已导入" in vm.statusMessage
         qapp.processEvents()
         items = [page]
         for item in items:
             items.extend(item.childItems())
-        badge = next((item for item in items if item.objectName() == "activePetBadge_dpsk-girl"), None)
+        badge = next((item for item in items if item.objectName() == "activePetBadge_kawakaze"), None)
         assert badge is not None and badge.property("visible")
         if navigation == "section":
             shell.navigate("chat")
@@ -112,7 +112,7 @@ def test_returning_to_pet_page_does_not_restore_background_completion(qapp, navi
             shell.hide_main()
         qapp.processEvents()
         assert vm.importBusy and "正在" in vm.statusMessage
-        pending.set_result(Path("pets/dpsk-girl"))
+        pending.set_result(Path("pets/kawakaze"))
         if navigation == "category":
             page.setProperty("category", "pets")
         else:

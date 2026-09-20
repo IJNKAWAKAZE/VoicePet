@@ -41,8 +41,8 @@ class Runtime:
 
 
 def test_catalog_orders_builtin_first_and_searches_name_and_id(tmp_path):
-    builtin = PetChoice("dpsk-girl", "鲸鱼娘", Path("assets/pet/dpsk-girl").resolve(), True)
-    user = PetChoice("forest-cat", "森林猫", Path("assets/pet/dpsk-girl").resolve(), False)
+    builtin = PetChoice("kawakaze", "江风 Q版", Path("assets/pet/kawakaze").resolve(), True)
+    user = PetChoice("forest-cat", "森林猫", Path("assets/pet/kawakaze").resolve(), False)
     choices = (user, builtin)
     viewmodel = PetViewModel(
         Runtime(tmp_path / "pets" / "new-pet"),
@@ -52,10 +52,10 @@ def test_catalog_orders_builtin_first_and_searches_name_and_id(tmp_path):
 
     viewmodel.refresh()
 
-    assert viewmodel.catalog_model.data(viewmodel.catalog_model.index(0), Qt.UserRole + 1) == "dpsk-girl"
+    assert viewmodel.catalog_model.data(viewmodel.catalog_model.index(0), Qt.UserRole + 1) == "kawakaze"
     viewmodel.set_search("forest")
     assert viewmodel.catalog_model.rowCount() == 1
-    viewmodel.set_search("鲸鱼")
+    viewmodel.set_search("江风")
     assert viewmodel.catalog_model.rowCount() == 1
 
 
@@ -63,16 +63,16 @@ def test_select_emits_preview_and_saves_active_pet():
     store = Store()
     settings = SettingsViewModel(AppConfig(), store)
     choices = (
-        PetChoice("dpsk-girl", "鲸鱼娘", Path("assets/pet/dpsk-girl").resolve(), True),
+        PetChoice("kawakaze", "江风 Q版", Path("assets/pet/kawakaze").resolve(), True),
     )
     viewmodel = PetViewModel(Runtime(Path("unused")), settings, lambda: choices)
     preview = QSignalSpy(viewmodel.previewRequested)
     viewmodel.refresh()
 
-    viewmodel.select_pet("dpsk-girl")
+    viewmodel.select_pet("kawakaze")
 
     assert preview.count() == 1
-    assert settings.config.ui.active_skin == "dpsk-girl"
+    assert settings.config.ui.active_skin == "kawakaze"
 
 
 def test_delete_active_user_pet_switches_to_builtin_first(tmp_path):
@@ -81,32 +81,32 @@ def test_delete_active_user_pet_switches_to_builtin_first(tmp_path):
         {**AppConfig().to_dict(), "ui": {**AppConfig().to_dict()["ui"], "active_skin": "forest-cat"}}
     )
     settings = SettingsViewModel(initial, store)
-    builtin = PetChoice("dpsk-girl", "鲸鱼娘", Path("assets/pet/dpsk-girl").resolve(), True)
-    user = PetChoice("forest-cat", "森林猫", Path("assets/pet/dpsk-girl").resolve(), False)
+    builtin = PetChoice("kawakaze", "江风 Q版", Path("assets/pet/kawakaze").resolve(), True)
+    user = PetChoice("forest-cat", "森林猫", Path("assets/pet/kawakaze").resolve(), False)
     runtime = Runtime(tmp_path / "pets" / "new-pet")
     viewmodel = PetViewModel(runtime, settings, lambda: (builtin, user))
     viewmodel.refresh()
 
     viewmodel.delete_pet("forest-cat")
 
-    assert settings.config.ui.active_skin == "dpsk-girl"
+    assert settings.config.ui.active_skin == "kawakaze"
     assert runtime.deleted == ["forest-cat"]
 
 
 def test_builtin_pet_cannot_be_deleted():
-    builtin = PetChoice("dpsk-girl", "鲸鱼娘", Path("assets/pet/dpsk-girl").resolve(), True)
+    builtin = PetChoice("kawakaze", "江风 Q版", Path("assets/pet/kawakaze").resolve(), True)
     runtime = Runtime(Path("unused"))
     viewmodel = PetViewModel(runtime, SettingsViewModel(AppConfig(), Store()), lambda: (builtin,))
     viewmodel.refresh()
 
-    viewmodel.delete_pet("dpsk-girl")
+    viewmodel.delete_pet("kawakaze")
 
     assert runtime.deleted == []
 
 
 def test_pet_directory_lookup_only_returns_catalog_entries():
-    directory = Path("assets/pet/dpsk-girl").resolve()
-    builtin = PetChoice("dpsk-girl", "鲸鱼娘", directory, True)
+    directory = Path("assets/pet/kawakaze").resolve()
+    builtin = PetChoice("kawakaze", "江风 Q版", directory, True)
     viewmodel = PetViewModel(
         Runtime(Path("unused")),
         SettingsViewModel(AppConfig(), Store()),
@@ -114,20 +114,20 @@ def test_pet_directory_lookup_only_returns_catalog_entries():
     )
     viewmodel.refresh()
 
-    assert viewmodel.directory_for("dpsk-girl") == directory
+    assert viewmodel.directory_for("kawakaze") == directory
     assert viewmodel.directory_for("missing") is None
 
 
 def test_import_refreshes_and_selects_new_pet(tmp_path):
     installed = tmp_path / "pets" / "new-pet"
     current = [
-        PetChoice("dpsk-girl", "鲸鱼娘", Path("assets/pet/dpsk-girl").resolve(), True),
+        PetChoice("kawakaze", "江风 Q版", Path("assets/pet/kawakaze").resolve(), True),
     ]
     runtime = Runtime(installed)
     settings = SettingsViewModel(AppConfig(), Store())
     viewmodel = PetViewModel(runtime, settings, lambda: tuple(current))
     viewmodel.refresh()
-    current.append(PetChoice("new-pet", "新形象", Path("assets/pet/dpsk-girl").resolve(), False))
+    current.append(PetChoice("new-pet", "新形象", Path("assets/pet/kawakaze").resolve(), False))
 
     viewmodel.import_pet("D:/new.codex-pet")
 
@@ -148,4 +148,4 @@ def test_failed_import_displays_validation_reason_and_keeps_current_pet():
     assert pets.importBusy is False
     assert pets.statusMessage == "桌宠包必须包含唯一 pet.json"
     assert errors.count() == 1
-    assert settings.config.ui.active_skin == "dpsk-girl"
+    assert settings.config.ui.active_skin == "kawakaze"

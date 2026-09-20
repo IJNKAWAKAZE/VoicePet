@@ -111,7 +111,7 @@ def default_pet_directory() -> Path:
     """返回源码或冻结包中的内置桌宠目录"""
 
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parents[1]))
-    return bundle_root / "assets" / "pet" / "dpsk-girl"
+    return bundle_root / "assets" / "pet" / "kawakaze"
 
 
 def resolve_active_pet_directory(

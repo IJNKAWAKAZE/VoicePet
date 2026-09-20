@@ -1071,25 +1071,28 @@ class ChatViewModel(QObject):
             created_at = _iso(_read(turn, "created_at", datetime.now(UTC)))
             turn_id = str(_read(turn, "id", uuid4()))
             raw_attachments = _read(turn, "attachments", ())
-            items.extend(
-                (
-                    _message_item(
-                        f"{turn_id}:user",
-                        "user",
-                        _read(turn, "user_text", ""),
-                        "complete",
-                        created_at,
-                        attachments=_attachment_view_items(raw_attachments),
-                    ),
-                    _message_item(
-                        f"{turn_id}:assistant",
-                        "assistant",
-                        _read(turn, "assistant_text", ""),
-                        "complete",
-                        created_at,
-                    ),
+            items.append(
+                _message_item(
+                    f"{turn_id}:user",
+                    "user",
+                    _read(turn, "user_text", ""),
+                    "complete",
+                    created_at,
+                    attachments=_attachment_view_items(raw_attachments),
                 )
             )
+            segments = _assistant_segments(turn)
+            for index, segment in enumerate(segments):
+                suffix = "" if len(segments) == 1 else f":{index}"
+                items.append(
+                    _message_item(
+                        f"{turn_id}:assistant{suffix}",
+                        "assistant",
+                        segment,
+                        "complete",
+                        created_at,
+                    )
+                )
         self._session_items[session_id] = items
 
     def _show_session(self, session_id: str) -> None:
@@ -1238,6 +1241,24 @@ def _message_item(
         "createdLabel": _time_label(created_at),
         "attachments": list(attachments or []),
     }
+
+
+def _assistant_segments(turn: object) -> tuple[str, ...]:
+    """归档的分段回复按条目重建气泡，旧数据退化成整段一条"""
+
+    raw = _read(turn, "assistant_items", ())
+    if isinstance(raw, (list, tuple)):
+        segments = tuple(
+            text
+            for text in (
+                str(_read(entry, "text", "")).strip() for entry in raw
+            )
+            if text
+        )
+        if segments:
+            return segments
+    fallback = str(_read(turn, "assistant_text", "")).strip()
+    return (fallback,) if fallback else ()
 
 
 def _attachment_view_items(

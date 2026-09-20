@@ -107,6 +107,29 @@ def simplify_asr_text(text: str) -> str:
     return OpenCC("t2s").convert(text)
 
 
+def append_stream_segment(
+    segments: list[dict[str, str]],
+    positions: dict[str, int],
+    item_id: str,
+    text: str,
+) -> None:
+    """把同一 Codex 条目的增量合并成一段，聊天历史按段重建气泡"""
+
+    if item_id:
+        index = positions.get(item_id)
+        if index is not None:
+            segments[index]["text"] += text
+            return
+        positions[item_id] = len(segments)
+        segments.append({"itemId": item_id, "text": text})
+        return
+    # 旧链路没有条目标识，全部并入最后一段，避免逐字成条
+    if segments and not segments[-1]["itemId"]:
+        segments[-1]["text"] += text
+        return
+    segments.append({"itemId": "", "text": text})
+
+
 class AudioSession(Protocol):
     """录音适配器边界"""
 
@@ -155,6 +178,7 @@ class SessionArchiveProvider(Protocol):
         assistant_text: str,
         session_id: str | None = None,
         attachments: Sequence[Mapping[str, object]] = (),
+        assistant_items: Sequence[Mapping[str, object]] = (),
     ) -> object: ...
 
     def discard_turn(self, turn_id: str) -> bool: ...
@@ -190,7 +214,7 @@ class Coordinator:
         audio_player: AudioPlayer | None = None,
         speech_enabled: bool = True,
         manual_input_speech_enabled: bool = False,
-        wake_keyword: str = "你好，小蓝",
+        wake_keyword: str = "你好，小江",
         continuous_conversation: bool = False,
         followup_timeout: float = 8.0,
         agent_gateway: object | None = None,
@@ -252,6 +276,7 @@ class Coordinator:
         self._active_session_id: str | None = None
         self._session_turn_archived = False
         self._persistent_turn_archived = False
+        self._archived_turn_id = ""
         self._pending_memory: PendingMemoryApproval | None = None
         self._approval_lock = asyncio.Lock()
         self._stopped = False
@@ -834,6 +859,9 @@ class Coordinator:
         """把 Agent 面向用户的文本事件接入现有聊天和语音链路"""
         correlation_id = CorrelationId.new()
         chunks: list[str] = []
+        segments: list[dict[str, str]] = []
+        segment_positions: dict[str, int] = {}
+        turn_session_id = self._active_session_id
         stream = None
         try:
             memory_history = ()
@@ -863,11 +891,17 @@ class Coordinator:
                 except StopAsyncIteration:
                     break
                 if token.is_cancelled:
+                    await self._archive_interrupted_turn(
+                        turn_id, text, segments, turn_session_id
+                    )
                     await self._agent_gateway.cancel(str(turn_id))
                     return
                 if event.type is AgentEventType.TEXT_DELTA:
                     value = str(event.payload.get("text", ""))
                     chunks.append(value)
+                    append_stream_segment(
+                        segments, segment_positions, agent_item_id(event), value
+                    )
                     await self._event_bus.publish(TextDelta(turn_id, correlation_id, value, agent_item_id(event), self._session_id))
                 elif event.type is AgentEventType.REASONING_DELTA:
                     # Agent 的中间过程文字独立成条，命令输出保留在各自的条目里
@@ -995,14 +1029,27 @@ class Coordinator:
             if not completed:
                 raise RuntimeError("Agent 流缺少完成事件")
             if not self._accept_result(turn_id, token):
+                await self._archive_interrupted_turn(
+                    turn_id, text, segments, turn_session_id
+                )
                 return
             response = "".join(chunks)
             self._response_text = response
             if response and self._session_context is not None:
                 self._session_context.add_turn(text, response)
             if response and self._session_archive is not None:
-                await self._archive_completed_turn(turn_id, text, response, self._active_session_id, token)
+                await self._archive_completed_turn(
+                    turn_id,
+                    text,
+                    response,
+                    turn_session_id,
+                    token,
+                    assistant_items=segments,
+                )
             if not self._accept_result(turn_id, token):
+                await self._archive_interrupted_turn(
+                    turn_id, text, segments, turn_session_id
+                )
                 return
             if (response and self._speech_enabled_for_active_turn()
                     and self._speech_synthesizer is not None and self._audio_player is not None):
@@ -1018,8 +1065,10 @@ class Coordinator:
             ):
                 await self.start_listening("wake_followup")
         except asyncio.CancelledError:
+            await self._archive_interrupted_turn(turn_id, text, segments, turn_session_id)
             await self._agent_gateway.cancel(str(turn_id))
         except Exception as error:  # noqa: BLE001 Agent 失败只显示安全错误
+            await self._archive_interrupted_turn(turn_id, text, segments, turn_session_id)
             await self._handle_runtime_error(turn_id, correlation_id, token, error)
         finally:
             if stream is not None:
@@ -1231,6 +1280,53 @@ class Coordinator:
         if finished is not None and not self._stopped:
             await self._event_bus.publish(finished)
 
+    @staticmethod
+    def _archive_keyword_names(method: object) -> frozenset[str]:
+        """内省归档实现支持的关键字，无法内省时按只支持附件的旧接口处理"""
+
+        try:
+            return frozenset(inspect.signature(method).parameters)
+        except (TypeError, ValueError):
+            return frozenset({"attachments"})
+
+    async def _archive_interrupted_turn(
+        self,
+        turn_id: TurnId,
+        user_text: str,
+        assistant_items: Sequence[Mapping[str, str]],
+        session_id: str | None,
+    ) -> None:
+        """轮次中断或退出时补写已经展示过的内容，避免整轮从聊天历史里消失"""
+
+        if self._session_archive is None or self._archived_turn_id == str(turn_id):
+            return
+        items = tuple(
+            {
+                "itemId": str(item.get("itemId", "")),
+                "text": str(item.get("text", "")),
+            }
+            for item in assistant_items
+            if str(item.get("text", "")).strip()
+        )
+        normalized_user = user_text.strip()
+        if not normalized_user or not items:
+            return
+        self._archived_turn_id = str(turn_id)
+        assistant_text = "".join(item["text"] for item in items)
+        try:
+            archive_method = self._session_archive.archive_turn
+            archive_arguments = (
+                (str(turn_id), normalized_user, assistant_text)
+                if session_id is None
+                else (str(turn_id), normalized_user, assistant_text, session_id)
+            )
+            archive_kwargs: dict[str, object] = {}
+            if "assistant_items" in self._archive_keyword_names(archive_method):
+                archive_kwargs["assistant_items"] = items
+            await asyncio.to_thread(archive_method, *archive_arguments, **archive_kwargs)
+        except Exception as error:  # noqa: BLE001 中断补写失败不能改变取消行为
+            _ = error
+
     async def _archive_completed_turn(
         self,
         turn_id: TurnId,
@@ -1238,6 +1334,8 @@ class Coordinator:
         assistant_text: str,
         session_id: str | None,
         token: CancellationToken,
+        *,
+        assistant_items: Sequence[Mapping[str, str]] = (),
     ) -> None:
         assert self._session_archive is not None
         if not self._accept_result(turn_id, token):
@@ -1260,23 +1358,18 @@ class Coordinator:
                 for item in self._active_attachments
             )
             archive_method = self._session_archive.archive_turn
-            supports_attachments = False
-            try:
-                supports_attachments = "attachments" in inspect.signature(archive_method).parameters
-            except (TypeError, ValueError):
-                supports_attachments = True
-            if not supports_attachments:
-                await asyncio.to_thread(archive_method, *archive_arguments)
-            else:
-                await asyncio.to_thread(
-                    archive_method,
-                    *archive_arguments,
-                    attachments=attachment_view,
-                )
+            supported = self._archive_keyword_names(archive_method)
+            archive_kwargs: dict[str, object] = {}
+            if "attachments" in supported:
+                archive_kwargs["attachments"] = attachment_view
+            if "assistant_items" in supported:
+                archive_kwargs["assistant_items"] = tuple(assistant_items)
+            await asyncio.to_thread(archive_method, *archive_arguments, **archive_kwargs)
         except Exception as error:  # noqa: BLE001 会话归档失败不能阻断最终回复
             _ = error
             return
         if not self._accept_result(turn_id, token):
+            self._archived_turn_id = str(turn_id)
             try:
                 await asyncio.to_thread(
                     self._session_archive.discard_turn,
@@ -1287,6 +1380,7 @@ class Coordinator:
             return
         budget.ensure_available()
         self._persistent_turn_archived = True
+        self._archived_turn_id = str(turn_id)
         if (
             session_id is not None
             and self._archive_completion is not None

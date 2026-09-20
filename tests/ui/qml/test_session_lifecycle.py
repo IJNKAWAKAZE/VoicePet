@@ -98,6 +98,34 @@ def test_startup_restores_current_history_without_activating_another_session(arc
     assert runtime.sessions.current_session_id == old_id
 
 
+def test_restored_history_rebuilds_each_reply_segment(tmp_path, qapp):
+    archive = SessionArchiveStore(tmp_path / "sessions.db")
+    runtime = ArchiveRuntime(archive)
+    session_id = runtime.sessions.current_session_id
+    archive.archive_turn(
+        str(uuid4()),
+        "长任务",
+        "先看环境再改文档最后提交",
+        session_id,
+        assistant_items=(
+            {"itemId": "item-1", "text": "先看环境"},
+            {"itemId": "item-2", "text": "再改文档"},
+            {"itemId": "item-3", "text": "最后提交"},
+        ),
+    )
+    chat = ChatViewModel(runtime)
+
+    chat.restore_current_session()
+
+    assert [row["markdown"] for row in model_rows(chat.messageModel)] == [
+        "长任务",
+        "先看环境",
+        "再改文档",
+        "最后提交",
+    ]
+    archive.close()
+
+
 def test_new_session_stays_visible_then_refreshes_after_archive(archived_chat):
     chat, runtime, old_id = archived_chat
     chat.refresh_sessions()

@@ -58,6 +58,7 @@ _TARGET_TABLES = (
     "memory_sessions",
     "session_turns",
     "session_turn_attachments",
+    "session_turn_items",
     "short_term_summaries",
     "summary_suppressions",
     "memory_jobs",
@@ -164,6 +165,15 @@ _DDL = (
         media_type TEXT NOT NULL,
         kind TEXT NOT NULL,
         PRIMARY KEY(turn_id, path)
+    )
+    """,
+    """
+    CREATE TABLE session_turn_items(
+        turn_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        item_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY(turn_id, position)
     )
     """,
     """

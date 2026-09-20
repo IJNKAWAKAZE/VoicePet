@@ -95,9 +95,9 @@ class Runtime:
         self.pet_catalog_loads += 1
         return (
             PetChoice(
-                "dpsk-girl",
-                "鲸鱼娘",
-                Path("assets/pet/dpsk-girl").resolve(),
+                "kawakaze",
+                "江风 Q版",
+                Path("assets/pet/kawakaze").resolve(),
                 True,
             ),
         )
@@ -204,7 +204,7 @@ def build_controller(
     pets = PetViewModel(runtime, settings, runtime.load_pet_catalog)
     diagnostics = DiagnosticsViewModel(runtime)
     theme = ThemeViewModel(config.ui, lambda ui: None)
-    animation = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    animation = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
     interaction = PetInteractionController(double_click_interval=5)
     qml = QmlRuntime(
         qapp,
@@ -287,7 +287,7 @@ def test_selecting_pet_reloads_desktop_and_settings_preview(qapp):
     animation = pet_window.property("animation")
     changed = QSignalSpy(animation.sheetChanged)
 
-    controller._pets.select_pet("dpsk-girl")
+    controller._pets.select_pet("kawakaze")
 
     assert changed.count() == 1
     assert Path(animation.sheetUrl.toLocalFile()).name == "spritesheet.webp"

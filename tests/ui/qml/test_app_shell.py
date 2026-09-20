@@ -103,7 +103,7 @@ def test_main_window_responsive_structure(qapp, width, overlay, compact):
     memories = MemoryViewModel(service, dialogs)
     pets = PetViewModel(service, settings, lambda: ())
     diagnostics = DiagnosticsViewModel(service)
-    animation = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    animation = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
     interaction = PetInteractionController()
     runtime = QmlRuntime(
         qapp,
@@ -204,7 +204,7 @@ def test_chat_context_sidebar_routes_session_actions(qapp):
             "settingsViewModel": settings,
             "petViewModel": PetViewModel(service, settings, lambda: ()),
             "diagnosticsViewModel": DiagnosticsViewModel(service),
-            "petAnimation": PetAnimationModel(Path("assets/pet/dpsk-girl").resolve()),
+            "petAnimation": PetAnimationModel(Path("assets/pet/kawakaze").resolve()),
             "petInteraction": PetInteractionController(),
         },
         qml_root() / "Main.qml",

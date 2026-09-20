@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -5,11 +6,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSize
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 import ui.pet_animation as pet_animation_module
 from core.events import ConversationPhase
 from ui.pet_animation import (
+    ATLAS_HEIGHT,
+    ATLAS_WIDTH,
     PetAssetError,
     PetSpriteAtlas,
     animation_row_for_phase,
@@ -21,20 +25,46 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_default_v2_atlas_loads_manifest_and_exact_cells():
+def test_builtin_atlas_loads_manifest_and_exact_cells():
     app()
-    directory = Path("assets/pet/dpsk-girl").resolve()
+    directory = Path("assets/pet/kawakaze").resolve()
 
     atlas = PetSpriteAtlas.load(directory)
 
-    assert atlas.pet_id == "dpsk-girl"
-    assert atlas.display_name == "鲸鱼娘"
+    assert atlas.pet_id == "kawakaze"
+    assert atlas.display_name == "江风 Q版"
     assert atlas.frame(0, 0).size() == QSize(192, 208)
+    assert atlas.frame(8, 7).size() == QSize(192, 208)
+    with pytest.raises(PetAssetError):
+        atlas.frame(9, 0)
+    with pytest.raises(PetAssetError):
+        atlas.frame(0, 8)
+
+
+def test_full_v2_atlas_exposes_look_direction_rows(tmp_path):
+    app()
+    directory = tmp_path / "full-v2"
+    directory.mkdir()
+    sheet = QImage(ATLAS_WIDTH, ATLAS_HEIGHT, QImage.Format_ARGB32)
+    sheet.fill(0)
+    assert sheet.save(str(directory / "sheet.png"))
+    manifest = {
+        "id": "full-v2",
+        "displayName": "完整图集",
+        "description": "8 列 11 行的完整 v2 图集",
+        "spriteVersionNumber": 2,
+        "spritesheetPath": "sheet.png",
+    }
+    (directory / "pet.json").write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    atlas = PetSpriteAtlas.load(directory)
+
     assert atlas.frame(10, 7).size() == QSize(192, 208)
     with pytest.raises(PetAssetError):
         atlas.frame(11, 0)
-    with pytest.raises(PetAssetError):
-        atlas.frame(0, 8)
 
 
 @pytest.mark.parametrize(
@@ -87,7 +117,7 @@ def test_animation_model_wraps_at_valid_frame_count(
     first_duration,
 ):
     app()
-    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    model = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
 
     model.set_phase(phase)
     assert model.frame_duration == first_duration
@@ -100,7 +130,7 @@ def test_animation_model_wraps_at_valid_frame_count(
 
 def test_animation_model_resets_on_phase_and_runs_execution_reaction_once():
     app()
-    model = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    model = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
 
     model.advance_frame()
     assert (model.row, model.column) == (0, 1)

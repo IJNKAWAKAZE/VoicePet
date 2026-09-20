@@ -125,6 +125,7 @@ class QmlApplicationController(QObject):
         self._phase = ConversationPhase.IDLE
         self._phase_turn_id: TurnId | None = None
         self._session_turns: dict[str, TurnId] = {}
+        self._session_phases: dict[str, ConversationPhase] = {}
         self._speech_text = ""
         self._speech_turn_id: TurnId | None = None
         self._speech_item_id = ""
@@ -147,6 +148,7 @@ class QmlApplicationController(QObject):
         self._dialogs.agentInteractionResolved.connect(self._resolve_agent_interaction)
         chat.voiceRecordingChanged.connect(self._sync_manual_voice_state)
         chat.activeSessionIdChanged.connect(self._reset_pet_speech)
+        chat.activeSessionIdChanged.connect(self._restore_pet_phase)
         chat.processingChanged.connect(self._reset_speech_on_submission)
         chat.viewMemoryRequested.connect(lambda: self.show_main("memories"))
         if settings is not None:
@@ -677,6 +679,24 @@ class QmlApplicationController(QObject):
         self._set_pet_speech("")
 
     @Slot()
+    def _restore_pet_phase(self) -> None:
+        """切回仍在执行的会话时，把桌宠与托盘恢复到该会话的当前状态"""
+
+        session_id = self._chat.activeSessionId
+        phase = self._session_phases.get(session_id, ConversationPhase.IDLE)
+        self._phase = phase
+        self._phase_turn_id = (
+            None if phase is ConversationPhase.IDLE else self._session_turns.get(session_id)
+        )
+        # 聆听沿用待机动画，与前台事件保持同一套映射
+        self._pet_animation.set_phase(
+            ConversationPhase.IDLE if phase is ConversationPhase.LISTENING else phase
+        )
+        setter = getattr(self._tray, "set_listening", None)
+        if callable(setter):
+            setter(phase is not ConversationPhase.IDLE)
+
+    @Slot()
     def _reset_speech_on_submission(self) -> None:
         if self._chat.processing:
             self._reset_pet_speech()
@@ -687,6 +707,12 @@ class QmlApplicationController(QObject):
             # 并行会话的状态变化各归各的轮次，迟到事件不能收掉别人的收尾
             if self._is_stale_turn(event):
                 return
+            # 记住每个会话最近的状态，切回后台会话时据此恢复桌宠
+            session_key = event.session_id or ""
+            if event.current is ConversationPhase.IDLE:
+                self._session_phases.pop(session_key, None)
+            else:
+                self._session_phases[session_key] = event.current
             if not self._is_foreground_session(event.session_id):
                 # 后台会话只更新自己的聊天条目，不驱动宠物、托盘和气泡
                 if event.current is not ConversationPhase.IDLE:

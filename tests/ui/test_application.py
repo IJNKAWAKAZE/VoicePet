@@ -105,7 +105,7 @@ def test_run_ui_normal_mode_builds_starts_and_closes_runtime(tmp_path, monkeypat
     assert len(built) == 1
     assert built[0][2] == (tmp_path / "VoicePet").resolve()
     assert built[0][3] == "sk-runtime-secret"
-    assert built[0][4].name == "dpsk-girl"
+    assert built[0][4].name == "kawakaze"
     assert runtime.started == 1
     assert runtime.closed == 1
     assert hotkey.closed == 1

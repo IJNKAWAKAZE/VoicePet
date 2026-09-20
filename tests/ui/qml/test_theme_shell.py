@@ -106,7 +106,7 @@ def main_window(qapp):
             "settingsViewModel": settings,
             "petViewModel": PetViewModel(service, settings, lambda: ()),
             "diagnosticsViewModel": DiagnosticsViewModel(service),
-            "petAnimation": PetAnimationModel(Path("assets/pet/dpsk-girl").resolve()),
+            "petAnimation": PetAnimationModel(Path("assets/pet/kawakaze").resolve()),
             "petInteraction": PetInteractionController(),
         },
         qml_root() / "Main.qml",

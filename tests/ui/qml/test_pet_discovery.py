@@ -9,7 +9,7 @@ from ui.pet_catalog import discover_pet_choices, resolve_active_pet_directory
 
 def copy_named_pet(parent, folder):
     directory = parent / folder
-    shutil.copytree("assets/pet/dpsk-girl", directory)
+    shutil.copytree("assets/pet/kawakaze", directory)
     manifest = json.loads((directory / "pet.json").read_text(encoding="utf-8"))
     manifest["id"] = "forest-cat"
     manifest["displayName"] = "森林猫"

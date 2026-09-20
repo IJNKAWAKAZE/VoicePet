@@ -548,7 +548,7 @@ def test_wake_service_starts_ready_enabled_model():
         await service.start()
 
         assert service.status is WakeRuntimeStatus.LISTENING
-        assert detectors[-1].keyword == "你好，小蓝"
+        assert detectors[-1].keyword == "你好，小江"
         assert monitors[-1].started == 1
         await service.stop()
         assert detectors[-1].close_calls == 1

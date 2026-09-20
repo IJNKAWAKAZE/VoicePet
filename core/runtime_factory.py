@@ -98,7 +98,7 @@ def build_default_runtime(
     pet_installer = PetPackageInstaller(root / "pets")
     if pet_directory is None:
         bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parents[1]))
-        active_pet_directory = bundle_root / "assets" / "pet" / "dpsk-girl"
+        active_pet_directory = bundle_root / "assets" / "pet" / "kawakaze"
     else:
         active_pet_directory = Path(pet_directory).expanduser().resolve()
     llm_instructions = (

@@ -218,7 +218,7 @@ class PetViewModel(QObject):
         if self._settings.config.ui.active_skin == pet_id:
             fallback = next(
                 (item.pet_id for item in self._choices.values() if item.built_in),
-                "dpsk-girl",
+                "kawakaze",
             )
             self._settings.set_field("ui", "active_skin", fallback)
             if self._settings.config.ui.active_skin != fallback:

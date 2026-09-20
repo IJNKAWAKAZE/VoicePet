@@ -53,7 +53,7 @@ def test_frozen_smoke_checks_bundled_pet_and_user_data_directory(
     tmp_path,
 ):
     bundle = tmp_path / "bundle"
-    pet = bundle / "assets" / "pet" / "dpsk-girl"
+    pet = bundle / "assets" / "pet" / "kawakaze"
     pet.mkdir(parents=True)
     (pet / "pet.json").write_text("{}", encoding="utf-8")
     (pet / "spritesheet.webp").write_bytes(b"webp")
@@ -80,7 +80,7 @@ def test_frozen_smoke_rejects_bundle_without_qml_and_theme_assets(
     tmp_path,
 ):
     bundle = tmp_path / "bundle"
-    pet = bundle / "assets" / "pet" / "dpsk-girl"
+    pet = bundle / "assets" / "pet" / "kawakaze"
     pet.mkdir(parents=True)
     (pet / "pet.json").write_text("{}", encoding="utf-8")
     (pet / "spritesheet.webp").write_bytes(b"webp")

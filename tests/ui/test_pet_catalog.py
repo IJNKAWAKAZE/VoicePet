@@ -30,7 +30,7 @@ def write_pet_choice(
         encoding="utf-8",
     )
     if sprite_path == "spritesheet.webp":
-        shutil.copyfile("assets/pet/dpsk-girl/spritesheet.webp", directory / sprite_path)
+        shutil.copyfile("assets/pet/kawakaze/spritesheet.webp", directory / sprite_path)
     return directory
 
 
@@ -101,5 +101,5 @@ def test_active_pet_resolution_prefers_user_install_and_rejects_traversal(tmp_pa
 
     assert resolve_active_pet_directory("custom", tmp_path) == user_pet.resolve()
     assert resolve_active_pet_directory("../outside", tmp_path) == Path(
-        "assets/pet/dpsk-girl"
+        "assets/pet/kawakaze"
     ).resolve()

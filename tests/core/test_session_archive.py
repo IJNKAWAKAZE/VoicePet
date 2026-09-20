@@ -67,6 +67,94 @@ def test_existing_version_two_database_adds_attachment_table(tmp_path):
         store.close()
 
 
+def test_existing_database_adds_turn_item_table(tmp_path):
+    database = tmp_path / "assistant.db"
+    connection = sqlite3.connect(database)
+    ensure_memory_schema(connection)
+    connection.execute("DROP TABLE session_turn_items")
+    connection.close()
+
+    store = SessionArchiveStore(database, clock=lambda: NOW)
+    try:
+        columns = {
+            row[1]
+            for row in store._connection.execute(
+                "PRAGMA table_info(session_turn_items)"
+            )
+        }
+        assert columns == {"turn_id", "position", "item_id", "text"}
+    finally:
+        store.close()
+
+
+def test_turn_items_are_stored_in_order_and_removed_with_the_turn(tmp_path):
+    store = SessionArchiveStore(tmp_path / "assistant.db", clock=lambda: NOW)
+    turn_id = str(uuid4())
+
+    record = store.archive_turn(
+        turn_id,
+        "长任务",
+        "先看环境再改文档最后提交",
+        assistant_items=(
+            {"itemId": "item-1", "text": "先看环境"},
+            {"itemId": "item-2", "text": "再改文档"},
+            {"itemId": "item-3", "text": "最后提交"},
+        ),
+    )
+
+    assert [item["text"] for item in record.assistant_items] == [
+        "先看环境",
+        "再改文档",
+        "最后提交",
+    ]
+    assert store.list_turns()[0].assistant_items == record.assistant_items
+    assert store.discard_turn(turn_id) is True
+    assert store.list_turns() == ()
+    assert store._connection.execute(
+        "SELECT COUNT(*) FROM session_turn_items"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+def test_turn_items_survive_reopening_the_database(tmp_path):
+    database = tmp_path / "assistant.db"
+    store = SessionArchiveStore(database, clock=lambda: NOW)
+    store.archive_turn(
+        str(uuid4()),
+        "问题",
+        "第一答第二答",
+        assistant_items=(
+            {"itemId": "item-1", "text": "第一答"},
+            {"itemId": "item-2", "text": "第二答"},
+        ),
+    )
+    store.close()
+
+    reopened = SessionArchiveStore(database, clock=lambda: NOW)
+    assert [item["text"] for item in reopened.list_turns()[0].assistant_items] == [
+        "第一答",
+        "第二答",
+    ]
+    reopened.close()
+
+
+def test_over_long_reply_is_truncated_instead_of_dropped(tmp_path):
+    store = SessionArchiveStore(tmp_path / "assistant.db", clock=lambda: NOW)
+
+    record = store.archive_turn(
+        str(uuid4()),
+        "超长回复",
+        "答" * 20_000,
+        assistant_items=({"itemId": "item-1", "text": "答" * 20_000},),
+    )
+
+    assert record.assistant_text.endswith("历史记录已截断）")
+    assert len(record.assistant_text) == 16_000
+    assert record.assistant_items == ()
+    assert store.list_turns() == (record,)
+    store.close()
+
+
 def test_summary_is_structured_and_upserts_by_source_turn(tmp_path):
     store = SessionArchiveStore(tmp_path / "assistant.db", clock=lambda: NOW)
     turn_id = str(uuid4())

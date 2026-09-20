@@ -491,6 +491,7 @@ class RecordingSessionArchive:
     def __init__(self, error=None):
         self.error = error
         self.calls = []
+        self.item_calls = []
         self.discarded = []
 
     def archive_turn(
@@ -499,9 +500,14 @@ class RecordingSessionArchive:
         user_text,
         assistant_text,
         session_id=None,
+        attachments=(),
+        assistant_items=(),
     ):
         values = (turn_id, user_text, assistant_text)
         self.calls.append(values if session_id is None else (*values, session_id))
+        self.item_calls.append(
+            (turn_id, tuple(str(item.get("text", "")) for item in assistant_items))
+        )
         if self.error is not None:
             raise self.error
         return type("Record", (), {"turn_id": turn_id})()
@@ -538,6 +544,13 @@ def agent_delta(text: str):
 def agent_completed(status: str = "completed"):
     return SimpleNamespace(
         type=AgentEventType.TURN_COMPLETED, payload={"status": status}
+    )
+
+
+def agent_item_delta(item_id: str, text: str):
+    """带条目标识的文本增量，聊天历史按条目重建气泡"""
+    return SimpleNamespace(
+        type=AgentEventType.TEXT_DELTA, payload={"text": text}, item_id=item_id
     )
 
 
@@ -585,6 +598,41 @@ class BlockingGateway:
             yield
         finally:
             self.cancelled.set()
+
+    async def cancel(self) -> None:
+        return None
+
+
+class StreamingGateway:
+    """先回放若干条目再挂起，用于验证中断时的补写"""
+
+    def __init__(self, events) -> None:
+        self.events = tuple(events)
+        self.streamed = asyncio.Event()
+
+    async def run_turn(self, session, text, **kwargs):
+        del session, text, kwargs
+        for event in self.events:
+            yield event
+        self.streamed.set()
+        await asyncio.Event().wait()
+
+    async def cancel(self) -> None:
+        return None
+
+
+class FailingGateway:
+    """回放若干条目后抛错，用于验证失败时的补写"""
+
+    def __init__(self, events, error) -> None:
+        self.events = tuple(events)
+        self.error = error
+
+    async def run_turn(self, session, text, **kwargs):
+        del session, text, kwargs
+        for event in self.events:
+            yield event
+        raise self.error
 
     async def cancel(self) -> None:
         return None
@@ -1529,6 +1577,179 @@ def test_session_archive_failure_does_not_suppress_final_reply():
         await asyncio.sleep(0.01)
 
         assert coordinator.phase is ConversationPhase.IDLE
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_completed_agent_turn_archives_reply_segments_in_order():
+    async def scenario():
+        transcript = ControlledTranscript(["长任务"])
+        archive = RecordingSessionArchive()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            agent_gateway=ScriptedGateway(
+                [
+                    agent_item_delta("item-1", "先看环境"),
+                    agent_item_delta("item-1", "，再改文档"),
+                    agent_item_delta("item-2", "最后提交"),
+                    agent_completed(),
+                ]
+            ),
+            session_archive=archive,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert archive.calls == [
+            (str(turn_id), "长任务", "先看环境，再改文档最后提交")
+        ]
+        assert archive.item_calls == [
+            (str(turn_id), ("先看环境，再改文档", "最后提交"))
+        ]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_agent_turn_archives_what_was_already_shown():
+    async def scenario():
+        transcript = ControlledTranscript(["长任务"])
+        gateway = StreamingGateway(
+            [
+                agent_item_delta("item-1", "先看环境"),
+                agent_item_delta("item-2", "再改文档"),
+            ]
+        )
+        archive = RecordingSessionArchive()
+        session = SessionContext()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            agent_gateway=gateway,
+            session_context=session,
+            session_archive=archive,
+            shutdown_timeout=0.01,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await gateway.streamed.wait()
+        await coordinator.cancel_active_turn()
+
+        assert archive.calls == [
+            (str(turn_id), "长任务", "先看环境再改文档", session.session_id)
+        ]
+        assert archive.item_calls == [(str(turn_id), ("先看环境", "再改文档"))]
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_turn_without_reply_is_not_archived():
+    async def scenario():
+        transcript = ControlledTranscript(["长任务"])
+        gateway = StreamingGateway(())
+        archive = RecordingSessionArchive()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            agent_gateway=gateway,
+            session_archive=archive,
+            shutdown_timeout=0.01,
+        )
+
+        await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await gateway.streamed.wait()
+        await coordinator.cancel_active_turn()
+
+        assert archive.calls == []
+        assert archive.item_calls == []
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_interrupted_turn_reaches_the_real_session_archive(tmp_path):
+    from core.session_archive import SessionArchiveStore
+
+    async def scenario():
+        transcript = ControlledTranscript(["长任务"])
+        gateway = StreamingGateway(
+            [
+                agent_item_delta("item-1", "先看环境"),
+                agent_item_delta("item-2", "再改文档"),
+            ]
+        )
+        archive = SessionArchiveStore(tmp_path / "sessions.db")
+        session = SessionContext()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            EventBus(),
+            agent_gateway=gateway,
+            session_context=session,
+            session_archive=archive,
+            shutdown_timeout=0.01,
+        )
+        try:
+            await coordinator.start_listening()
+            await wait_until(lambda: len(transcript.calls) == 1)
+            transcript.releases[0].set()
+            await gateway.streamed.wait()
+            await coordinator.cancel_active_turn()
+
+            record = archive.list_session_turns(session.session_id)[0]
+            assert record.user_text == "长任务"
+            assert record.assistant_text == "先看环境再改文档"
+            assert [item["text"] for item in record.assistant_items] == [
+                "先看环境",
+                "再改文档",
+            ]
+        finally:
+            await coordinator.stop()
+            archive.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_agent_turn_archives_what_was_already_shown():
+    async def scenario():
+        transcript = ControlledTranscript(["长任务"])
+        gateway = FailingGateway(
+            [agent_item_delta("item-1", "先看环境"), agent_item_delta("item-2", "再改文档")],
+            RuntimeError("agent crashed"),
+        )
+        archive = RecordingSessionArchive()
+        bus = EventBus()
+        errors = []
+        ready = asyncio.Event()
+        bus.subscribe(RuntimeErrorEvent, lambda event: (errors.append(event), ready.set()))
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            transcript,
+            bus,
+            agent_gateway=gateway,
+            session_archive=archive,
+        )
+
+        turn_id = await coordinator.start_listening()
+        await wait_until(lambda: len(transcript.calls) == 1)
+        transcript.releases[0].set()
+        await ready.wait()
+
+        assert archive.calls == [(str(turn_id), "长任务", "先看环境再改文档")]
+        assert archive.item_calls == [(str(turn_id), ("先看环境", "再改文档"))]
         await coordinator.stop()
 
     asyncio.run(scenario())

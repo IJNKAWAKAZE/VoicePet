@@ -48,8 +48,8 @@ def _run_frozen_smoke() -> int:
         / "themes"
         / "sunny_sea"
         / "welcome.webp",
-        bundle_root / "assets" / "pet" / "dpsk-girl" / "pet.json",
-        bundle_root / "assets" / "pet" / "dpsk-girl" / "spritesheet.webp",
+        bundle_root / "assets" / "pet" / "kawakaze" / "pet.json",
+        bundle_root / "assets" / "pet" / "kawakaze" / "spritesheet.webp",
     )
     if not bundle_root.is_dir() or not local_app_data:
         return 3

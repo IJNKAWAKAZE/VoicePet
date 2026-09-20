@@ -376,7 +376,7 @@ def test_default_runtime_factory_registers_active_component_probes(
     monkeypatch.setattr(runtime_factory_module, "probe_tts", fake_tts)
     monkeypatch.setattr(runtime_factory_module, "probe_pet", fake_pet)
     monkeypatch.setattr(runtime_factory_module, "probe_desktop", fake_desktop)
-    pet_directory = Path("assets/pet/dpsk-girl").resolve()
+    pet_directory = Path("assets/pet/kawakaze").resolve()
     services = build_default_runtime(
         AppConfig(),
         EventBus(),
@@ -448,7 +448,7 @@ def test_default_runtime_factory_enables_managed_wake_service_for_ready_model(
 
         assert services.wake_service.status is WakeRuntimeStatus.LISTENING
         assert seen["files"].tokens == (model / "tokens.txt").resolve()
-        assert seen["detector_settings"]["keyword"] == "你好，小蓝"
+        assert seen["detector_settings"]["keyword"] == "你好，小江"
         assert seen["monitor"][4]["debounce_sec"] == 1.5
         assert callable(seen["monitor"][4]["on_error"])
         asyncio.run(services.wake_service.stop())

@@ -112,11 +112,11 @@ def test_new_memory_flags_require_real_booleans(field):
 def test_default_config_matches_product_defaults_and_is_immutable():
     config = AppConfig()
 
-    assert config.config_version == 3
+    assert config.config_version == 4
     assert config.audio.sample_rate == 16000
     assert config.audio.channels == 1
     assert config.wake_word.enabled is True
-    assert config.wake_word.keyword == "你好，小蓝"
+    assert config.wake_word.keyword == "你好，小江"
     assert config.wake_word.sensitivity == 0.5
     assert config.asr.model == "small"
     assert config.llm.model == "gpt-5.6-terra"
@@ -126,7 +126,7 @@ def test_default_config_matches_product_defaults_and_is_immutable():
     assert config.tts.enabled is True
     assert config.tts.manual_input_enabled is False
     assert config.tts.voice == "zh-CN-XiaoxiaoNeural"
-    assert config.ui.active_skin == "dpsk-girl"
+    assert config.ui.active_skin == "kawakaze"
     assert config.ui.start_at_login is False
     assert config.ui.theme_id == "sunny_sea"
     assert config.ui.reduce_motion is False
@@ -190,7 +190,7 @@ def test_v1_config_without_wake_fields_uses_chinese_defaults():
     loaded = AppConfig.from_dict(data)
 
     assert loaded.wake_word.enabled is True
-    assert loaded.wake_word.keyword == "你好，小蓝"
+    assert loaded.wake_word.keyword == "你好，小江"
 
 
 def test_v1_config_without_startup_setting_uses_disabled_default():
@@ -208,10 +208,35 @@ def test_version_one_config_migrates_ui_defaults_without_rewriting_file(tmp_path
     result = ConfigStore(path).load()
 
     assert result.status is ConfigLoadStatus.LOADED
-    assert result.config.config_version == 3
+    assert result.config.config_version == 4
     assert result.config.ui.theme_id == "sunny_sea"
     assert result.config.ui.pet_scale == 1.0
     assert json.loads(path.read_text(encoding="utf-8"))["config_version"] == 1
+
+
+def test_v3_config_moves_retired_builtin_pet_and_legacy_wake_word():
+    data = AppConfig().to_dict()
+    data["config_version"] = 3
+    data["ui"] = {**data["ui"], "active_skin": "dpsk-girl"}
+    data["wake_word"] = {**data["wake_word"], "keyword": "你好，小蓝"}
+
+    config = AppConfig.from_dict(data)
+
+    assert config.config_version == 4
+    assert config.ui.active_skin == "kawakaze"
+    assert config.wake_word.keyword == "你好，小江"
+
+
+def test_v3_config_keeps_customized_pet_and_wake_word():
+    data = AppConfig().to_dict()
+    data["config_version"] = 3
+    data["ui"] = {**data["ui"], "active_skin": "forest-cat"}
+    data["wake_word"] = {**data["wake_word"], "keyword": "你好海蓝"}
+
+    config = AppConfig.from_dict(data)
+
+    assert config.ui.active_skin == "forest-cat"
+    assert config.wake_word.keyword == "你好海蓝"
 
 
 def test_wake_word_fields_round_trip_in_config(tmp_path):
@@ -437,7 +462,7 @@ def test_corrupt_or_invalid_config_returns_defaults_and_preserves_source(tmp_pat
 @pytest.mark.parametrize(
     "data",
     [
-        {"config_version": 4},
+        {"config_version": 5},
         {"config_version": True},
         {"audio": {"sample_rate": 0, "channels": 1}},
         {"wake_word": {"sensitivity": 2, "debounce_sec": 1.5}},

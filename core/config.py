@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 SUPPORTED_REASONING_EFFORTS = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
-CURRENT_CONFIG_VERSION = 3
+CURRENT_CONFIG_VERSION = 4
 SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
 MAX_SYSTEM_PROMPT_CHARS = 4000
 _LOCAL_LLM_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -63,7 +63,7 @@ class AudioConfig:
 @dataclass(frozen=True, slots=True)
 class WakeWordConfig:
     enabled: bool = True
-    keyword: str = "你好，小蓝"
+    keyword: str = "你好，小江"
     sensitivity: float = 0.5
     debounce_sec: float = 1.5
     continuous_conversation: bool = False
@@ -126,7 +126,7 @@ class TtsConfig:
 
 @dataclass(frozen=True, slots=True)
 class UiConfig:
-    active_skin: str = "dpsk-girl"
+    active_skin: str = "kawakaze"
     always_on_top: bool = True
     hot_reload_skin: bool = True
     start_at_login: bool = False
@@ -334,6 +334,10 @@ class AppConfig:
         return asdict(self)
 
 
+_RETIRED_ACTIVE_SKINS = {"dpsk-girl": "kawakaze"}
+_LEGACY_WAKE_KEYWORDS = {"你好，小蓝": "你好，小江"}
+
+
 def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
     """把受支持的旧配置迁移为当前内存结构"""
 
@@ -342,12 +346,21 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("配置版本类型无效")
     if version == CURRENT_CONFIG_VERSION:
         return data
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise ConfigError(f"只支持 config_version {CURRENT_CONFIG_VERSION}")
 
     migrated = dict(data)
     migrated["config_version"] = CURRENT_CONFIG_VERSION
     migrated.setdefault("agent", asdict(AgentConfig()))
+    raw_wake_word = migrated.get("wake_word")
+    if isinstance(raw_wake_word, dict):
+        legacy_keyword = raw_wake_word.get("keyword")
+        if legacy_keyword in _LEGACY_WAKE_KEYWORDS:
+            # 旧默认唤醒词视为未自定义，跟随新的内置形象
+            migrated["wake_word"] = {
+                **raw_wake_word,
+                "keyword": _LEGACY_WAKE_KEYWORDS[legacy_keyword],
+            }
     raw_ui = migrated.get("ui")
     if raw_ui is not None and not isinstance(raw_ui, dict):
         raise ConfigError("配置分区 ui 必须是对象")
@@ -363,6 +376,9 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         "global_hotkey",
     ):
         ui.setdefault(field_name, getattr(defaults, field_name))
+    if ui.get("active_skin") in _RETIRED_ACTIVE_SKINS:
+        # 已移除的内置形象回退到当前内置形象
+        ui["active_skin"] = _RETIRED_ACTIVE_SKINS[ui["active_skin"]]
     if raw_ui is not None:
         migrated["ui"] = ui
     return migrated

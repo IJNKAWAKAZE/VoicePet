@@ -29,7 +29,7 @@ def test_dialog_acceptance_passes_native_path_to_installer(
     qapp, tmp_path, dialog_name, selection, filename,
 ):
     package = tmp_path / "package"
-    shutil.copytree("assets/pet/dpsk-girl", package)
+    shutil.copytree("assets/pet/kawakaze", package)
     manifest = json.loads((package / "pet.json").read_text(encoding="utf-8"))
     manifest["id"] = "forest-cat"
     manifest["displayName"] = "森林猫"
@@ -58,7 +58,7 @@ def test_dialog_acceptance_passes_native_path_to_installer(
     installer = PetPackageInstaller(data_root / "pets")
     pets = PetViewModel(Runtime(), settings, lambda: discover_pet_choices(data_root))
     theme = ThemeViewModel(UiConfig(), lambda config: None)
-    animation = PetAnimationModel(Path("assets/pet/dpsk-girl").resolve())
+    animation = PetAnimationModel(Path("assets/pet/kawakaze").resolve())
     QQuickStyle.setStyle("Basic")
     engine = QQmlEngine()
     warnings = []
