@@ -7,6 +7,7 @@ from core.agent_types import AgentEventType
 from core.asr import AsrTranscriptionError
 from core.audio_types import AudioDeviceError
 from core.cancellation import CancellationToken
+from core.config import MAX_MANUAL_INPUT_CHARS
 from core.coordinator import Coordinator
 from core.event_bus import EventBus
 from core.events import (
@@ -957,13 +958,35 @@ def test_manual_text_rejects_invalid_or_busy_submission():
             shutdown_timeout=0.01,
         )
 
-        for text in ("", "   ", "x" * 4097):
+        for text in ("", "   ", "x" * (MAX_MANUAL_INPUT_CHARS + 1)):
             with pytest.raises(ValueError):
                 await coordinator.submit_text(text)
         await coordinator.submit_text("第一条")
         await gateway.started.wait()
         with pytest.raises(RuntimeError, match="cannot start text turn"):
             await coordinator.submit_text("第二条")
+        await coordinator.stop()
+
+    asyncio.run(scenario())
+
+
+def test_manual_text_accepts_the_full_character_limit():
+    async def scenario():
+        archive = RecordingSessionArchive()
+        coordinator = Coordinator(
+            ImmediateAudio(),
+            UnexpectedTranscript(),
+            EventBus(),
+            agent_gateway=ScriptedGateway([agent_delta("收到"), agent_completed()]),
+            session_archive=archive,
+        )
+
+        text = "日" * MAX_MANUAL_INPUT_CHARS
+        await coordinator.submit_text(text)
+        await wait_until(lambda: coordinator.phase is ConversationPhase.IDLE)
+
+        assert coordinator.response_text == "收到"
+        assert archive.calls[-1][1] == text
         await coordinator.stop()
 
     asyncio.run(scenario())

@@ -618,3 +618,33 @@ def test_many_attachments_wrap_inside_the_composer(history_window, tmp_path):
     # 附件区必须完整落在输入栏内部
     assert (preview.mapToScene(QPointF(0, preview.height())).y()
             <= composer.mapToScene(QPointF(0, composer.height())).y())
+
+
+def test_user_message_renders_pasted_markdown_as_plain_text(history_window):
+    root, chat, _, _ = history_window
+    chat.append_user_message("# 部署步骤\n- 第一步")
+    chat.append_assistant_delta("# 部署步骤\n- 第一步")
+    QTest.qWait(80)
+
+    page = root.findChild(QQuickItem, "chatPage")
+    prose = {}
+    for item in visual_items(page):
+        if item.metaObject().className().startswith("MessageBubble") and str(
+            item.property("markdown")
+        ) == "# 部署步骤\n- 第一步":
+            prose[str(item.property("role"))] = next(
+                child for child in visual_items(item)
+                if child.objectName() == "messageMarkdownText"
+            )
+    assert set(prose) == {"user", "assistant"}
+
+    # 用户消息按纯文本渲染：标题符号与列表标记原样可见
+    # 必须持有 QQuickTextDocument，否则中间对象被回收时会连带销毁文档
+    user_quick_document = prose["user"].property("textDocument")
+    user_document = user_quick_document.textDocument()
+    assert prose["user"].property("text") == "# 部署步骤\n- 第一步"
+    assert user_document.toPlainText() == "# 部署步骤\n- 第一步"
+    # 助手回复仍按 Markdown 渲染：标题符号会被解析掉
+    assistant_quick_document = prose["assistant"].property("textDocument")
+    assistant_document = assistant_quick_document.textDocument()
+    assert "#" not in assistant_document.toPlainText()

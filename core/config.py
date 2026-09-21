@@ -17,6 +17,7 @@ SUPPORTED_REASONING_EFFORTS = frozenset(
 CURRENT_CONFIG_VERSION = 4
 SUPPORTED_THEME_IDS = frozenset({"sunny_sea", "deep_night", "sakura_coral"})
 MAX_SYSTEM_PROMPT_CHARS = 4000
+MAX_MANUAL_INPUT_CHARS = 16_000
 _LOCAL_LLM_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _WAKE_PUNCTUATION = frozenset(
     " ，。！？、,.!?：:；;‘’\"“”()（）【】[]-_"

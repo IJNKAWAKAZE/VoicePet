@@ -13,7 +13,7 @@ from .agent_types import AgentEventType
 from .asr import AsrError
 from .audio_types import AudioError
 from .cancellation import CancellationSource, CancellationToken, CancelledError
-from .config import normalize_wake_keyword
+from .config import MAX_MANUAL_INPUT_CHARS, normalize_wake_keyword
 from .event_bus import EventBus
 from .events import (
     AgentActivityCompleted,
@@ -350,8 +350,10 @@ class Coordinator:
 
         self._ensure_running()
         normalized = text.strip() if isinstance(text, str) else ""
-        if not normalized or len(normalized) > 4096:
-            raise ValueError("手动输入必须是一至四千零九十六个字符")
+        if not normalized or len(normalized) > MAX_MANUAL_INPUT_CHARS:
+            raise ValueError(
+                f"手动输入长度必须在 1 至 {MAX_MANUAL_INPUT_CHARS} 个字符之间"
+            )
         correlation_id = CorrelationId.new()
         state_event = self._state_machine.start_text_turn(correlation_id)
         self._active_activation_source = "manual_text"

@@ -25,7 +25,7 @@ from PySide6.QtQml import QJSValue
 
 from core.agent_types import MAX_ATTACHMENTS
 from core.attachments import Attachment, inspect_attachment
-from core.config import default_config_path
+from core.config import MAX_MANUAL_INPUT_CHARS, default_config_path
 from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
 
@@ -569,6 +569,12 @@ class ChatViewModel(QObject):
             self.errorOccurred.emit("请等待当前会话加载或回复完成")
             return
         normalized = text.strip() if isinstance(text, str) else ""
+        # 超长输入先拦下来：不插入消息也不清空草稿，改短后可以直接重发
+        if len(normalized) > MAX_MANUAL_INPUT_CHARS:
+            self.errorOccurred.emit(
+                f"消息太长：当前 {len(normalized)} 字符，上限 {MAX_MANUAL_INPUT_CHARS} 字符"
+            )
+            return
         normalized_attachments: list[LlmAttachment] = []
         try:
             for item in _attachment_items(attachments):
@@ -1226,16 +1232,18 @@ class ChatViewModel(QObject):
 def _message_item(
     message_id: str,
     role: str,
-    markdown: object,
+    body: object,
     status: str,
     created_at: str,
     *,
     attachments: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    text = str(body)
     return {
         "messageId": message_id,
         "role": role,
-        "markdown": sanitize_markdown(str(markdown)),
+        # 用户消息按纯文本原样展示，粘贴的 Markdown 语法不会被渲染成标题或列表
+        "markdown": text if role == "user" else sanitize_markdown(text),
         "status": status,
         "createdAt": created_at,
         "createdLabel": _time_label(created_at),

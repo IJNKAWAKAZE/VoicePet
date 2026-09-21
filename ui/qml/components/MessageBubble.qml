@@ -19,8 +19,12 @@ Rectangle {
     property string previewSource: ""
     property bool actionsVisible: hoverHandler.hovered || copyMessageButton.visualFocus || playMessageButton.visualFocus
 
+    // 用户消息按纯文本原样展示，粘贴的 #、*、- 不会被当成 Markdown 语法
+    readonly property bool plainText: root.role === "user"
     // Qt 的 Markdown 导入器把代码块段落标成不换行，整段交给一个控件渲染会画出气泡外
-    property var markdownBlocks: MarkdownBlocks.splitBlocks(root.markdown)
+    property var markdownBlocks: root.plainText
+        ? [{ "kind": "text", "text": root.markdown }]
+        : MarkdownBlocks.splitBlocks(root.markdown)
 
     width: Math.min(720, viewportWidth * 0.78)
     implicitHeight: messageColumn.implicitHeight + 24
@@ -145,9 +149,9 @@ Rectangle {
                     visible: modelData.kind !== "code"
                     width: parent.width
                     height: implicitHeight
-                    text: modelData.text
-                    textFormat: TextEdit.MarkdownText
-                    readOnly: true
+                      text: modelData.text
+                      textFormat: root.plainText ? TextEdit.PlainText : TextEdit.MarkdownText
+                      readOnly: true
                     selectByMouse: true
                     wrapMode: TextEdit.Wrap
                     color: root.theme.text

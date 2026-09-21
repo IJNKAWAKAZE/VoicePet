@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 
+from core.config import MAX_MANUAL_INPUT_CHARS
 from core.llm import LlmAttachment
 from ui.markdown import sanitize_markdown
 from ui.viewmodels.chat import ChatViewModel
@@ -411,3 +412,34 @@ def test_tool_result_is_rendered_as_safe_structured_message():
     assert model.data(model.index(0), Qt.UserRole + 3) == "已打开记事本"
     assert model.data(model.index(0), Qt.UserRole + 4) == "success"
     assert "sk-private" not in model.data(model.index(0), Qt.UserRole + 3)
+
+
+def test_user_message_keeps_pasted_text_verbatim_while_reply_renders_markdown(qapp):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+
+    chat.submit("# 日志 ![图](file:///private.png)\n- 第一条")
+    chat.append_assistant_delta("参考 [官网](https://example.com)")
+
+    model = chat.message_model
+    # 用户消息原样保留，粘贴进来的 Markdown 语法不会被改写
+    assert model.data(model.index(0), Qt.UserRole + 3) == (
+        "# 日志 ![图](file:///private.png)\n- 第一条"
+    )
+    # 助手回复仍按 Markdown 收敛：图片降级为文字、链接变成可复制的文字
+    assert model.data(model.index(1), Qt.UserRole + 3) == "参考 官网 (https://example.com)"
+
+
+def test_too_long_message_is_rejected_before_it_is_sent(qapp):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+    errors = []
+    chat.errorOccurred.connect(errors.append)
+
+    chat.submit("日" * (MAX_MANUAL_INPUT_CHARS + 1))
+
+    assert errors == [
+        f"消息太长：当前 {MAX_MANUAL_INPUT_CHARS + 1} 字符，上限 {MAX_MANUAL_INPUT_CHARS} 字符"
+    ]
+    assert runtime.submitted == []
+    assert chat.message_model.rowCount() == 0

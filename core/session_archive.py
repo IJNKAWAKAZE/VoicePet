@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from .config import MAX_MANUAL_INPUT_CHARS
 from .memory import MemoryPolicy
 from .memory_recall import escape_like, query_terms, sql_relevance
 from .memory_schema import MemorySchemaError, ensure_memory_schema
@@ -137,7 +138,7 @@ class SessionArchiveStore:
         self._validate_uuid(turn_id, "轮次 ID")
         normalized_session_id = session_id or turn_id
         self._validate_uuid(normalized_session_id, "会话 ID")
-        user = self._validate_text(user_text, "用户文本", 4096)
+        user = self._validate_text(user_text, "用户文本", MAX_MANUAL_INPUT_CHARS)
         assistant = self._bounded_assistant_text(assistant_text)
         normalized_attachments = self._normalize_attachments(attachments)
         normalized_items = self._normalize_assistant_items(assistant_items)

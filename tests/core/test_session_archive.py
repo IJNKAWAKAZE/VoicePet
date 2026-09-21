@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 import core
+from core.config import MAX_MANUAL_INPUT_CHARS
 from core.memory_schema import ensure_memory_schema
 from core.session_archive import (
     SessionArchiveError,
@@ -45,6 +46,18 @@ def test_archive_is_immutable_idempotent_and_reopens_from_shared_database(tmp_pa
     reopened = SessionArchiveStore(database, clock=lambda: NOW)
     assert reopened.list_turns() == (first,)
     reopened.close()
+
+
+def test_archive_accepts_user_text_up_to_the_manual_input_limit(tmp_path):
+    store = SessionArchiveStore(tmp_path / "assistant.db", clock=lambda: NOW)
+    text = "日" * MAX_MANUAL_INPUT_CHARS
+
+    record = store.archive_turn(str(uuid4()), text, "收到")
+
+    assert record.user_text == text
+    with pytest.raises(SessionArchiveError):
+        store.archive_turn(str(uuid4()), text + "日", "收到")
+    store.close()
 
 
 def test_existing_version_two_database_adds_attachment_table(tmp_path):
