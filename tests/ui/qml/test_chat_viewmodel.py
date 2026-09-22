@@ -7,7 +7,7 @@ from PySide6.QtGui import QGuiApplication
 
 from core.config import MAX_MANUAL_INPUT_CHARS
 from core.llm import LlmAttachment
-from ui.markdown import sanitize_markdown
+from ui.markdown import sanitize_markdown, unescape_markdown
 from ui.viewmodels.chat import ChatViewModel
 from ui.viewmodels.dialogs import DialogCoordinator
 
@@ -103,6 +103,16 @@ def test_markdown_removes_images_and_html_but_keeps_links_as_text():
     assert "<img" not in safe
     assert "官网" in safe
     assert "https://example.com" in safe
+
+
+def test_markdown_keeps_angle_bracket_text_but_still_removes_html():
+    # 系统日志、泛型这类正文里的 <...> 不是 HTML，必须按字面量留下
+    assert sanitize_markdown("List<String> 泛型") == "List\\<String> 泛型"
+    assert sanitize_markdown("1 < 2 且 3 > 2") == "1 < 2 且 3 > 2"
+    assert sanitize_markdown("a<b 且 c>d") == "a\\<b 且 c>d"
+    # 真正的 HTML 元素仍然会被抹掉
+    assert sanitize_markdown("<b>粗体</b>") == "粗体"
+    assert sanitize_markdown('<div class="x">内容</div>') == "内容"
 
 
 def test_markdown_adds_qt_emphasis_boundaries_for_chinese_punctuation():
@@ -443,3 +453,19 @@ def test_too_long_message_is_rejected_before_it_is_sent(qapp):
     ]
     assert runtime.submitted == []
     assert chat.message_model.rowCount() == 0
+
+
+def test_angle_brackets_are_kept_in_both_roles(qapp):
+    runtime = FakeRuntime()
+    chat = ChatViewModel(runtime)
+
+    chat.submit("List<String> 泛型")
+    chat.append_assistant_delta("List<String> 泛型")
+
+    model = chat.message_model
+    # 用户消息原样保留：尖括号内容不能被当成 HTML 抹掉
+    assert model.data(model.index(0), Qt.UserRole + 3) == "List<String> 泛型"
+    # 助手回复要交给 Markdown 渲染，转义后 Qt 才会按字面量显示
+    escaped = model.data(model.index(1), Qt.UserRole + 3)
+    assert escaped == "List\\<String> 泛型"
+    assert unescape_markdown(escaped) == "List<String> 泛型"

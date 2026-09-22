@@ -648,3 +648,29 @@ def test_user_message_renders_pasted_markdown_as_plain_text(history_window):
     assistant_quick_document = prose["assistant"].property("textDocument")
     assistant_document = assistant_quick_document.textDocument()
     assert "#" not in assistant_document.toPlainText()
+
+
+def test_angle_brackets_stay_visible_in_both_bubbles(history_window):
+    root, chat, _, _ = history_window
+    chat.append_user_message("List<String> 泛型")
+    chat.append_assistant_delta("List<String> 泛型")
+    QTest.qWait(80)
+
+    page = root.findChild(QQuickItem, "chatPage")
+    # 必须持有 QQuickTextDocument，否则中间对象被回收时会连带销毁文档
+    quick_docs = {}
+    for item in visual_items(page):
+        markdown = str(item.property("markdown"))
+        if item.metaObject().className().startswith("MessageBubble") and markdown in {
+            "List<String> 泛型",
+            "List\\<String> 泛型",
+        }:
+            quick_docs[str(item.property("role"))] = next(
+                child for child in visual_items(item)
+                if child.objectName() == "messageMarkdownText"
+            ).property("textDocument")
+    assert set(quick_docs) == {"user", "assistant"}
+    docs = {role: quick.textDocument() for role, quick in quick_docs.items()}
+    # 两个气泡都必须看到完整的 <String>，而不是被 Markdown 当成标签吞掉
+    assert docs["user"].toPlainText().endswith("<String> 泛型")
+    assert docs["assistant"].toPlainText().endswith("<String> 泛型")

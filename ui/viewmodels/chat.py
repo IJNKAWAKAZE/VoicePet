@@ -27,7 +27,7 @@ from core.agent_types import MAX_ATTACHMENTS
 from core.attachments import Attachment, inspect_attachment
 from core.config import MAX_MANUAL_INPUT_CHARS, default_config_path
 from core.llm import LlmAttachment
-from ui.markdown import sanitize_markdown
+from ui.markdown import sanitize_markdown, unescape_markdown
 
 from .dialogs import ConfirmationRequest, DialogCoordinator
 
@@ -432,7 +432,8 @@ class ChatViewModel(QObject):
         if clipboard is None:
             self.errorOccurred.emit("复制失败")
             return
-        clipboard.setText(text)
+        # 展示时给 < 加了转义，复制要还原成原始字符
+        clipboard.setText(unescape_markdown(text))
         if self._dialogs is not None:
             self._dialogs.toast("已复制", "success")
 
@@ -505,7 +506,8 @@ class ChatViewModel(QObject):
 
     @Slot(str)
     def play_message(self, text: str) -> None:
-        normalized = text.strip() if isinstance(text, str) else ""
+        # 朗读同样使用原始字符，转义只在气泡展示时存在
+        normalized = unescape_markdown(text).strip()
         if not normalized:
             return
         if self._message_playing:
