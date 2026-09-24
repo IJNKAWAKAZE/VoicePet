@@ -30,7 +30,8 @@ Rectangle {
     // 短回复按内容收窄，长回复限制宽度并自然换行
     TextMetrics {
         id: messageMetrics
-        text: root.message
+        // 只量开头一小段：长回复会被钳到最大宽度，没必要为测宽对全文排一次版
+        text: root.message.slice(0, 80)
         font.pixelSize: 14
         font.family: "Microsoft YaHei UI"
     }

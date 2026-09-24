@@ -545,6 +545,38 @@ def test_each_reply_segment_gets_its_own_pet_bubble(qapp):
     controller.close()
 
 
+def test_long_stream_is_rendered_in_batches_instead_of_per_delta(qapp):
+    controller, _runtime, _tray, _qml, _shell, chat, *_ = build_controller(qapp)
+    controller.start()
+    rendered = []
+    original = chat.append_assistant_delta
+
+    def record(text, item_id="", session_id=""):
+        rendered.append(text)
+        return original(text, item_id, session_id)
+
+    chat.append_assistant_delta = record
+    turn_id = TurnId.new()
+    correlation = CorrelationId.new()
+    controller.handle_runtime_event(StateChanged(
+        turn_id, correlation, ConversationPhase.IDLE, ConversationPhase.THINKING,
+    ))
+    try:
+        for _ in range(400):
+            controller.handle_runtime_event(
+                TextDelta(turn_id, correlation, "字" * 10, "item-1")
+            )
+        # 400 个增量不能变成 400 次整段重排，否则主线程会被流式更新占满
+        assert len(rendered) < 60
+        controller.handle_runtime_event(StateChanged(
+            turn_id, correlation, ConversationPhase.THINKING, ConversationPhase.IDLE,
+        ))
+        # 收尾时必须把所有攒着的增量都落下去，一个字都不能少
+        assert len("".join(rendered)) == 4_000
+    finally:
+        controller.close()
+
+
 def test_spoken_segments_replace_the_pet_bubble_one_by_one(qapp):
     controller, _runtime, _tray, qml, *_ = build_controller(qapp)
     controller.start()

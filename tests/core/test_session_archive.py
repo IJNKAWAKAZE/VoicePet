@@ -328,3 +328,36 @@ def test_legacy_turn_rows_are_rejected_without_modifying_database(tmp_path):
 def test_archive_rejects_invalid_retention(tmp_path, kwargs):
     with pytest.raises(SessionArchiveError):
         SessionArchiveStore(tmp_path / "assistant.db", **kwargs)
+
+
+def test_session_title_keeps_only_the_first_non_empty_line(tmp_path):
+    store = SessionArchiveStore(tmp_path / "assistant.db")
+    session_id = str(uuid4())
+    store.archive_turn(
+        str(uuid4()),
+        "\n工作目录切换到\tD:\\LD\\VoicePet\n第二行日志\n第三行日志",
+        "好的",
+        session_id,
+    )
+
+    assert store.list_sessions()[0].title == "工作目录切换到 D:\\LD\\VoicePet"
+    store.close()
+
+
+def test_multiline_title_from_older_database_is_read_back_as_one_line(tmp_path):
+    database = tmp_path / "assistant.db"
+    store = SessionArchiveStore(database)
+    session_id = str(uuid4())
+    store.archive_turn(str(uuid4()), "第一行\n第二行", "答复", session_id)
+    store.close()
+
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "UPDATE memory_sessions SET title=? WHERE id=?", ("第一行\n第二行", session_id)
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SessionArchiveStore(database)
+    assert reopened.list_sessions()[0].title == "第一行"
+    reopened.close()

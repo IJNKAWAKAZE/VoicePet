@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QJSValue
 
@@ -45,6 +45,9 @@ from .viewmodels.memories import MemoryViewModel
 from .viewmodels.pets import PetViewModel
 from .viewmodels.settings import SettingsViewModel
 from .window_coordinator import WindowCoordinator
+
+# 单条回复短于这个长度时逐条落地：每帧开销很小，保留逐字出现的观感
+_STREAM_COALESCE_AFTER = 400
 
 
 class QmlRuntimeHostProtocol(Protocol):
@@ -136,6 +139,12 @@ class QmlApplicationController(QObject):
         self._memory_reconfigure_waiting = False
         self._memory_reconfigure_generation = 0
         self._memory_reconfigure_failed = False
+        self._pending_text_deltas: list[tuple[str, str, object, str]] = []
+        self._streamed_chars: dict[str, int] = {}
+        # 流式增量按帧合并，避免每个 token 都重排整段回复
+        self._text_delta_timer = QTimer(self)
+        self._text_delta_timer.setSingleShot(True)
+        self._text_delta_timer.timeout.connect(self._flush_text_deltas)
         self._memoryReconfigureFinished.connect(self._finish_memory_reconfigure)
         self._muteFinished.connect(self._finish_mute)
         pet_interaction.listenToggleRequested.connect(self._toggle_listening)
@@ -701,8 +710,75 @@ class QmlApplicationController(QObject):
         if self._chat.processing:
             self._reset_pet_speech()
 
+    def _queue_text_delta(
+        self, session_id: str, item_id: str, turn_id: object, text: str
+    ) -> None:
+        """流式增量按帧合并：首个增量立即生效，同一窗口内其余增量攒成一次更新"""
+
+        key = session_id or ""
+        streamed = self._streamed_chars.get(key, 0) + len(text)
+        self._streamed_chars[key] = streamed
+        if streamed <= _STREAM_COALESCE_AFTER:
+            self._apply_text_delta(session_id, item_id, turn_id, text)
+            return
+        self._pending_text_deltas.append((session_id, item_id, turn_id, text))
+        if self._text_delta_timer.isActive():
+            return
+        self._flush_text_deltas()
+        self._text_delta_timer.start(self._flush_interval_ms())
+
+    @Slot()
+    def _flush_text_deltas(self) -> None:
+        pending = self._pending_text_deltas
+        if not pending:
+            return
+        self._pending_text_deltas = []
+        merged: list[tuple[str, str, object, str]] = []
+        for session_id, item_id, turn_id, text in pending:
+            head = (session_id, item_id, turn_id)
+            if merged and merged[-1][:3] == head:
+                merged[-1] = (*head, merged[-1][3] + text)
+            else:
+                merged.append((*head, text))
+        for session_id, item_id, turn_id, text in merged:
+            self._apply_text_delta(session_id, item_id, turn_id, text)
+
+    def _settle_text_deltas(self) -> None:
+        self._text_delta_timer.stop()
+        self._flush_text_deltas()
+
+    def _flush_interval_ms(self) -> int:
+        """整段重排的开销随文本变长，按长度放缓刷新，避免主线程被流式更新占满"""
+
+        longest = max(self._streamed_chars.values(), default=0)
+        if longest <= 4_000:
+            return 60
+        if longest <= 10_000:
+            return 120
+        return 240
+
+    def _apply_text_delta(
+        self, session_id: str, item_id: str, turn_id: object, text: str
+    ) -> None:
+        self._chat.append_assistant_delta(text, item_id, session_id)
+        if not self._is_foreground_session(session_id):
+            return
+        if turn_id != self._speech_turn_id:
+            self._reset_pet_speech()
+            self._speech_turn_id = turn_id
+            self._speech_item_id = item_id
+        elif item_id != self._speech_item_id:
+            # 同一轮的下一段回复另起一条气泡，不跟上一段拼在一起
+            self._speech_item_id = item_id
+            self._speech_text = ""
+        self._speech_text += text
+        self._set_pet_speech(self._speech_text)
+
     @Slot(object)
     def handle_runtime_event(self, event: object) -> None:
+        if not isinstance(event, TextDelta):
+            # 状态类事件之前先落下攒着的增量，避免文本落后于阶段切换
+            self._settle_text_deltas()
         if isinstance(event, StateChanged):
             # 并行会话的状态变化各归各的轮次，迟到事件不能收掉别人的收尾
             if self._is_stale_turn(event):
@@ -711,6 +787,7 @@ class QmlApplicationController(QObject):
             session_key = event.session_id or ""
             if event.current is ConversationPhase.IDLE:
                 self._session_phases.pop(session_key, None)
+                self._streamed_chars.pop(session_key, None)
             else:
                 self._session_phases[session_key] = event.current
             if not self._is_foreground_session(event.session_id):
@@ -770,21 +847,9 @@ class QmlApplicationController(QObject):
             self._set_pet_speech("")
             return
         if isinstance(event, TextDelta):
-            self._chat.append_assistant_delta(
-                event.text, event.item_id, event.session_id
+            self._queue_text_delta(
+                event.session_id, event.item_id, event.turn_id, event.text
             )
-            if not self._is_foreground_session(event.session_id):
-                return
-            if event.turn_id != self._speech_turn_id:
-                self._reset_pet_speech()
-                self._speech_turn_id = event.turn_id
-                self._speech_item_id = event.item_id
-            elif event.item_id != self._speech_item_id:
-                # 同一轮的下一段回复另起一条气泡，不跟上一段拼在一起
-                self._speech_item_id = event.item_id
-                self._speech_text = ""
-            self._speech_text += event.text
-            self._set_pet_speech(self._speech_text)
             return
         if isinstance(event, ApprovalRequested):
             self._set_pet_speech(f"需要确认 {event.risk}：{event.summary}")

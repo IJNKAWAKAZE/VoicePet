@@ -73,15 +73,26 @@ class SessionDataManager:
         """切换当前会话并恢复可用的最近上下文"""
 
         turns = self._archive.list_session_turns(session_id)
-        if not turns and all(
-            record.id != session_id for record in self._archive.list_sessions()
-        ):
+        if not turns and not self._session_exists(session_id):
             raise ValueError("会话不存在")
         self._context.activate(
             session_id,
             tuple((turn.user_text, turn.assistant_text) for turn in turns),
         )
         return turns
+
+    def _session_exists(self, session_id: str) -> bool:
+        """归档里还没有轮次的会话可能是刚新建或正在执行的，仍然要能切回"""
+
+        if session_id == self._context.session_id:
+            return True
+        known = getattr(self._context, "session_ids", None)
+        if callable(known) and session_id in known():
+            return True
+        return any(
+            record.id == session_id for record in self._archive.list_sessions()
+        )
+
 
     def resume_latest(self) -> tuple[SessionTurnRecord, ...]:
         """启动时恢复最近一次持久化会话"""

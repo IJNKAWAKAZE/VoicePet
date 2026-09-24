@@ -1,5 +1,6 @@
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -13,7 +14,8 @@ from core.config import UiConfig
 from core.session_archive import SessionArchiveStore
 from core.session_context import SessionContext
 from core.session_data import SessionDataManager
-from ui.viewmodels.chat import ChatViewModel
+from core.session_runtime import SessionCoordinatorPool
+from ui.viewmodels.chat import ChatViewModel, SessionListModel
 from ui.viewmodels.dialogs import DialogCoordinator
 from ui.viewmodels.theme import ThemeViewModel
 
@@ -463,3 +465,100 @@ def test_finished_session_can_be_deleted_while_another_one_runs(tmp_path, qapp):
         assert not runtime.sessions.list_turns(finished_id)
     finally:
         archive.close()
+
+
+def _stub_coordinator(session_id, context, memory_context, **kwargs):
+    """会话池只需要一个按会话取出的协调器占位对象"""
+
+    return SimpleNamespace(session_id=session_id)
+
+
+class PooledArchiveRuntime(ArchiveRuntime):
+    """按生产装配使用会话池，新建会话在归档前也存在于池里"""
+
+    def __init__(self, archive):
+        self.archive = archive
+        self.sessions = SessionDataManager(
+            archive, SessionCoordinatorPool(_stub_coordinator)
+        )
+        self.cancelled = []
+
+    def cancel_active_turn(self, session_id=""):
+        self.cancelled.append(session_id)
+        return completed(())
+
+
+def test_running_session_can_be_switched_back_before_its_turn_is_archived(tmp_path, qapp):
+    archive = SessionArchiveStore(tmp_path / "sessions.db")
+    runtime = PooledArchiveRuntime(archive)
+    chat = ChatViewModel(runtime)
+    finished_id = runtime.sessions.current_session_id
+    archive.archive_turn(str(uuid4()), "上一个问题", "上一个回答", finished_id)
+    chat.refresh_sessions()
+
+    chat.new_session()
+    running_id = chat.activeSessionId
+    assert running_id and running_id != finished_id
+    chat.submit("跑一个很长的任务")
+    assert chat.processing is True
+
+    chat.activate_session(finished_id)
+    assert chat.activeSessionId == finished_id
+    # 新会话还在执行、轮次没归档，切回去必须成立，否则既看不到也停不掉
+    chat.activate_session(running_id)
+    assert chat.activeSessionId == running_id
+    chat.stop_generation()
+    assert runtime.cancelled == [running_id]
+    assert chat.processing is False
+    archive.close()
+
+
+def test_session_title_with_line_breaks_stays_on_one_line(qapp):
+    model = SessionListModel()
+    model.reset_items(
+        [
+            {
+                "sessionId": "session-1",
+                "title": "工作目录切换到 D:\\LD\\VoicePet\n第二行日志\n第三行日志",
+                "turnCount": 2,
+                "updatedAt": "2026-09-24 14:06",
+                "updatedLabel": "今天 14:06",
+                "active": False,
+                "group": "最近",
+                "running": False,
+            }
+        ]
+    )
+    theme = ThemeViewModel(UiConfig(), lambda config: None)
+    QQuickStyle.setStyle("Basic")
+    engine = QQmlEngine()
+    component = QQmlComponent(
+        engine,
+        QUrl.fromLocalFile(str(Path("ui/qml/components/SessionList.qml").resolve())),
+    )
+    root = component.createWithInitialProperties({"theme": theme, "sessionModel": model})
+    window = QQuickWindow()
+    try:
+        assert root is not None, component.errors()
+        root.setParentItem(window.contentItem())
+        root.setWidth(208)
+        root.setHeight(240)
+        window.resize(208, 240)
+        window.show()
+        QTest.qWait(30)
+
+        title = find_item_by_name(root, "sessionTitle")
+
+        assert title is not None
+        # 标题里的换行不能变成多行，否则整张卡片会被撑破
+        assert title.property("lineCount") == 1
+        delegate = title
+        while delegate.property("running") is None:
+            delegate = delegate.parentItem()
+        assert delegate.property("height") == 66
+    finally:
+        window.close()
+        if root is not None:
+            root.deleteLater()
+        engine.deleteLater()
+        qapp.processEvents()

@@ -29,6 +29,16 @@ _MAX_ASSISTANT_ITEMS = 200
 _TRUNCATION_NOTICE = "\n\n……（回复过长，历史记录已截断）"
 
 
+def _session_title(source: object) -> str:
+    """标题只保留首行非空文本，避免多行消息把侧栏卡片撑开"""
+
+    for line in str(source or "").splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            return collapsed
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionTurnRecord:
     """一个已完成且带自动过期时间的会话轮次"""
@@ -174,7 +184,12 @@ class SessionArchiveStore:
                             "INSERT INTO memory_sessions"
                             "(id,title,created_at,updated_at,generation,deleted) "
                             "VALUES (?,?,?,?,0,0)",
-                            (normalized_session_id, user[:500], timestamp, timestamp),
+                            (
+                                normalized_session_id,
+                                _session_title(user)[:500],
+                                timestamp,
+                                timestamp,
+                            ),
                         )
                     else:
                         self._connection.execute(
@@ -471,7 +486,7 @@ class SessionArchiveStore:
                 records.append(
                     SessionRecord(
                         row["id"],
-                        row["title"],
+                        _session_title(row["title"]),
                         int(turn_count),
                         datetime.fromisoformat(row["created_at"]),
                         datetime.fromisoformat(row["updated_at"]),
@@ -1166,7 +1181,7 @@ class SessionArchiveStore:
             "SELECT title,deleted FROM memory_sessions WHERE id=?", (row["session_id"],)
         ).fetchone()
         source_title = (
-            session["title"]
+            _session_title(session["title"])
             if session is not None and not bool(session["deleted"])
             else ""
         )

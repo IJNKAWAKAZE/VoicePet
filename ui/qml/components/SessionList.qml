@@ -41,6 +41,7 @@ ListView {
                 width: parent.width
                 Text {
                     // 运行标识和标题同行，给下面的时间留出完整宽度
+                    objectName: "sessionTitle"
                     width: Math.max(0, parent.width - (sessionRow.running
                         ? runningRowLabel.implicitWidth + 18 : 0))
                     text: title
@@ -48,6 +49,8 @@ ListView {
                     font.pixelSize: 13
                     font.family: "Microsoft YaHei UI"
                     elide: Text.ElideRight
+                    // 标题里出现换行时也只占一行，卡片高度不会被撑开
+                    maximumLineCount: 1
                 }
                 Rectangle {
                     objectName: "sessionRunningDot"

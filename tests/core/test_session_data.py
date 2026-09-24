@@ -1,11 +1,15 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
 
 from core.agent_store import AgentStore
 from core.codex_session_files import CodexSessionFiles
 from core.session_archive import SessionArchiveStore
 from core.session_context import SessionContext
 from core.session_data import SessionDataManager
+from core.session_runtime import SessionCoordinatorPool
 
 
 def test_session_data_lists_latest_first_and_clears_live_context(tmp_path):
@@ -112,4 +116,29 @@ def test_delete_session_removes_bound_codex_rollout(tmp_path):
     assert manager.delete(session_id) is True
     assert not rollout.exists()
     assert agent_store.binding(session_id) is None
+    archive.close()
+
+
+def _stub_coordinator(session_id, context, memory_context, **kwargs):
+    """会话池只需要一个按会话取出的协调器占位对象"""
+
+    return SimpleNamespace(session_id=session_id)
+
+
+def test_activate_accepts_a_running_session_that_is_not_archived_yet(tmp_path):
+    archive = SessionArchiveStore(tmp_path / "assistant.db")
+    pool = SessionCoordinatorPool(_stub_coordinator)
+    manager = SessionDataManager(archive, pool)
+    finished_id = pool.session_id
+    archive.archive_turn(str(uuid4()), "已经完成的问题", "已经完成的回答", finished_id)
+
+    running_id = manager.new()
+
+    assert manager.activate(finished_id)[0].user_text == "已经完成的问题"
+    # 新会话还在执行、轮次没有归档，但切回去必须成立
+    assert manager.activate(running_id) == ()
+    assert pool.session_id == running_id
+    # 真正不存在的会话仍然要被拒绝
+    with pytest.raises(ValueError):
+        manager.activate(str(uuid4()))
     archive.close()
